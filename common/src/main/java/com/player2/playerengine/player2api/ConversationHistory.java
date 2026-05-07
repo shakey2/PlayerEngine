@@ -20,6 +20,22 @@ public class ConversationHistory {
    private static final int MAX_HISTORY = 64;
    private static final int SUMMARY_COUNT = 48;
 
+   public ConversationHistory(String initialSystemPrompt, Path historyFile) {
+      this.historyFile = historyFile;
+      if (this.historyFile != null && Files.exists(this.historyFile)) {
+         this.loadFromFile();
+         this.setBaseSystemPrompt(initialSystemPrompt);
+         this.loadedFromFile = true;
+      } else {
+         this.setBaseSystemPrompt(initialSystemPrompt);
+         this.loadedFromFile = false;
+      }
+   }
+
+   /**
+    * Legacy ctor (config-dir + name keyed). Kept for backward compatibility.
+    * New code should prefer the {@link #ConversationHistory(String, Path)} constructor.
+    */
    public ConversationHistory(String initialSystemPrompt, String characterName, String characterShortName) {
       Path configDir = DirUtil.getConfigDir();
       String fileName = characterName.replaceAll("\\s+", "_") + "_" + characterName.replaceAll("\\s+", "_") + ".txt";
@@ -93,6 +109,9 @@ public class ConversationHistory {
 
    private void saveToFile() {
       try {
+         if (this.historyFile != null && this.historyFile.getParent() != null) {
+            Files.createDirectories(this.historyFile.getParent());
+         }
          BufferedWriter writer = Files.newBufferedWriter(this.historyFile);
 
          try {
@@ -263,5 +282,31 @@ public class ConversationHistory {
             var2.printStackTrace();
          }
       }
+   }
+
+   public void saveNow() {
+      if (this.historyFile == null) return;
+      this.saveToFile();
+   }
+
+   /**
+    * Reloads history from disk (if present). Note: callers should typically re-apply the latest
+    * system prompt after reload via {@link #setBaseSystemPrompt(String)}.
+    */
+   public void reloadNow() {
+      if (this.historyFile == null) {
+         this.loadedFromFile = false;
+         return;
+      }
+      if (Files.exists(this.historyFile)) {
+         this.loadFromFile();
+         this.loadedFromFile = true;
+      } else {
+         this.loadedFromFile = false;
+      }
+   }
+
+   public Path getHistoryFile() {
+      return this.historyFile;
    }
 }
