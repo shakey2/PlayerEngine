@@ -22,6 +22,11 @@ public class Player2HTTPUtils {
 
     private static final String WEB_API_URL = "https://api.player2.game";
 
+    /** Returns the best base URL: local app if running, otherwise the web API. */
+    private static String getApiUrl() {
+        return LocalAPIDiscovery.getPreferredApiUrl(WEB_API_URL);
+    }
+
     private static final Set<AuthKey> energyRetryAttempted = ConcurrentHashMap.newKeySet();
 
     public static Map<String, JsonElement> sendRequest(Player player, String clientId, String endpoint, boolean postRequest, JsonObject requestBody) throws Exception{
@@ -33,7 +38,7 @@ public class Player2HTTPUtils {
         Map<String, String> headers = getHeaders(clientId, token);
 
         try {
-            return HTTPUtils.sendRequest(WEB_API_URL, endpoint, method, requestBody, headers);
+            return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers);
 
         } catch (HttpApiException e) {
             AuthKey authKey = new AuthKey(player.getUUID(), clientId);
@@ -58,7 +63,7 @@ public class Player2HTTPUtils {
                 if (!oldToken.equals(newToken)) {
                     LOGGER.info("Token changed after reauth for {}, retrying request.", authKey);
                     Map<String, String> newHeaders = getHeaders(clientId, newToken);
-                    return HTTPUtils.sendRequest(WEB_API_URL, endpoint, method, requestBody, newHeaders);
+                    return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, newHeaders);
                 }
                 LOGGER.warn("User {} is out of AI credits (same account after reauth)", player.getName().getString());
                 if (player instanceof ServerPlayer serverPlayer) {

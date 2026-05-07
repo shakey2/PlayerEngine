@@ -64,8 +64,11 @@ public class STTUtils {
     // HTTP client shared
     private static final HttpClient HTTP = HttpClient.newHttpClient();
 
-    // API base — change to actual host
-    private static final String API_BASE = "https://api.player2.game/v1/stt/audio";
+    // API base — prefer local Player2 app when running, fall back to web API
+    private static final String WEB_API_URL = "https://api.player2.game";
+    private static String getApiBase() {
+        return LocalAPIDiscovery.getPreferredApiUrl(WEB_API_URL) + "/v1/stt/audio";
+    }
 
     public static void update() {
     }
@@ -273,7 +276,7 @@ public class STTUtils {
      */
     private static Optional<String> doHttpPost(byte[] wavBytes, String token) {
         try {
-            String uri = API_BASE + "?encoding=linear16&sample_rate=16000";
+            String uri = getApiBase() + "?encoding=linear16&sample_rate=16000";
             HttpRequest.Builder b = HttpRequest.newBuilder()
                     .uri(URI.create(uri))
                     .timeout(Duration.ofSeconds(30))
