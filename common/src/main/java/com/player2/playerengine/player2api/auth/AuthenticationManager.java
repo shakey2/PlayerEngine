@@ -3,6 +3,7 @@ package com.player2.playerengine.player2api.auth;
 import com.google.gson.JsonObject;
 import com.player2.playerengine.player2api.utils.HTTPUtils;
 import com.player2.playerengine.player2api.utils.HttpApiException;
+import com.player2.playerengine.player2api.utils.LocalAPIDiscovery;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
@@ -16,7 +17,12 @@ import java.util.concurrent.*;
 public class AuthenticationManager {
     private static final Logger LOGGER = LogManager.getLogger();
     private static final String WEB_API_URL = "https://api.player2.game";
-    private static final String LOCAL_API_URL = "http://127.0.0.1:4315";
+
+    /** Resolves the local API URL dynamically from the api.port file. Falls back to web API if the app is not running. */
+    private static String getLocalApiUrl() {
+        String local = LocalAPIDiscovery.getLocalApiUrl();
+        return local != null ? local : WEB_API_URL;
+    }
 
     private static final AuthenticationManager INSTANCE = new AuthenticationManager();
 
@@ -52,7 +58,7 @@ public class AuthenticationManager {
         String username = player.getName().getString();
         try {
             LOGGER.info("Attempting local login check for {}", authKey);
-            Map<String, com.google.gson.JsonElement> response = HTTPUtils.sendRequest(LOCAL_API_URL, "/v1/login/web/" + clientId, true, new JsonObject(), null);
+            Map<String, com.google.gson.JsonElement> response = HTTPUtils.sendRequest(getLocalApiUrl(), "/v1/login/web/" + clientId, true, new JsonObject(), null);
             String p2Key = response.get("p2Key").getAsString();
             if (p2Key != null) {
                 LOGGER.info("Detected relogin for {}", authKey);
@@ -90,7 +96,7 @@ public class AuthenticationManager {
             try {
                 try {
                     LOGGER.info("Attempting local login for {}", authKey);
-                    Map<String, com.google.gson.JsonElement> response = HTTPUtils.sendRequest(LOCAL_API_URL, "/v1/login/web/" + clientId, true, new JsonObject(), null);
+                    Map<String, com.google.gson.JsonElement> response = HTTPUtils.sendRequest(getLocalApiUrl(), "/v1/login/web/" + clientId, true, new JsonObject(), null);
                     String p2Key = response.get("p2Key").getAsString();
                     if (p2Key != null) {
                         LOGGER.info("Local login successful for {}", authKey);
