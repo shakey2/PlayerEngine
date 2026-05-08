@@ -1,8 +1,9 @@
 package com.player2.playerengine.player2api.status;
 
+import com.google.gson.JsonObject;
+
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Map.Entry;
 
 public class ObjectStatus {
    protected final Map<String, String> fields = new HashMap<>();
@@ -14,13 +15,12 @@ public class ObjectStatus {
 
    @Override
    public String toString() {
-      StringBuilder sb = new StringBuilder("{\n");
+      JsonObject object = new JsonObject();
 
-      for (Entry<String, String> entry : this.fields.entrySet()) {
-         sb.append(entry.getKey()).append(" : \"").append(entry.getValue()).append("\",\n");
+      for (Map.Entry<String, String> entry : this.fields.entrySet()) {
+         object.addProperty(entry.getKey(), entry.getValue());
       }
 
-      sb.append("}");
-      return sb.toString();
+      return object.toString();
    }
 }

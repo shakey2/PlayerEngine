@@ -4,6 +4,7 @@ import com.google.common.base.Suppliers;
 import com.player2.playerengine.automaton.KeepName;
 import com.player2.playerengine.automaton.command.defaults.DefaultCommands;
 import com.player2.playerengine.automaton.entity.CustomFishingBobberEntity;
+import com.player2.playerengine.player2api.ClientChatCompletionBridge;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -37,6 +38,8 @@ public final class PlayerEngine {
 
    public static final String MOD_ID = "playerengine";
    public static final String MOD_NAME = "PlayerEngine";
+   public static final ResourceLocation CLIENT_CHAT_COMPLETION_REQUEST_PACKET_ID = id("client_chat_completion_request");
+   public static final ResourceLocation CLIENT_CHAT_COMPLETION_RESPONSE_PACKET_ID = id("client_chat_completion_response");
 
 
    public static final TagKey<Item> EMPTY_BUCKETS = TagKey.create(Registries.ITEM, id("empty_buckets"));
@@ -65,6 +68,9 @@ public final class PlayerEngine {
       DefaultCommands.registerAll();
       ENTITY_TYPES.register();
       MCCommands.onInit();
+      NetworkManager.registerReceiver(NetworkManager.Side.C2S,
+            CLIENT_CHAT_COMPLETION_RESPONSE_PACKET_ID,
+            (buf, context) -> ClientChatCompletionBridge.handleClientResponse(buf, (ServerPlayer) context.getPlayer()));
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
             new ResourceLocation("playerengine", "user_message"),
             (buf, context) -> {

@@ -163,6 +163,7 @@ public class PlayerEngineController {
    }
 
    public static void staticServerTick(MinecraftServer server) {
+      com.player2.playerengine.util.time.TimerGame.incrementServerTick();
       ConversationManager.injectOnTick(server);
    }
 
