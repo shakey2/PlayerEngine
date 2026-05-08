@@ -2,19 +2,26 @@ package com.player2.playerengine.util.time;
 
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.util.Debug;
-import com.player2.playerengine.mixins.ClientConnectionAccessor;
-import net.minecraft.client.Minecraft;
-import net.minecraft.network.Connection;
 
+/**
+ * A game-time timer that works on both client and dedicated server.
+ * Uses a shared tick counter incremented from the server tick loop,
+ * avoiding any reference to client-only classes like Minecraft.
+ */
 public class TimerGame extends BaseTimer {
-   private Connection lastConnection;
+   // Shared tick counter, incremented once per server tick.
+   private static volatile int serverTicks = 0;
 
    public TimerGame(double intervalSeconds) {
       super(intervalSeconds);
    }
 
-   private static double getTime(Connection connection) {
-      return connection == null ? 0.0 : ((ClientConnectionAccessor)connection).getTicks() / 20.0;
+   /**
+    * Called once per server tick to advance the shared clock.
+    * Hooked from PlayerEngineController or a TickEvent.
+    */
+   public static void incrementServerTick() {
+      serverTicks++;
    }
 
    @Override
@@ -22,23 +29,8 @@ public class TimerGame extends BaseTimer {
       if (!PlayerEngineController.inGame()) {
          Debug.logError("Running game timer while not in game.");
          return 0.0;
-      } else {
-         Connection currentConnection = null;
-         if (Minecraft.getInstance().getConnection() != null) {
-            currentConnection = Minecraft.getInstance().getConnection().getConnection();
-         }
-
-         if (currentConnection != this.lastConnection) {
-            if (this.lastConnection != null) {
-               double prevTimeTotal = getTime(this.lastConnection);
-               Debug.logInternal("(TimerGame: New connection detected, offsetting by " + prevTimeTotal + " seconds)");
-               this.setPrevTimeForce(this.getPrevTime() - prevTimeTotal);
-            }
-
-            this.lastConnection = currentConnection;
-         }
-
-         return getTime(currentConnection);
       }
+      // Convert ticks to seconds (20 ticks/sec)
+      return serverTicks / 20.0;
    }
 }

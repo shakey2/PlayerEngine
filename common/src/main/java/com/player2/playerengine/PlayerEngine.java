@@ -5,6 +5,7 @@ import com.google.common.base.Suppliers;
 import com.player2.playerengine.automaton.KeepName;
 import com.player2.playerengine.automaton.command.defaults.DefaultCommands;
 import com.player2.playerengine.automaton.entity.CustomFishingBobberEntity;
+import com.player2.playerengine.player2api.ClientChatCompletionBridge;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -37,6 +38,10 @@ public final class PlayerEngine {
 
    public static final String MOD_ID = "playerengine";
    public static final String MOD_NAME = "PlayerEngine";
+   public static final ResourceLocation CLIENT_CHAT_COMPLETION_REQUEST_PACKET_ID = ResourceLocation
+         .fromNamespaceAndPath(MOD_ID, "client_chat_completion_request");
+   public static final ResourceLocation CLIENT_CHAT_COMPLETION_RESPONSE_PACKET_ID = ResourceLocation
+         .fromNamespaceAndPath(MOD_ID, "client_chat_completion_response");
    public static final TagKey<Item> EMPTY_BUCKETS = TagKey.create(Registries.ITEM, id("empty_buckets"));
    public static final TagKey<Item> WATER_BUCKETS = TagKey.create(Registries.ITEM, id("water_buckets"));
    private static final ThreadPoolExecutor threadPool;
@@ -67,6 +72,16 @@ public final class PlayerEngine {
       DefaultCommands.registerAll();
       ENTITY_TYPES.register();
       MCCommands.onInit();
+      if (dev.architectury.platform.Platform.getEnvironment() == dev.architectury.utils.Env.SERVER) {
+         NetworkManager.registerS2CPayloadType(ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"));
+         NetworkManager.registerS2CPayloadType(ResourceLocation.fromNamespaceAndPath("playerengine", "response_stt"));
+         NetworkManager.registerS2CPayloadType(CLIENT_CHAT_COMPLETION_REQUEST_PACKET_ID);
+      }
+      NetworkManager.registerReceiver(NetworkManager.Side.C2S,
+            CLIENT_CHAT_COMPLETION_RESPONSE_PACKET_ID,
+            (buf, context) -> {
+               ClientChatCompletionBridge.handleClientResponse(buf, (ServerPlayer) context.getPlayer());
+            });
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
             ResourceLocation.fromNamespaceAndPath("playerengine", "user_message"),
             (buf, context) -> {

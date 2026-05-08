@@ -54,8 +54,7 @@ public class Player2APIService {
 
       requestBody.add("messages", messagesArray);
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
-      Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(controller.getOwner(), clientId,
-            "/v1/chat/completions", true, requestBody);
+      Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody);
       if (responseMap.containsKey("choices")) {
          JsonArray choices = responseMap.get("choices").getAsJsonArray();
          if (choices.size() != 0) {
@@ -83,8 +82,7 @@ public class Player2APIService {
       String lastMessageForDebug = conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1)
             .toString();
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
-      Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(controller.getOwner(), clientId,
-            "/v1/chat/completions", true, requestBody);
+      Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody);
       if (responseMap.containsKey("choices")) {
          JsonArray choices = responseMap.get("choices").getAsJsonArray();
          if (choices.size() != 0) {
@@ -99,24 +97,44 @@ public class Player2APIService {
       throw new Exception("Invalid response format: " + responseMap.toString());
    }
 
+   private Map<String, JsonElement> sendChatCompletionRequest(JsonObject requestBody) throws Exception {
+      if (controller.getOwner() instanceof ServerPlayer ownerPlayer) {
+         JsonObject response = ClientChatCompletionBridge.completeViaClient(ownerPlayer, clientId, requestBody);
+         return ClientChatCompletionBridge.toResponseMap(response);
+      }
+
+      return Player2HTTPUtils.sendRequest(controller.getOwner(), clientId,
+            "/v1/chat/completions", true, requestBody);
+   }
+
    public void textToSpeech(String message, Character character, Consumer<Map<String, JsonElement>> onFinish) {
       try {
-         RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(),
-               controller.getOwner().registryAccess());
+         ServerPlayer owner = (ServerPlayer) controller.getOwner();
+         MinecraftServer server = owner.getServer();
+         if (server == null) return;
 
-         buf.writeUtf(clientId);
-         buf.writeUtf(Player2HTTPUtils.awaitToken(controller.getOwner(), clientId));
-         buf.writeUtf(message);
-         buf.writeDouble(1);
-         buf.writeVarInt(character.voiceIds().length);
-         for (String id : character.voiceIds()) {
-            buf.writeUtf(id);
+         double TTS_RANGE = 64.0;
+
+         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.level() == owner.level() && player.distanceTo(owner) <= TTS_RANGE) {
+               RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(),
+                     player.registryAccess());
+               buf.writeUtf(clientId);
+               buf.writeUtf("");
+               buf.writeUtf(message);
+               buf.writeDouble(1);
+               buf.writeVarInt(character.voiceIds().length);
+               for (String id : character.voiceIds()) {
+                  buf.writeUtf(id);
+               }
+
+               player.connection.send(NetworkManager.toPacket(NetworkManager.Side.S2C,
+                     ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"), buf));
+            }
          }
-
-         ((ServerPlayer) controller.getOwner()).connection.send(NetworkManager.toPacket(NetworkManager.Side.S2C,
-               ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"), buf));
          onFinish.accept(null);
       } catch (Exception var9) {
+         LOGGER.error("Error broadcasting TTS", var9);
       }
    }
 
@@ -170,19 +188,23 @@ public class Player2APIService {
 
    public void trySendHeartbeat() {
       if (HeartbeatManager.shouldHeartbeat(controller.getOwnerUsername(), clientId)) {
-         sendHeartbeat();
+         if (!com.player2.playerengine.player2api.auth.TokenStorage.getToken(controller.getOwnerUsername(), clientId).isEmpty()) {
+            sendHeartbeat();
+         }
          HeartbeatManager.storeHeartbeatTime(controller.getOwnerUsername(), clientId);
       }
    }
 
    public void sendHeartbeat() {
-      try {
-         System.out.println("Sending Heartbeat " + clientId);
-         Player2HTTPUtils.sendRequest(controller.getOwner(), clientId, "/v1/health", false, null);
-         System.out.println("Heartbeat Successful");
-      } catch (Exception var2) {
-         System.err.printf("Heartbeat Fail: %s", var2.getMessage());
-      }
+      com.player2.playerengine.player2api.auth.AuthenticationManager.getExecutor().submit(() -> {
+         try {
+            System.out.println("Sending Heartbeat " + clientId);
+            Player2HTTPUtils.sendRequest(controller.getOwner(), clientId, "/v1/health", false, null);
+            System.out.println("Heartbeat Successful");
+         } catch (Exception var2) {
+            System.err.printf("Heartbeat Fail: %s\n", var2.getMessage());
+         }
+      });
    }
 
    /**

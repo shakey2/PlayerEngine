@@ -2,7 +2,6 @@ package com.player2.playerengine.mixins;
 
 import com.player2.playerengine.eventbus.EventBus;
 import com.player2.playerengine.eventbus.events.PlayerCollidedWithEntityEvent;
-import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
@@ -19,7 +18,7 @@ public class PlayerCollidesWithEntityMixin {
       )
    )
    private void onCollideWithEntity(Entity self, Player player) {
-      if (player instanceof LocalPlayer) {
+      if (player.level().isClientSide()) {
          EventBus.publish(new PlayerCollidedWithEntityEvent(player, self));
       }
 

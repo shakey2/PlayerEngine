@@ -29,6 +29,7 @@ import net.minecraft.core.NonNullList;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.tags.TagKey;
@@ -372,22 +373,19 @@ public class LivingEntityInventory implements Container, Nameable {
       if(stack.isEmpty()){
          return;
       }
-      LOGGER.info("Writing itemTag={}");
-      CompoundTag itemTag = new CompoundTag();
-      stack.save(levelRegistryAccess, itemTag);
+      Tag savedTag = stack.save(levelRegistryAccess, new CompoundTag());
 
-      if (!itemTag.contains("id")) {
-         ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
-         if (key != null) {
-            itemTag.putString("id", key.toString());
-            itemTag.putByte("Count", (byte) stack.getCount());
-         } else{
-            LOGGER.info("ERR writing item: key={}, itemTag={} ", key, itemTag);
-         }
+      if (savedTag instanceof CompoundTag itemTag) {
+          if (!itemTag.contains("id")) {
+             ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
+             if (key != null) {
+                itemTag.putString("id", key.toString());
+                itemTag.putInt("count", stack.getCount());
+             }
+          }
+          itemTag.putByte("Slot", (byte)index);
+          nbtList.add(itemTag);
       }
-      itemTag.putByte("Slot", (byte)index);
-      nbtList.add(itemTag);
-      LOGGER.info("Done writing itemTag={}");
    }
 
    public ListTag writeNbt(HolderLookup.Provider levelRegistryAccess, ListTag nbtList) {
