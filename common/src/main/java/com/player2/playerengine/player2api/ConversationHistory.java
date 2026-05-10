@@ -10,8 +10,13 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public class ConversationHistory {
    private final List<JsonObject> conversationHistory = new ArrayList<>();
@@ -219,6 +224,78 @@ public class ConversationHistory {
 
    public List<JsonObject> getListJSON() {
       return this.conversationHistory;
+   }
+
+   /**
+    * Most recent assistant message body, scanning from the end of history.
+    */
+   public Optional<String> getLastAssistantContent() {
+      for (int i = this.conversationHistory.size() - 1; i >= 0; i--) {
+         JsonObject m = this.conversationHistory.get(i);
+         if (!m.has("role") || !"assistant".equals(m.get("role").getAsString())) {
+            continue;
+         }
+         if (!m.has("content")) {
+            return Optional.of("");
+         }
+         return Optional.of(m.get("content").getAsString());
+      }
+      return Optional.empty();
+   }
+
+   private static String normalizeAssistantTextForComparison(String s) {
+      if (s == null) {
+         return "";
+      }
+      String n = s.toLowerCase(Locale.ROOT)
+            .replace('\u2011', '-')
+            .replace('\u2013', '-')
+            .replace('\u2014', '-')
+            .replaceAll("\\s+", " ")
+            .trim();
+      return n;
+   }
+
+   private static Set<String> significantTokens(String normalizedLowercase) {
+      String stripped = normalizedLowercase.replace('\'', ' ').replaceAll("[^a-z0-9\\s]", " ");
+      return Arrays.stream(stripped.split("\\s+"))
+            .filter(w -> w.length() > 2)
+            .collect(Collectors.toCollection(HashSet::new));
+   }
+
+   private static double tokenJaccard(String a, String b) {
+      Set<String> sa = significantTokens(normalizeAssistantTextForComparison(a));
+      Set<String> sb = significantTokens(normalizeAssistantTextForComparison(b));
+      if (sa.size() < 4 || sb.size() < 4) {
+         return 0.0;
+      }
+      int inter = 0;
+      for (String w : sa) {
+         if (sb.contains(w)) {
+            inter++;
+         }
+      }
+      int union = sa.size() + sb.size() - inter;
+      return union == 0 ? 0.0 : (double) inter / union;
+   }
+
+   /**
+    * Command-feedback (Info) turns often make the model repeat the previous assistant reply.
+    * When that happens, drop the duplicate wording for history and chat; commands still run.
+    */
+   public static boolean isRedundantAssistantAfterInfo(String previousAssistant, String newAssistant) {
+      String p = normalizeAssistantTextForComparison(previousAssistant);
+      String n = normalizeAssistantTextForComparison(newAssistant);
+      if (p.isEmpty() || n.isEmpty()) {
+         return false;
+      }
+      if (p.equals(n)) {
+         return true;
+      }
+      if (p.contains(n) || n.contains(p)) {
+         return true;
+      }
+      return tokenJaccard(previousAssistant, newAssistant) >= 0.45;
    }
 
    // ReminderString adds a reminder to the latest user message if present.

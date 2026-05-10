@@ -6,6 +6,7 @@ import java.util.Optional;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.vehicle.Boat;
 import net.minecraft.world.phys.Vec3;
 
 public class FollowPlayerTask extends Task {
@@ -40,9 +41,26 @@ public class FollowPlayerTask extends Task {
             return null;
          } else {
             Optional<Player> player = mod.getEntityTracker().getPlayerEntity(this.playerName);
-            return (Task)(player.isEmpty()
-               ? new GetToBlockTask(new BlockPos((int)target.x, (int)target.y, (int)target.z), false)
-               : new GetToEntityTask((Entity)player.get(), this.followDistance));
+            if (player.isEmpty()) {
+               // If we're currently on a boat but lost track of the owner, don't auto-dismount.
+               return new GetToBlockTask(new BlockPos((int)target.x, (int)target.y, (int)target.z), false);
+            }
+
+            Player targetPlayer = (Player)player.get();
+            Entity ownerVehicle = targetPlayer.getVehicle();
+            Entity myVehicle = mod.getPlayer().getVehicle();
+
+            // If we're on a boat but the owner isn't (or is on a different vehicle), leave the boat.
+            if (myVehicle instanceof Boat && myVehicle != ownerVehicle) {
+               mod.getPlayer().stopRiding();
+            }
+
+            // If owner is on a boat and there's a seat, try to join.
+            if (ownerVehicle instanceof Boat && myVehicle != ownerVehicle) {
+               return new EnterBoatWithOwnerTask(targetPlayer, this.followDistance);
+            }
+
+            return new GetToEntityTask((Entity)targetPlayer, this.followDistance);
          }
       }
    }
