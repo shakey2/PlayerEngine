@@ -68,6 +68,11 @@ public class AIPersistantData {
     public void addAssistantMessage(String llmMessage, Player2APIService player2apiService){
         this.conversationHistory.addAssistantMessage(llmMessage, player2apiService);
     }
+
+    public Optional<String> getLastAssistantContent() {
+        return this.conversationHistory.getLastAssistantContent();
+    }
+
     public Character getCharacter(){
         return this.character;
     }

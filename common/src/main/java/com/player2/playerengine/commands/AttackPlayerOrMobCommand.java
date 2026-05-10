@@ -18,6 +18,7 @@ import java.util.Set;
 import java.util.function.Predicate;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.vehicle.Boat;
 
 public class AttackPlayerOrMobCommand extends Command {
    public AttackPlayerOrMobCommand() throws CommandException {
@@ -31,6 +32,9 @@ public class AttackPlayerOrMobCommand extends Command {
 
    @Override
    protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
+      if (mod.getPlayer().getVehicle() instanceof Boat) {
+         throw new CommandException("Cannot attack while riding a boat. Run `leaveboat` then retry.");
+      }
       String nameToAttack = parser.get(String.class);
       int countToAttack = parser.get(Integer.class);
       mod.runUserTask(new AttackPlayerOrMobCommand.AttackAndGetDropsTask(nameToAttack, countToAttack), () -> this.finish());

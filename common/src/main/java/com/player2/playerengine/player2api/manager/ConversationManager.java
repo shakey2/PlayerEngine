@@ -105,7 +105,14 @@ public class ConversationManager {
 
     private static void process(Consumer<Event.CharacterMessage> onCharacterEvent, BiConsumer<String, ServerPlayer> onErrEvent) {
         Optional<AgentConversationData> dataToProcess = queueData.values().stream().filter(data -> {
-            return data.getPriority() != 0 && data.getEntity() != null && data.getMod().getOwner() != null;
+            // IMPORTANT: do not process prompts for despawned/removed entities.
+            // We require the backing entity to still be alive and not removed; otherwise stale queueData can
+            // keep calling the LLM after a companion is dismissed/despawned.
+            return data.getPriority() != 0
+                    && data.getEntity() != null
+                    && data.getEntity().isAlive()
+                    && !data.getEntity().isRemoved()
+                    && data.getMod().getOwner() != null;
         }).max(Comparator.comparingLong(AgentConversationData::getPriority));
         llmCompleters.stream().filter(LLMCompleter::isAvailible).forEach(completer -> {
             dataToProcess.ifPresent(data -> {

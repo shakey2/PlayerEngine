@@ -102,10 +102,21 @@ public class AgentConversationData {
             String command = this.isGreetingResponse ? "bodylang greeting"
                     : Utils.getStringJsonSafely(jsonResp, "command");
             this.isGreetingResponse = false;
+            String previousAssistant = mod.getAIPersistantData().getLastAssistantContent().orElse("");
+            boolean redundantAfterInfo = lastEvent instanceof Event.InfoMessage
+                    && ConversationHistory.isRedundantAssistantAfterInfo(previousAssistant, llmMessage);
+            if (redundantAfterInfo) {
+                LOGGER.info(
+                        "[AICommandBridge/processCharWithAPI]: Suppressing duplicate assistant chat after Info (command feedback) round");
+                llmMessage = "";
+            }
+            if (llmMessage == null) {
+                llmMessage = "";
+            }
             LOGGER.info("[AICommandBridge/processCharWithAPI]: Processed LLM repsonse: message={} command={}",
                     llmMessage, command);
             try {
-                if (llmMessage != null || command != null) {
+                if (!llmMessage.isEmpty() || command != null) {
                     mod.getAIPersistantData().addAssistantMessage(llmMessage, mod.getPlayer2APIService());
                     onCharacterEvent.accept(new Event.CharacterMessage(llmMessage, command, this));
                 } else {

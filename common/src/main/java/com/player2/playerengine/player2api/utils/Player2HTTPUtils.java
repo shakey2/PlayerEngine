@@ -47,11 +47,9 @@ public class Player2HTTPUtils {
                 LOGGER.warn("Received 401 Unauthorized for {}. Invalidating token.", authKey);
                 AuthenticationManager.getInstance().invalidateToken(player, clientId);
                 throw new Exception("Token expired, re-authentication started.", e);
-            }else if (e.getStatusCode() == 402) {
-                LOGGER.warn("Insufficient AI power for user {}", player.getName().getString());
-                throw new Exception("Insufficient AI Power. Go to player2.game to get more AI Power.");
             }
 
+            // Handle HTTP 402 "insufficient_credits" (out of energy) - reauth and check if account changed
             if (e.getStatusCode() == 402 && !energyRetryAttempted.contains(authKey)) {
                 LOGGER.warn("Received 402 insufficient credits for {}. Attempting reauth.", authKey);
                 energyRetryAttempted.add(authKey);

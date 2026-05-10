@@ -24,6 +24,7 @@ public class PlayerEngineCommands {
                   new ResetMemoryCommand(),
                   new GamerCommand(),
                   new FollowCommand(),
+                  new LeaveBoatCommand(),
                   new GiveCommand(),
                   new ScanCommand(),
                   new AttackPlayerOrMobCommand(),
