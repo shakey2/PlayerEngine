@@ -30,8 +30,9 @@ public final class Player2ServerConfigHolder {
                 Player2ServerRuntimeConfig.class);
         validateAndFix(next);
         cached = next;
-        LOGGER.info("Player2 server config: payerMode={} dedicated={} ownerOfflineContinue={}",
-                cached.getPayerMode(), cached.isDedicatedClientProxy(), cached.isOwnerOfflineServerContinuation());
+        LOGGER.info("Player2 server config: payerMode={} dedicated={} ownerOfflineContinue={} callByNameChat={}",
+                cached.getPayerMode(), cached.isDedicatedClientProxy(), cached.isOwnerOfflineServerContinuation(),
+                cached.isCallByNameChat());
     }
 
     public static void save() {

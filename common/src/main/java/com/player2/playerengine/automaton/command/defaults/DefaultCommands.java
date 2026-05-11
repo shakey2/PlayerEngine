@@ -249,6 +249,19 @@ public final class DefaultCommands {
                      syncPlayer2ConfigToAllPlayers(ctx.getSource());
                      ctx.getSource().sendSuccess(() -> Component.literal("Server ownerOfflineServerContinuation=" + v + " (server config saved)."), false);
                      return 1;
+                  })))
+            .then(Commands.literal("call_by_name")
+                  .then(Commands.argument("value", BoolArgumentType.bool()).executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) {
+                        return 0;
+                     }
+                     boolean v = BoolArgumentType.getBool(ctx, "value");
+                     var c = Player2ServerConfigHolder.get();
+                     c.setCallByNameChat(v);
+                     Player2ServerConfigHolder.validateAndFix(c);
+                     Player2ServerConfigHolder.save();
+                     ctx.getSource().sendSuccess(() -> Component.literal("Server callByNameChat=" + v + " (server config saved)."), false);
+                     return 1;
                   }))));
       root.then(Commands.argument("command", StringArgumentType.greedyString())
             .executes(command -> {
@@ -347,7 +360,7 @@ public final class DefaultCommands {
    private static void sendConsoleBaritoneFallbackHelp(CommandSourceStack source) {
       source.sendSuccess(() -> Component.literal("=== PlayerEngine (no in-world Automaton) ==="), false);
       source.sendSuccess(() -> Component.literal(
-            "Server admin: /playerengine player2 reload | payer prompter|owner | dedicated <true|false> | owner_offline_continue <true|false>"), false);
+            "Server admin: /playerengine player2 reload | payer prompter|owner | dedicated <true|false> | owner_offline_continue <true|false> | call_by_name <true|false>"), false);
       source.sendSuccess(() -> Component.literal("In-game (as a player): /playerengine help — or load an Automaton for full console Baritone routing."), false);
    }
 

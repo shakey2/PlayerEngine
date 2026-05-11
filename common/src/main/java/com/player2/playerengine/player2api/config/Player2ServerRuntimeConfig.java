@@ -7,6 +7,8 @@ public class Player2ServerRuntimeConfig {
     private Player2PayerMode payerMode = Player2PayerMode.PROMPTER_PAYS;
     private boolean dedicatedClientProxy = false;
     private boolean ownerOfflineServerContinuation = false;
+    /** When true, automatons only receive chat that opens with their character name or short name. */
+    private boolean callByNameChat = true;
     /** Client id used for optional client-side heartbeat when enabled (e.g. NPC game id). */
     private String heartbeatClientId = "player2-ai-npc-minecraft";
 
@@ -32,6 +34,14 @@ public class Player2ServerRuntimeConfig {
 
     public void setOwnerOfflineServerContinuation(boolean ownerOfflineServerContinuation) {
         this.ownerOfflineServerContinuation = ownerOfflineServerContinuation;
+    }
+
+    public boolean isCallByNameChat() {
+        return callByNameChat;
+    }
+
+    public void setCallByNameChat(boolean callByNameChat) {
+        this.callByNameChat = callByNameChat;
     }
 
     public String getHeartbeatClientId() {
