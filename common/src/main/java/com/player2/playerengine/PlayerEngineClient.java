@@ -1,11 +1,16 @@
 package com.player2.playerengine;
 
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.player2.playerengine.client.PlayerEngineClientConfigCache;
+import com.player2.playerengine.player2api.network.Player2ServerNetworking;
 import com.player2.playerengine.player2api.utils.AudioUtils;
 import com.player2.playerengine.automaton.KeepName;
 import com.player2.playerengine.automaton.client.CustomFishingBobberRenderer;
+import com.player2.playerengine.player2api.manager.HeartbeatManager;
 import com.player2.playerengine.player2api.utils.Player2HTTPUtils;
+import dev.architectury.event.events.client.ClientTickEvent;
 import dev.architectury.networking.NetworkManager;
 import dev.architectury.registry.client.level.entity.EntityRendererRegistry;
 import io.netty.buffer.Unpooled;
@@ -24,6 +29,7 @@ public final class PlayerEngineClient {
    public static final Logger LOGGER = LogManager.getLogger(PlayerEngine.MOD_NAME);
    public static boolean enabledTTS = true;
    private static final int MAX_PAYLOAD_BYTES = 1_048_576;
+   private static int heartbeatTickCounter;
 
    public static void onInitializeClient() {
       EntityRendererRegistry.register(PlayerEngine.FISHING_BOBBER, CustomFishingBobberRenderer::new);
@@ -68,37 +74,79 @@ public final class PlayerEngineClient {
             });
 
       NetworkManager.registerReceiver(NetworkManager.Side.S2C,
-            PlayerEngine.CLIENT_CHAT_COMPLETION_REQUEST_PACKET_ID,
+            PlayerEngine.CLIENT_PLAYER2_PROXY_REQUEST_PACKET_ID,
             (buf, context) -> {
                String requestId = buf.readUtf();
                String clientId = buf.readUtf();
+               String method = buf.readUtf();
+               String endpoint = buf.readUtf();
                byte[] payload = buf.readByteArray(MAX_PAYLOAD_BYTES);
-               String requestText = new String(payload, StandardCharsets.UTF_8);
-               CompletableFuture.runAsync(() -> handleChatCompletionRequest(requestId, clientId, requestText));
+               CompletableFuture.runAsync(() -> handlePlayer2ProxyRequest(requestId, clientId, method, endpoint, payload));
             });
+
+      NetworkManager.registerReceiver(NetworkManager.Side.S2C, Player2ServerNetworking.SYNC_SERVER_PLAYER2,
+            (buf, context) -> {
+               boolean dedicated = buf.readBoolean();
+               String payerMode = buf.readUtf();
+               boolean ownerOffline = buf.readBoolean();
+               String hbId = buf.readUtf();
+               PlayerEngineClientConfigCache.applyFromSync(dedicated, payerMode, ownerOffline, hbId);
+            });
+
+      ClientTickEvent.CLIENT_POST.register(client -> {
+         heartbeatTickCounter++;
+         if (heartbeatTickCounter % 1200 != 0) {
+            return;
+         }
+         if (!PlayerEngineClientConfigCache.shouldSendPlayerHeartbeat()) {
+            return;
+         }
+         Minecraft mc = Minecraft.getInstance();
+         if (mc.player == null || mc.getConnection() == null) {
+            return;
+         }
+         String uid = mc.player.getName().getString();
+         String cid = PlayerEngineClientConfigCache.getHeartbeatClientId();
+         if (!HeartbeatManager.shouldHeartbeat(uid, cid)) {
+            return;
+         }
+         CompletableFuture.runAsync(() -> {
+            try {
+               Player2HTTPUtils.sendRequest(mc.player, cid, "/v1/health", false, null);
+               HeartbeatManager.storeHeartbeatTime(uid, cid);
+            } catch (Exception e) {
+               LOGGER.debug("Client heartbeat skipped: {}", e.getMessage());
+            }
+         });
+      });
    }
 
-   private static void handleChatCompletionRequest(String requestId, String clientId, String requestText) {
+   private static void handlePlayer2ProxyRequest(String requestId, String clientId, String method, String endpoint,
+         byte[] payload) {
       Minecraft client = Minecraft.getInstance();
       if (client.player == null || client.getConnection() == null) {
-         sendChatCompletionResponse(requestId, false, "Client player connection is not ready");
+         sendProxyResponse(requestId, false, "Client player connection is not ready");
          return;
       }
 
       try {
-         JsonObject requestBody = JsonParser.parseString(requestText).getAsJsonObject();
-         LOGGER.info("Client: Calling local chat completion for request={} clientId={}", requestId, clientId);
+         JsonObject body = null;
+         if (payload != null && payload.length > 0) {
+            body = JsonParser.parseString(new String(payload, StandardCharsets.UTF_8)).getAsJsonObject();
+         }
+         LOGGER.info("Client: Player2 proxy {} {} {}", requestId, method, endpoint);
          JsonObject response = new JsonObject();
-         Player2HTTPUtils.sendRequest(client.player, clientId, "/v1/chat/completions", true, requestBody)
-               .forEach(response::add);
-         sendChatCompletionResponse(requestId, true, response.toString());
+         java.util.Map<String, JsonElement> map = Player2HTTPUtils.sendRequest(client.player, clientId, endpoint,
+               method, body);
+         map.forEach(response::add);
+         sendProxyResponse(requestId, true, response.toString());
       } catch (Exception e) {
-         LOGGER.warn("Client: Chat completion request {} failed: {}", requestId, e.getMessage());
-         sendChatCompletionResponse(requestId, false, e.getMessage() == null ? e.toString() : e.getMessage());
+         LOGGER.warn("Client: Player2 proxy {} failed: {}", requestId, e.getMessage());
+         sendProxyResponse(requestId, false, e.getMessage() == null ? e.toString() : e.getMessage());
       }
    }
 
-   private static void sendChatCompletionResponse(String requestId, boolean success, String payloadText) {
+   private static void sendProxyResponse(String requestId, boolean success, String payloadText) {
       Minecraft client = Minecraft.getInstance();
       client.execute(() -> {
          if (client.player == null || client.getConnection() == null) {
@@ -111,7 +159,7 @@ public final class PlayerEngineClient {
          responseBuf.writeBoolean(success);
          responseBuf.writeByteArray(payload);
          client.getConnection().send(NetworkManager.toPacket(NetworkManager.Side.C2S,
-               PlayerEngine.CLIENT_CHAT_COMPLETION_RESPONSE_PACKET_ID, responseBuf));
+               PlayerEngine.CLIENT_PLAYER2_PROXY_RESPONSE_PACKET_ID, responseBuf));
       });
    }
 }

@@ -18,6 +18,10 @@
 package com.player2.playerengine.automaton.command.defaults;
 
 import com.player2.playerengine.PlayerEngine;
+import com.player2.playerengine.player2api.config.Player2PayerMode;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
+import com.player2.playerengine.player2api.network.Player2ServerNetworking;
+import com.player2.playerengine.automaton.Baritone;
 import com.player2.playerengine.automaton.api.BaritoneAPI;
 import com.player2.playerengine.automaton.api.IBaritone;
 import com.player2.playerengine.automaton.api.Settings;
@@ -32,6 +36,7 @@ import com.player2.playerengine.automaton.command.manager.BaritoneArgumentType;
 import com.player2.playerengine.automaton.command.manager.BaritoneCommandManager;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.Message;
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -46,6 +51,9 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.HoverEvent;
@@ -178,19 +186,169 @@ public final class DefaultCommands {
    }
 
    private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
-      dispatcher.register(
-         (LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal(PlayerEngine.MOD_ID).requires(s -> s.hasPermission(2)))
-            .then(
-               Commands.argument("command", StringArgumentType.greedyString())
-                  .executes(
-                     command -> runCommand(
-                        (CommandSourceStack)command.getSource(),
-                        ((CommandSourceStack)command.getSource()).getEntityOrException(),
-                        BaritoneArgumentType.getCommand(command, "command")
-                     )
-                  )
-            )
-      );
+      LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal(PlayerEngine.MOD_ID).requires(s -> s.hasPermission(2));
+      root.then(Commands.literal("player2")
+            .then(Commands.literal("reload").executes(ctx -> {
+               if (!isLogicalServer(ctx.getSource())) {
+                  return 0;
+               }
+               Player2ServerConfigHolder.load();
+               syncPlayer2ConfigToAllPlayers(ctx.getSource());
+               ctx.getSource().sendSuccess(() -> Component.literal("Reloaded Player2 server config (server files)."), false);
+               return 1;
+            }))
+            .then(Commands.literal("payer")
+                  .then(Commands.literal("prompter").executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) {
+                        return 0;
+                     }
+                     var c = Player2ServerConfigHolder.get();
+                     c.setPayerMode(Player2PayerMode.PROMPTER_PAYS);
+                     Player2ServerConfigHolder.validateAndFix(c);
+                     Player2ServerConfigHolder.save();
+                     syncPlayer2ConfigToAllPlayers(ctx.getSource());
+                     ctx.getSource().sendSuccess(() -> Component.literal("Server payer mode: PROMPTER_PAYS (server config saved)."), false);
+                     return 1;
+                  }))
+                  .then(Commands.literal("owner").executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) {
+                        return 0;
+                     }
+                     var c = Player2ServerConfigHolder.get();
+                     c.setPayerMode(Player2PayerMode.OWNER_PAYS_ALL);
+                     Player2ServerConfigHolder.validateAndFix(c);
+                     Player2ServerConfigHolder.save();
+                     syncPlayer2ConfigToAllPlayers(ctx.getSource());
+                     ctx.getSource().sendSuccess(() -> Component.literal("Server payer mode: OWNER_PAYS_ALL (server config saved)."), false);
+                     return 1;
+                  })))
+            .then(Commands.literal("dedicated")
+                  .then(Commands.argument("value", BoolArgumentType.bool()).executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) {
+                        return 0;
+                     }
+                     boolean v = BoolArgumentType.getBool(ctx, "value");
+                     var c = Player2ServerConfigHolder.get();
+                     c.setDedicatedClientProxy(v);
+                     Player2ServerConfigHolder.validateAndFix(c);
+                     Player2ServerConfigHolder.save();
+                     syncPlayer2ConfigToAllPlayers(ctx.getSource());
+                     ctx.getSource().sendSuccess(() -> Component.literal("Server dedicatedClientProxy=" + v + " (server config saved)."), false);
+                     return 1;
+                  })))
+            .then(Commands.literal("owner_offline_continue")
+                  .then(Commands.argument("value", BoolArgumentType.bool()).executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) {
+                        return 0;
+                     }
+                     boolean v = BoolArgumentType.getBool(ctx, "value");
+                     var c = Player2ServerConfigHolder.get();
+                     c.setOwnerOfflineServerContinuation(v);
+                     Player2ServerConfigHolder.validateAndFix(c);
+                     Player2ServerConfigHolder.save();
+                     syncPlayer2ConfigToAllPlayers(ctx.getSource());
+                     ctx.getSource().sendSuccess(() -> Component.literal("Server ownerOfflineServerContinuation=" + v + " (server config saved)."), false);
+                     return 1;
+                  }))));
+      root.then(Commands.argument("command", StringArgumentType.greedyString())
+            .executes(command -> {
+               CommandSourceStack source = command.getSource();
+               String sub = BaritoneArgumentType.getCommand(command, "command");
+               Entity entity = source.getEntity();
+               if (entity instanceof LivingEntity living) {
+                  return runCommand(source, living, sub);
+               }
+               return runBaritoneWithoutExecutorEntity(source, sub);
+            }));
+      dispatcher.register(root);
+   }
+
+   private static void syncPlayer2ConfigToAllPlayers(CommandSourceStack source) {
+      MinecraftServer server = source.getServer();
+      if (server == null) {
+         return;
+      }
+      for (ServerPlayer sp : server.getPlayerList().getPlayers()) {
+         Player2ServerNetworking.sendConfigSync(sp);
+      }
+   }
+
+   /**
+    * Player2 server JSON and sync only apply on the logical server so remote clients cannot mutate their local config
+    * by running these commands on a client-only dispatcher.
+    */
+   private static boolean isLogicalServer(CommandSourceStack source) {
+      if (source.getLevel().isClientSide()) {
+         source.sendFailure(Component.literal(
+               "Player2 admin commands apply to the server's config/playerengine files and only run on the logical server."));
+         return false;
+      }
+      return true;
+   }
+
+   private static Baritone findAnyBaritone(MinecraftServer server) {
+      if (server == null) {
+         return null;
+      }
+      for (ServerLevel level : server.getAllLevels()) {
+         for (Entity e : level.getAllEntities()) {
+            if (e instanceof LivingEntity living && e instanceof IAutomatone) {
+               IBaritone b = IBaritone.KEY.getNullable(living);
+               if (b instanceof Baritone baritone) {
+                  return baritone;
+               }
+            }
+         }
+      }
+      return null;
+   }
+
+   /**
+    * Dedicated console, command blocks, etc. have no executor entity; route Baritone parsing through any loaded Automatone,
+    * or show server-admin hints when none exist.
+    */
+   private static int runBaritoneWithoutExecutorEntity(CommandSourceStack source, String rawCommand) throws CommandSyntaxException {
+      if (!isLogicalServer(source)) {
+         return 0;
+      }
+      MinecraftServer server = source.getServer();
+      if (server == null) {
+         source.sendFailure(Component.literal("No server."));
+         return 0;
+      }
+      Baritone baritone = findAnyBaritone(server);
+      if (baritone != null) {
+         try {
+            boolean ok = new BaritoneCommandManager(baritone).execute(source, BaritoneCommandManager.expand(rawCommand));
+            if (!ok) {
+               source.sendFailure(Component.literal("Unknown command."));
+               return 0;
+            }
+            return 1;
+         } catch (CommandException e) {
+            throw BARITONE_COMMAND_FAILED_EXCEPTION.create(e.handle());
+         }
+      }
+      String cmd = rawCommand.trim();
+      if (cmd.isEmpty() || cmd.equalsIgnoreCase("help") || cmd.equals("?")) {
+         sendConsoleBaritoneFallbackHelp(source);
+         return 1;
+      }
+      if (cmd.equalsIgnoreCase("version")) {
+         source.sendSuccess(() -> Component.literal("[PlayerEngine] Automatone (spawn an Automaton NPC for full version/help)."), false);
+         return 1;
+      }
+      source.sendFailure(Component.literal(
+            "No Automaton NPC in any loaded dimension — Baritone commands need an in-world executor. "
+                  + "Use /playerengine player2 ... for server billing/proxy settings."));
+      return 0;
+   }
+
+   private static void sendConsoleBaritoneFallbackHelp(CommandSourceStack source) {
+      source.sendSuccess(() -> Component.literal("=== PlayerEngine (no in-world Automaton) ==="), false);
+      source.sendSuccess(() -> Component.literal(
+            "Server admin: /playerengine player2 reload | payer prompter|owner | dedicated <true|false> | owner_offline_continue <true|false>"), false);
+      source.sendSuccess(() -> Component.literal("In-game (as a player): /playerengine help — or load an Automaton for full console Baritone routing."), false);
    }
 
    private static int runCommand(CommandSourceStack source, Entity target, String command) throws CommandSyntaxException {

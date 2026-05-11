@@ -1,6 +1,8 @@
 package com.player2.playerengine.player2api;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.player2api.auth.TokenStorage;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.manager.HeartbeatManager;
 import com.player2.playerengine.player2api.utils.Player2HTTPUtils;
 import com.player2.playerengine.player2api.utils.Utils;
@@ -30,8 +32,8 @@ public class Player2APIService {
    private String clientId;
    private PlayerEngineController controller;
 
-   private static MinecraftServer server;
-
+   /** Effective billing for the current AI/conversation turn (set by {@link AgentConversationData#process}). */
+   private volatile Player2PayerResolution.ApiBillingContext activeBillingContext;
 
    public Player2APIService(PlayerEngineController controller, String clientId) {
       this.clientId = clientId;
@@ -40,6 +42,26 @@ public class Player2APIService {
 
    public String getClientId() {
       return clientId;
+   }
+
+   public PlayerEngineController getController() {
+      return controller;
+   }
+
+   public void setActiveBillingContext(Player2PayerResolution.ApiBillingContext ctx) {
+      this.activeBillingContext = ctx;
+   }
+
+   public Player2PayerResolution.ApiBillingContext billingOrFallback() {
+      Player2PayerResolution.ApiBillingContext ctx = activeBillingContext;
+      if (ctx != null) {
+         return ctx;
+      }
+      return Player2PayerResolution.resolve(controller, null, clientId);
+   }
+
+   private Map<String, JsonElement> api(String method, String endpoint, JsonObject body) throws Exception {
+      return Player2ApiDispatcher.route(controller, clientId, method, endpoint, body, billingOrFallback());
    }
 
    public JsonObject completeConversation(ConversationHistory conversationHistory) throws Exception {
@@ -98,13 +120,7 @@ public class Player2APIService {
    }
 
    private Map<String, JsonElement> sendChatCompletionRequest(JsonObject requestBody) throws Exception {
-      if (controller.getOwner() instanceof ServerPlayer ownerPlayer) {
-         JsonObject response = ClientChatCompletionBridge.completeViaClient(ownerPlayer, clientId, requestBody);
-         return ClientChatCompletionBridge.toResponseMap(response);
-      }
-
-      return Player2HTTPUtils.sendRequest(controller.getOwner(), clientId,
-            "/v1/chat/completions", true, requestBody);
+      return api("POST", "/v1/chat/completions", requestBody);
    }
 
    public void textToSpeech(String message, Character character, Consumer<Map<String, JsonElement>> onFinish) {
@@ -166,7 +182,7 @@ public class Player2APIService {
       requestBody.addProperty("timeout", 180);
 
       try {
-         Player2HTTPUtils.sendRequest(controller.getOwner(), clientId, "/v1/stt/start", true, requestBody);
+         api("POST", "/v1/stt/start", requestBody);
       } catch (Exception var3) {
          System.err.println("[Player2APIService/startSTT]: Error" + var3.getMessage());
       }
@@ -174,8 +190,7 @@ public class Player2APIService {
 
    public String stopSTT() {
       try {
-         Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(controller.getOwner(), clientId,
-               "/v1/stt/stop", true, null);
+         Map<String, JsonElement> responseMap = api("POST", "/v1/stt/stop", null);
          if (!responseMap.containsKey("text")) {
             throw new Exception("Could not find key 'text' in response");
          } else {
@@ -187,11 +202,19 @@ public class Player2APIService {
    }
 
    public void trySendHeartbeat() {
-      if (HeartbeatManager.shouldHeartbeat(controller.getOwnerUsername(), clientId)) {
-         if (!com.player2.playerengine.player2api.auth.TokenStorage.getToken(controller.getOwnerUsername(), clientId).isEmpty()) {
+      var cfg = Player2ServerConfigHolder.get();
+      String ownerName = controller.getOwnerUsername();
+      boolean tokenPresent = !TokenStorage.getToken(ownerName, clientId).isEmpty();
+      boolean ownerOnline = controller.getOwner() instanceof ServerPlayer sp
+            && controller.getPlayer().level().getServer().getPlayerList().getPlayer(sp.getUUID()) != null;
+      if (!Player2ServerConfigHolder.shouldSendServerControllerHeartbeat(cfg, tokenPresent, ownerOnline)) {
+         return;
+      }
+      if (HeartbeatManager.shouldHeartbeat(ownerName, clientId)) {
+         if (tokenPresent) {
             sendHeartbeat();
          }
-         HeartbeatManager.storeHeartbeatTime(controller.getOwnerUsername(), clientId);
+         HeartbeatManager.storeHeartbeatTime(ownerName, clientId);
       }
    }
 
@@ -199,7 +222,8 @@ public class Player2APIService {
       com.player2.playerengine.player2api.auth.AuthenticationManager.getExecutor().submit(() -> {
          try {
             System.out.println("Sending Heartbeat " + clientId);
-            Player2HTTPUtils.sendRequest(controller.getOwner(), clientId, "/v1/health", false, null);
+            Player2PayerResolution.ApiBillingContext bill = Player2PayerResolution.resolve(controller, null, clientId);
+            Player2ApiDispatcher.route(controller, clientId, "GET", "/v1/health", null, bill);
             System.out.println("Heartbeat Successful");
          } catch (Exception var2) {
             System.err.printf("Heartbeat Fail: %s\n", var2.getMessage());
@@ -218,7 +242,7 @@ public class Player2APIService {
          requestBody.addProperty("query", query);
          requestBody.addProperty("max_results", 10);
 
-         Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(controller.getOwner(), clientId, "/v1/minecraft/schematics/search", true, requestBody);
+         Map<String, JsonElement> responseMap = api("POST", "/v1/minecraft/schematics/search", requestBody);
 
          JsonElement resultsJsonElement = responseMap.get("results");
          if (resultsJsonElement != null && resultsJsonElement.isJsonArray()) {
@@ -247,7 +271,7 @@ public class Player2APIService {
     */
    public String getSchematicBinary(String schematicId) {
       try {
-         Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(controller.getOwner(), clientId, "/v1/minecraft/schematics/" + schematicId, false, null);
+         Map<String, JsonElement> responseMap = api("GET", "/v1/minecraft/schematics/" + schematicId, null);
          JsonElement dataJsonElement = responseMap.get("data");
          if (dataJsonElement != null && dataJsonElement.isJsonPrimitive()) {
             return dataJsonElement.getAsString();
@@ -263,8 +287,8 @@ public class Player2APIService {
 
    public String getGameData(String key) {
       try {
-         Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(controller.getOwner(), clientId,
-               "/v1/games/" + clientId + "/data/user?key=" + key, "GET", null);
+         Map<String, JsonElement> responseMap = api("GET",
+               "/v1/games/" + clientId + "/data/user?key=" + key, null);
          JsonElement valueElement = responseMap.get("value");
          if (valueElement != null && valueElement.isJsonPrimitive()) {
             return valueElement.getAsString();
@@ -281,8 +305,7 @@ public class Player2APIService {
          JsonObject requestBody = new JsonObject();
          requestBody.addProperty("key", key);
          requestBody.addProperty("value", value);
-         Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(controller.getOwner(), clientId,
-               "/v1/games/" + clientId + "/data/user", "PUT", requestBody);
+         Map<String, JsonElement> responseMap = api("PUT", "/v1/games/" + clientId + "/data/user", requestBody);
          JsonElement successElement = responseMap.get("success");
          if (successElement != null && successElement.isJsonPrimitive()) {
             return successElement.getAsBoolean();

@@ -39,8 +39,15 @@ public class AgentConversationData {
 
     private MessageBuffer playerEngineMsgBuffer = new MessageBuffer(10);
 
+    /** Latest prompting username from the current batch (prompter-pays billing). */
+    private String chainInitiatorUsername;
+
     public AgentConversationData(PlayerEngineController mod) {
         this.mod = mod;
+    }
+
+    public String getChainInitiatorUsername() {
+        return chainInitiatorUsername;
     }
 
     // ## Processing
@@ -77,6 +84,25 @@ public class AgentConversationData {
 
         this.lastProcessTime = System.nanoTime();
         this.isProcessing = true;
+
+        String lastUserInBatch = null;
+        for (Event e : eventQueue) {
+            if (e instanceof Event.UserMessage um) {
+                lastUserInBatch = um.userName();
+            }
+        }
+        if (lastUserInBatch != null) {
+            chainInitiatorUsername = lastUserInBatch;
+        }
+
+        Player2PayerResolution.ApiBillingContext billing = Player2PayerResolution.resolve(mod, chainInitiatorUsername,
+                mod.getPlayer2APIService().getClientId());
+        mod.getPlayer2APIService().setActiveBillingContext(billing);
+        if (billing.onlinePayer() == null && !billing.useStoredToken()) {
+            this.isProcessing = false;
+            onErrMsg.accept("Player2: no billing player/token available for this API request.");
+            return;
+        }
 
         // prepare conversation history for LLM call
         Event lastEvent = mod.getAIPersistantData().dumpEventQueueToConversationHistoryAndReturnLastEvent(eventQueue,

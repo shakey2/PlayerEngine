@@ -10,6 +10,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
 
 public class CharacterUtils {
@@ -71,7 +72,19 @@ public class CharacterUtils {
 
    public static Character[] requestCharacters(Player player, String player2GameId) {
       try {
-         Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(player, player2GameId,"/v1/selected_characters", false, null);
+         if (player == null) {
+            return new Character[0];
+         }
+         Map<String, JsonElement> responseMap;
+         if (player instanceof ServerPlayer sp) {
+            responseMap = com.player2.playerengine.player2api.Player2ApiDispatcher.routeSimple(sp, player2GameId, "GET",
+                  "/v1/selected_characters", null);
+         } else if (player.level().isClientSide()) {
+            // CharacterSelectionScreen (LocalPlayer): device auth + HTTP on this machine
+            responseMap = Player2HTTPUtils.sendRequest(player, player2GameId, "/v1/selected_characters", false, null);
+         } else {
+            return new Character[0];
+         }
          return parseCharacters(responseMap);
       } catch (Exception var2) {
          return new Character[0];
@@ -80,7 +93,18 @@ public class CharacterUtils {
 
    public static Character requestFirstCharacter(Player player, String player2GameId) {
       try {
-         Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(player, player2GameId, "/v1/selected_characters", false, null);
+         if (player == null) {
+            return DEFAULT_CHARACTER;
+         }
+         Map<String, JsonElement> responseMap;
+         if (player instanceof ServerPlayer sp) {
+            responseMap = com.player2.playerengine.player2api.Player2ApiDispatcher.routeSimple(sp, player2GameId, "GET",
+                  "/v1/selected_characters", null);
+         } else if (player.level().isClientSide()) {
+            responseMap = Player2HTTPUtils.sendRequest(player, player2GameId, "/v1/selected_characters", false, null);
+         } else {
+            return DEFAULT_CHARACTER;
+         }
          return parseFirstCharacter(responseMap);
       } catch (Exception var2) {
          return DEFAULT_CHARACTER;

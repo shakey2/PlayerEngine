@@ -5,7 +5,11 @@ import com.google.common.base.Suppliers;
 import com.player2.playerengine.automaton.KeepName;
 import com.player2.playerengine.automaton.command.defaults.DefaultCommands;
 import com.player2.playerengine.automaton.entity.CustomFishingBobberEntity;
-import com.player2.playerengine.player2api.ClientChatCompletionBridge;
+import com.player2.playerengine.player2api.Player2ClientApiBridge;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
+import com.player2.playerengine.player2api.network.Player2DisconnectHandler;
+import com.player2.playerengine.player2api.network.Player2ServerNetworking;
+import dev.architectury.event.events.common.PlayerEvent;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -38,10 +42,10 @@ public final class PlayerEngine {
 
    public static final String MOD_ID = "playerengine";
    public static final String MOD_NAME = "PlayerEngine";
-   public static final ResourceLocation CLIENT_CHAT_COMPLETION_REQUEST_PACKET_ID = ResourceLocation
-         .fromNamespaceAndPath(MOD_ID, "client_chat_completion_request");
-   public static final ResourceLocation CLIENT_CHAT_COMPLETION_RESPONSE_PACKET_ID = ResourceLocation
-         .fromNamespaceAndPath(MOD_ID, "client_chat_completion_response");
+   public static final ResourceLocation CLIENT_PLAYER2_PROXY_REQUEST_PACKET_ID = ResourceLocation
+         .fromNamespaceAndPath(MOD_ID, "client_player2_proxy_request");
+   public static final ResourceLocation CLIENT_PLAYER2_PROXY_RESPONSE_PACKET_ID = ResourceLocation
+         .fromNamespaceAndPath(MOD_ID, "client_player2_proxy_response");
    public static final TagKey<Item> EMPTY_BUCKETS = TagKey.create(Registries.ITEM, id("empty_buckets"));
    public static final TagKey<Item> WATER_BUCKETS = TagKey.create(Registries.ITEM, id("water_buckets"));
    private static final ThreadPoolExecutor threadPool;
@@ -69,18 +73,26 @@ public final class PlayerEngine {
    }
 
    public static void onInitialize() {
+      Player2ServerConfigHolder.load();
+      PlayerEvent.PLAYER_QUIT.register(Player2DisconnectHandler::onPlayerQuit);
+      PlayerEvent.PLAYER_JOIN.register(player -> {
+         if (player instanceof ServerPlayer sp) {
+            Player2ServerNetworking.sendConfigSync(sp);
+         }
+      });
       DefaultCommands.registerAll();
       ENTITY_TYPES.register();
       MCCommands.onInit();
       if (dev.architectury.platform.Platform.getEnvironment() == dev.architectury.utils.Env.SERVER) {
          NetworkManager.registerS2CPayloadType(ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"));
          NetworkManager.registerS2CPayloadType(ResourceLocation.fromNamespaceAndPath("playerengine", "response_stt"));
-         NetworkManager.registerS2CPayloadType(CLIENT_CHAT_COMPLETION_REQUEST_PACKET_ID);
+         NetworkManager.registerS2CPayloadType(CLIENT_PLAYER2_PROXY_REQUEST_PACKET_ID);
+         NetworkManager.registerS2CPayloadType(Player2ServerNetworking.SYNC_SERVER_PLAYER2);
       }
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
-            CLIENT_CHAT_COMPLETION_RESPONSE_PACKET_ID,
+            CLIENT_PLAYER2_PROXY_RESPONSE_PACKET_ID,
             (buf, context) -> {
-               ClientChatCompletionBridge.handleClientResponse(buf, (ServerPlayer) context.getPlayer());
+               Player2ClientApiBridge.handleClientProxyResponse(buf, (ServerPlayer) context.getPlayer());
             });
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
             ResourceLocation.fromNamespaceAndPath("playerengine", "user_message"),

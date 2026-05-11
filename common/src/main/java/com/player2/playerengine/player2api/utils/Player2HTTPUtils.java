@@ -2,6 +2,7 @@ package com.player2.playerengine.player2api.utils;
 
 import com.player2.playerengine.player2api.auth.AuthKey;
 import com.player2.playerengine.player2api.auth.AuthenticationManager;
+import com.player2.playerengine.player2api.auth.TokenStorage;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import net.minecraft.ChatFormatting;
@@ -89,5 +90,18 @@ public class Player2HTTPUtils {
 
     public static String awaitToken(Player player, String clientId) throws ExecutionException, InterruptedException {
         return AuthenticationManager.getInstance().authenticate(player, clientId).get();
+    }
+
+    /**
+     * Server-side HTTP using only {@link TokenStorage} (no interactive auth). Used for owner-offline continuation.
+     */
+    public static Map<String, JsonElement> sendRequestWithStoredToken(String username, String clientId, String endpoint,
+            String method, JsonObject requestBody) throws Exception {
+        String token = TokenStorage.getToken(username, clientId);
+        if (token == null || token.isEmpty()) {
+            throw new IllegalStateException("No stored Player2 token for user " + username);
+        }
+        Map<String, String> headers = getHeaders(clientId, token);
+        return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers);
     }
 }
