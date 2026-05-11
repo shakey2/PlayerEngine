@@ -26,7 +26,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.player2api.CallByNameChatFilter;
 import com.player2.playerengine.player2api.Event.UserMessage;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.status.StatusUtils;
 
 import net.minecraft.server.MinecraftServer;
@@ -88,9 +90,13 @@ public class ConversationManager {
     // register when a user sends a chat message
     public static void onUserChatMessage(UserMessage msg) {
         LOGGER.info("User message event={}", msg);
+        boolean callByName = Player2ServerConfigHolder.get().isCallByNameChat();
         // will add to entities close to the user:
         filterQueueData(d -> isCloseToPlayer(d, msg.userName())).forEach(data -> {
-            data.onEvent(msg);
+            UserMessage toDeliver = CallByNameChatFilter.filterForAutomaton(msg, data.getCharacter(), callByName);
+            if (toDeliver != null) {
+                data.onEvent(toDeliver);
+            }
         });
     }
 
