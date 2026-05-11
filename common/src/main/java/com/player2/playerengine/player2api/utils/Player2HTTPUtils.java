@@ -2,6 +2,7 @@ package com.player2.playerengine.player2api.utils;
 
 import com.player2.playerengine.player2api.auth.AuthKey;
 import com.player2.playerengine.player2api.auth.AuthenticationManager;
+import com.player2.playerengine.player2api.auth.TokenStorage;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import net.minecraft.ChatFormatting;
@@ -27,19 +28,21 @@ public class Player2HTTPUtils {
         return LocalAPIDiscovery.getPreferredApiUrl(WEB_API_URL);
     }
 
+    // Track players who have already attempted reauth for 402 errors (retry once only)
     private static final Set<AuthKey> energyRetryAttempted = ConcurrentHashMap.newKeySet();
 
-    public static Map<String, JsonElement> sendRequest(Player player, String clientId, String endpoint, boolean postRequest, JsonObject requestBody) throws Exception{
+    public static Map<String, JsonElement> sendRequest(Player player, String clientId, String endpoint,
+            boolean postRequest, JsonObject requestBody) throws Exception {
         return sendRequest(player, clientId, endpoint, postRequest ? "POST" : "GET", requestBody);
     }
 
-    public static Map<String, JsonElement> sendRequest(Player player, String clientId, String endpoint, String method, JsonObject requestBody) throws Exception{
+    public static Map<String, JsonElement> sendRequest(Player player, String clientId, String endpoint,
+            String method, JsonObject requestBody) throws Exception {
         String token = awaitToken(player, clientId);
         Map<String, String> headers = getHeaders(clientId, token);
 
         try {
             return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers);
-
         } catch (HttpApiException e) {
             AuthKey authKey = new AuthKey(player.getUUID(), clientId);
 
@@ -56,13 +59,17 @@ public class Player2HTTPUtils {
                 String oldToken = token;
                 AuthenticationManager.getInstance().invalidateToken(player, clientId);
 
+                // Wait for reauth to complete
                 String newToken = awaitToken(player, clientId);
 
+                // If token changed (different account), retry the request
                 if (!oldToken.equals(newToken)) {
                     LOGGER.info("Token changed after reauth for {}, retrying request.", authKey);
                     Map<String, String> newHeaders = getHeaders(clientId, newToken);
                     return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, newHeaders);
                 }
+
+                // Same token = same account with no credits - show error to player
                 LOGGER.warn("User {} is out of AI credits (same account after reauth)", player.getName().getString());
                 if (player instanceof ServerPlayer serverPlayer) {
                     serverPlayer.sendSystemMessage(Component.literal("Insufficient AI credits. Please top up your account at https://player2.game").withStyle(ChatFormatting.RED));
@@ -74,7 +81,7 @@ public class Player2HTTPUtils {
         }
     }
 
-    private static Map<String, String> getHeaders(String clientId, String token){
+    private static Map<String, String> getHeaders(String clientId, String token) {
         Map<String, String> headers = new HashMap<>();
         headers.put("player2-game-key", clientId);
         headers.put("Authorization", "Bearer " + token);
@@ -83,5 +90,18 @@ public class Player2HTTPUtils {
 
     public static String awaitToken(Player player, String clientId) throws ExecutionException, InterruptedException {
         return AuthenticationManager.getInstance().authenticate(player, clientId).get();
+    }
+
+    /**
+     * Server-side HTTP using only {@link TokenStorage} (no interactive auth). Used for owner-offline continuation.
+     */
+    public static Map<String, JsonElement> sendRequestWithStoredToken(String username, String clientId, String endpoint,
+            String method, JsonObject requestBody) throws Exception {
+        String token = TokenStorage.getToken(username, clientId);
+        if (token == null || token.isEmpty()) {
+            throw new IllegalStateException("No stored Player2 token for user " + username);
+        }
+        Map<String, String> headers = getHeaders(clientId, token);
+        return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers);
     }
 }

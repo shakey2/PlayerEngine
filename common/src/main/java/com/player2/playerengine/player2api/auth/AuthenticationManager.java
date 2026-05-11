@@ -118,6 +118,7 @@ public class AuthenticationManager {
                 int interval = deviceCodeResponse.get("interval").getAsInt();
 
                 player.sendSystemMessage(Component.literal(String.format("To use AI features from mod '%s', please authorize here: %s", clientId, verificationUriComplete)).withStyle(Style.EMPTY.withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_URL, verificationUriComplete))));
+                player.sendSystemMessage(Component.literal("If this server is hosted remotely (no Player2 app on the server), ask an admin to run /playerengine player2 dedicated true after you finish signing in."));
 
                 startPolling(player, clientId, deviceCode, interval, authFuture);
 

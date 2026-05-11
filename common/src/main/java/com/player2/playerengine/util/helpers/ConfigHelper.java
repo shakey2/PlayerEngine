@@ -53,7 +53,7 @@ public class ConfigHelper {
       }
    }
 
-   private static <T> T getConfig(String path, Supplier<T> getDefault, Class<T> classToLoad) {
+   public static <T> T getConfig(String path, Supplier<T> getDefault, Class<T> classToLoad) {
       T result = getDefault.get();
       File loadFrom = getConfigFile(path);
 
