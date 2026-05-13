@@ -9,6 +9,7 @@ import org.apache.logging.log4j.Logger;
 
 import com.google.gson.JsonObject;
 
+import com.player2.playerengine.util.ExecutorShutdown;
 import com.player2.playerengine.player2api.manager.ConversationManager;
 import com.player2.playerengine.player2api.utils.Utils.ThrowingFunction;
 
@@ -17,6 +18,16 @@ public class LLMCompleter {
 
     private final ExecutorService llmThread = Executors.newSingleThreadExecutor();
     private static final Logger LOGGER = LogManager.getLogger();
+    private volatile boolean executorShutDown = false;
+
+    /** Interrupts in-flight work and terminates the worker thread (safe to call more than once). */
+    public void shutdown() {
+        if (executorShutDown) {
+            return;
+        }
+        executorShutDown = true;
+        ExecutorShutdown.shutdownNowAwait("LLMCompleter", llmThread);
+    }
 
     private <T> void process(
             Player2APIService player2apiService,
@@ -26,6 +37,10 @@ public class LLMCompleter {
             ThrowingFunction<ConversationHistory, T> completeConversation,
             boolean isConversation) {
         LOGGER.info("Called completer.process with history={}", history);
+        if (executorShutDown) {
+            LOGGER.warn("Called llmcompleter.process after shutdown; ignoring.");
+            return;
+        }
         if (isProcessing) {
             LOGGER.warn("Called llmcompleter.process when it was already processing! This should not happen.");
             return;

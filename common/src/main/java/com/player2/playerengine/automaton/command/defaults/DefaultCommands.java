@@ -37,6 +37,7 @@ import com.player2.playerengine.automaton.command.manager.BaritoneCommandManager
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.Message;
 import com.mojang.brigadier.arguments.BoolArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -261,6 +262,32 @@ public final class DefaultCommands {
                      Player2ServerConfigHolder.validateAndFix(c);
                      Player2ServerConfigHolder.save();
                      ctx.getSource().sendSuccess(() -> Component.literal("Server callByNameChat=" + v + " (server config saved)."), false);
+                     return 1;
+                  })))
+            .then(Commands.literal("npc_max_spawn")
+                  .then(Commands.argument("value", IntegerArgumentType.integer(1, 20)).executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) {
+                        return 0;
+                     }
+                     int v = IntegerArgumentType.getInteger(ctx, "value");
+                     var c = Player2ServerConfigHolder.get();
+                     c.setMaxSpawnedCompanionsPerPlayer(v);
+                     Player2ServerConfigHolder.validateAndFix(c);
+                     Player2ServerConfigHolder.save();
+                     ctx.getSource().sendSuccess(() -> Component.literal("Server maxSpawnedCompanionsPerPlayer=" + v + " (server config saved)."), false);
+                     return 1;
+                  })))
+            .then(Commands.literal("npc_max_stored_ids")
+                  .then(Commands.argument("value", IntegerArgumentType.integer(0, 100)).executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) {
+                        return 0;
+                     }
+                     int v = IntegerArgumentType.getInteger(ctx, "value");
+                     var c = Player2ServerConfigHolder.get();
+                     c.setMaxStoredCharacterIdsPerPlayer(v);
+                     Player2ServerConfigHolder.validateAndFix(c);
+                     Player2ServerConfigHolder.save();
+                     ctx.getSource().sendSuccess(() -> Component.literal("Server maxStoredCharacterIdsPerPlayer=" + v + " (0=unlimited; server config saved)."), false);
                      return 1;
                   }))));
       root.then(Commands.argument("command", StringArgumentType.greedyString())

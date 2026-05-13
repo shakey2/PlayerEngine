@@ -26,9 +26,11 @@ public class MCCommands {
 
     public static void onInit() {
         LifecycleEvent.SERVER_STARTING.register(server -> {
+            PlayerEngine.resetBackgroundExecutorsShutdownGate();
             LOGGER.info("Server starting, registering MC commands");
             register(server);
         });
+        LifecycleEvent.SERVER_STOPPING.register(server -> PlayerEngine.shutdownBackgroundExecutors());
     }
 
     public static void register(MinecraftServer server) {

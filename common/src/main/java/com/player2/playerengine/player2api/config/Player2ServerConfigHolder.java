@@ -30,9 +30,9 @@ public final class Player2ServerConfigHolder {
                 Player2ServerRuntimeConfig.class);
         validateAndFix(next);
         cached = next;
-        LOGGER.info("Player2 server config: payerMode={} dedicated={} ownerOfflineContinue={} callByNameChat={}",
+        LOGGER.info("Player2 server config: payerMode={} dedicated={} ownerOfflineContinue={} callByNameChat={} maxSpawnedCompanions={} maxStoredCharacterIds={}",
                 cached.getPayerMode(), cached.isDedicatedClientProxy(), cached.isOwnerOfflineServerContinuation(),
-                cached.isCallByNameChat());
+                cached.isCallByNameChat(), cached.getMaxSpawnedCompanionsPerPlayer(), cached.getMaxStoredCharacterIdsPerPlayer());
     }
 
     public static void save() {
@@ -57,6 +57,16 @@ public final class Player2ServerConfigHolder {
         if (c.getPayerMode() == Player2PayerMode.PROMPTER_PAYS && c.isOwnerOfflineServerContinuation()) {
             LOGGER.warn("Player2 config: ownerOfflineServerContinuation only applies to OWNER_PAYS_ALL; disabling.");
             c.setOwnerOfflineServerContinuation(false);
+        }
+        int maxSpawn = c.getMaxSpawnedCompanionsPerPlayer();
+        if (maxSpawn < 1 || maxSpawn > 20) {
+            LOGGER.warn("Player2 config: maxSpawnedCompanionsPerPlayer out of range 1–20 (got {}); using 3.", maxSpawn);
+            c.setMaxSpawnedCompanionsPerPlayer(3);
+        }
+        int maxStored = c.getMaxStoredCharacterIdsPerPlayer();
+        if (maxStored < 0 || maxStored > 100) {
+            LOGGER.warn("Player2 config: maxStoredCharacterIdsPerPlayer out of range 0–100 (got {}); using 20.", maxStored);
+            c.setMaxStoredCharacterIdsPerPlayer(20);
         }
     }
 

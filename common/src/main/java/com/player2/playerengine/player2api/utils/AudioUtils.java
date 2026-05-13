@@ -21,6 +21,8 @@ import java.util.Base64;
 
 public class AudioUtils {
     private static final String WEB_API_URL = "https://api.player2.game";
+    private static final int HTTP_CONNECT_TIMEOUT_MS = 30_000;
+    private static final int HTTP_READ_TIMEOUT_MS = 120_000;
 
     public static void streamAudio(String clientId, String token, String text, double speed, String[] voiceIds) {
         // Check if local API is available
@@ -54,6 +56,8 @@ public class AudioUtils {
 
             URL url = new URL(localApiUrl + "/v1/tts/speak");
             connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(HTTP_READ_TIMEOUT_MS);
             connection.setRequestMethod("POST");
             connection.setRequestProperty("Content-Type", "application/json");
             connection.setRequestProperty("player2-game-key", clientId);
@@ -143,6 +147,8 @@ public class AudioUtils {
 
             URL url = new URL(WEB_API_URL + "/v1/tts/stream");
             connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(HTTP_READ_TIMEOUT_MS);
             connection.setRequestMethod("POST");
             connection.setRequestProperty("Content-Type", "application/json");
             connection.setRequestProperty("Accept", "audio/wav");

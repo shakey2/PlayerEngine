@@ -33,7 +33,7 @@ public class AIPersistantData {
         Path worldRoot = resolveWorldRootOrNull(mod);
         this.conversationHistoryFile = getConversationHistoryFileOrNull(mod, worldRoot, this.characterId);
         if (this.conversationHistoryFile != null) {
-            migrateLegacyHistoryIfPresent(character, this.characterId, worldRoot, this.conversationHistoryFile);
+            migrateLegacyHistoryIfPresent(character, this.characterId, worldRoot, this.conversationHistoryFile, mod);
             this.conversationHistory = new ConversationHistory(systemPrompt, this.conversationHistoryFile);
         } else {
             // Fallback to non-persistent history if we can't resolve world root or characterId.
@@ -113,12 +113,26 @@ public class AIPersistantData {
         }
     }
 
+    /**
+     * Canonical: {@code player2npc/persistentdata/owners/<ownerUuid>/<characterId>/conversation.jsonl}.
+     * If owner is unknown, uses legacy entity-UUID segment.
+     */
     private static Path getConversationHistoryFileOrNull(PlayerEngineController mod, Path worldRoot, String characterId) {
         if (mod == null || mod.getPlayer() == null) return null;
         if (characterId == null || characterId.isBlank()) return null;
         if (worldRoot == null) return null;
 
         try {
+            if (mod.getOwner() != null) {
+                UUID ownerUuid = mod.getOwner().getUUID();
+                return worldRoot
+                        .resolve("player2npc")
+                        .resolve("persistentdata")
+                        .resolve("owners")
+                        .resolve(ownerUuid.toString())
+                        .resolve(characterId)
+                        .resolve("conversation.jsonl");
+            }
             UUID entityUuid = mod.getPlayer().getUUID();
             return worldRoot
                     .resolve("player2npc")
@@ -131,12 +145,7 @@ public class AIPersistantData {
         }
     }
 
-    /**
-     * If the UUID-scoped file is missing, copy from older locations (do not delete sources).
-     * Legacy per-world folders keyed only by characterId could not distinguish duplicate spawns;
-     * each entity UUID gets its own copy on first run after upgrade.
-     */
-    private static void migrateLegacyHistoryIfPresent(Character character, String characterId, Path worldRoot, Path newHistoryFile) {
+    private static void migrateLegacyHistoryIfPresent(Character character, String characterId, Path worldRoot, Path newHistoryFile, PlayerEngineController mod) {
         if (newHistoryFile == null) return;
         try {
             if (Files.exists(newHistoryFile)) return;
@@ -145,7 +154,6 @@ public class AIPersistantData {
                 Files.createDirectories(newHistoryFile.getParent());
             }
 
-            // 1) Legacy: global config dir, name-keyed .txt
             if (character != null) {
                 String characterName = character.name();
                 if (characterName != null && !characterName.isBlank()) {
@@ -158,7 +166,6 @@ public class AIPersistantData {
             }
             if (Files.exists(newHistoryFile)) return;
 
-            // 2) Intermediate: per-world persistentdata/<characterId>/conversation.jsonl (no entity UUID segment)
             if (worldRoot != null && characterId != null && !characterId.isBlank()) {
                 Path intermediate = worldRoot
                         .resolve("player2npc")
@@ -167,6 +174,20 @@ public class AIPersistantData {
                         .resolve("conversation.jsonl");
                 if (Files.exists(intermediate)) {
                     Files.copy(intermediate, newHistoryFile);
+                }
+            }
+            if (Files.exists(newHistoryFile)) return;
+
+            if (worldRoot != null && characterId != null && !characterId.isBlank() && mod.getPlayer() != null) {
+                UUID entityUuid = mod.getPlayer().getUUID();
+                Path oldEntityScoped = worldRoot
+                        .resolve("player2npc")
+                        .resolve("persistentdata")
+                        .resolve(entityUuid.toString())
+                        .resolve(characterId)
+                        .resolve("conversation.jsonl");
+                if (Files.exists(oldEntityScoped)) {
+                    Files.copy(oldEntityScoped, newHistoryFile);
                 }
             }
         } catch (Exception e) {

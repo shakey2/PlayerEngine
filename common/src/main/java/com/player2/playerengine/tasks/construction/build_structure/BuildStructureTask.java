@@ -28,6 +28,7 @@ import com.player2.playerengine.player2api.ConversationHistory;
 import com.player2.playerengine.player2api.LLMCompleter;
 import com.player2.playerengine.player2api.Player2APIService;
 import com.player2.playerengine.player2api.Prompts;
+import com.player2.playerengine.player2api.manager.ConversationManager;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.util.time.TimerGame;
 import com.player2.playerengine.tasks.construction.build_structure.StructureFromCode.SetBlockCommand;
@@ -407,6 +408,7 @@ public class BuildStructureTask extends Task {
                 String.format("Build with the following description: (%s). Build at position (%s)", description, buildPosition.toShortString()),
                 service);
         this.completer = new LLMCompleter();
+        ConversationManager.registerLLMCompleter(this.completer);
     }
 
     @Override
@@ -498,6 +500,8 @@ public class BuildStructureTask extends Task {
 
     @Override
     protected void onStop(Task next) {
+        completer.shutdown();
+        ConversationManager.unregisterLLMCompleter(completer);
     }
 
     @Override

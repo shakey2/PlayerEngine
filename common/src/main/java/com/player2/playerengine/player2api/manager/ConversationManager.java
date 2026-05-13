@@ -1,11 +1,12 @@
 package com.player2.playerengine.player2api.manager;
 
+import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.List;
 import java.util.Optional;
 import java.util.Collection;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -65,7 +66,36 @@ public class ConversationManager {
         }
     }
 
-    private static List<LLMCompleter> llmCompleters = List.of(new LLMCompleter());
+    private static final CopyOnWriteArrayList<LLMCompleter> llmCompleters = new CopyOnWriteArrayList<>();
+
+    static {
+        llmCompleters.add(new LLMCompleter());
+    }
+
+    /** Extra completers (e.g. build-structure) register here; included in server shutdown. */
+    public static void registerLLMCompleter(LLMCompleter completer) {
+        if (completer != null && !llmCompleters.contains(completer)) {
+            llmCompleters.add(completer);
+        }
+    }
+
+    public static void unregisterLLMCompleter(LLMCompleter completer) {
+        if (completer != null) {
+            llmCompleters.remove(completer);
+        }
+    }
+
+    /**
+     * Shuts down every registered completer and restores a single fresh default instance for the next
+     * server session (same JVM, e.g. integrated server restart).
+     */
+    public static void shutdownAndResetLLMCompleters() {
+        for (LLMCompleter c : new ArrayList<>(llmCompleters)) {
+            c.shutdown();
+        }
+        llmCompleters.clear();
+        llmCompleters.add(new LLMCompleter());
+    }
 
     // ## Utils
     public static AgentConversationData getOrCreateEventQueueData(PlayerEngineController mod) {
