@@ -2,6 +2,7 @@ package com.player2.playerengine.player2api.manager;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,7 +23,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.function.BiConsumer;
 
 import com.player2.playerengine.PlayerEngineController;
-import com.player2.playerengine.player2api.CallByNameChatFilter;
+import com.player2.playerengine.player2api.CallByNameMentionRouter;
 import com.player2.playerengine.player2api.Event.UserMessage;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.status.StatusUtils;
@@ -119,13 +120,21 @@ public class ConversationManager {
     public static void onUserChatMessage(UserMessage msg) {
         LOGGER.info("User message event={}", msg);
         boolean callByName = Player2ServerConfigHolder.get().isCallByNameChat();
-        // will add to entities close to the user:
-        filterQueueData(d -> isCloseToPlayer(d, msg.userName())).forEach(data -> {
-            UserMessage toDeliver = CallByNameChatFilter.filterForAutomaton(msg, data.getCharacter(), callByName);
-            if (toDeliver != null) {
-                data.onEvent(toDeliver);
-            }
-        });
+        List<AgentConversationData> nearby = filterQueueData(d -> isCloseToPlayer(d, msg.userName()))
+                .collect(Collectors.toList());
+        if (!callByName) {
+            nearby.forEach(data -> data.onEvent(msg));
+            return;
+        }
+
+        CallByNameMentionRouter.ResolvedTargets resolved = CallByNameMentionRouter.resolveTargets(msg, msg.userName(),
+                nearby);
+        if (resolved == null || resolved.targets() == null || resolved.targets().isEmpty() || resolved.cleanedMessage() == null) {
+            return;
+        }
+        for (AgentConversationData data : resolved.targets()) {
+            data.onEvent(resolved.cleanedMessage());
+        }
     }
 
     // register when an AI character messages
