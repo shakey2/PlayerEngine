@@ -9,26 +9,19 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 
-
 import com.player2.playerengine.player2api.auth.AuthenticationManager;
 import com.player2.playerengine.player2api.Player2APIService;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.server.MinecraftServer;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import dev.architectury.event.events.common.LifecycleEvent;
 import net.minecraft.world.entity.player.Player;
 import com.player2.playerengine.player2api.AgentSideEffects;
 import net.minecraft.server.level.ServerPlayer;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import com.player2.playerengine.player2api.AgentConversationData;
-import com.player2.playerengine.player2api.AgentSideEffects;
-import com.player2.playerengine.player2api.Player2APIService;
-import com.player2.playerengine.player2api.auth.AuthenticationManager;
 import com.player2.playerengine.player2api.manager.ConversationManager;
-import dev.architectury.event.events.common.LifecycleEvent;
 
 public class MCCommands {
 
@@ -36,9 +29,11 @@ public class MCCommands {
 
     public static void onInit() {
         LifecycleEvent.SERVER_STARTING.register(server -> {
+            PlayerEngine.resetBackgroundExecutorsShutdownGate();
             LOGGER.info("Server starting, registering MC commands");
             register(server);
         });
+        LifecycleEvent.SERVER_STOPPING.register(server -> PlayerEngine.shutdownBackgroundExecutors());
     }
 
     public static void register(MinecraftServer server) {

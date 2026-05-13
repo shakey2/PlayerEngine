@@ -13,6 +13,7 @@ import dev.architectury.event.events.common.PlayerEvent;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -28,8 +29,11 @@ import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.item.Item;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import com.player2.playerengine.player2api.auth.AuthenticationManager;
 import com.player2.playerengine.player2api.auth.TokenStorage;
 import com.player2.playerengine.player2api.manager.ConversationManager;
+import com.player2.playerengine.player2api.manager.TTSManager;
+import com.player2.playerengine.util.ExecutorShutdown;
 import com.player2.playerengine.player2api.Event;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
@@ -47,6 +51,7 @@ public final class PlayerEngine {
    public static final TagKey<Item> EMPTY_BUCKETS = TagKey.create(Registries.ITEM, id("empty_buckets"));
    public static final TagKey<Item> WATER_BUCKETS = TagKey.create(Registries.ITEM, id("water_buckets"));
    private static final ThreadPoolExecutor threadPool;
+   private static final AtomicBoolean backgroundExecutorsShutDown = new AtomicBoolean(false);
 
    public static final DeferredRegister<EntityType<?>> ENTITY_TYPES = DeferredRegister.create(MOD_ID,
          Registries.ENTITY_TYPE);
@@ -68,6 +73,26 @@ public final class PlayerEngine {
 
    public static ThreadPoolExecutor getExecutor() {
       return threadPool;
+   }
+
+   /** Allow the next logical server session to register shutdown again (integrated / same JVM). */
+   public static void resetBackgroundExecutorsShutdownGate() {
+      backgroundExecutorsShutDown.set(false);
+   }
+
+   /**
+    * Stops mod-owned thread pools with bounded wait so dedicated shutdown does not hang on HTTP.
+    * Idempotent per server session; paired with {@link #resetBackgroundExecutorsShutdownGate()}.
+    */
+   public static void shutdownBackgroundExecutors() {
+      if (!backgroundExecutorsShutDown.compareAndSet(false, true)) {
+         return;
+      }
+      ConversationManager.shutdownAndResetLLMCompleters();
+      ExecutorShutdown.shutdownNowAwait("TTSManager", TTSManager.getExecutor());
+      ExecutorShutdown.shutdownNowAwait("PlayerEngine.workerPool", threadPool);
+      ExecutorShutdown.shutdownNowAwait("AuthenticationManager.auth", AuthenticationManager.getExecutor());
+      ExecutorShutdown.shutdownNowAwait("AuthenticationManager.polling", AuthenticationManager.getPollingExecutor());
    }
 
    public static void onInitialize() {

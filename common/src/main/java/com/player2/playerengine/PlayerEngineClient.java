@@ -18,6 +18,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import com.player2.playerengine.player2api.utils.STTUtils;
+import dev.architectury.event.events.client.ClientLifecycleEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -34,6 +35,7 @@ public final class PlayerEngineClient {
    public static void onInitializeClient() {
       EntityRendererRegistry.register(PlayerEngine.FISHING_BOBBER, CustomFishingBobberRenderer::new);
       STTUtils.onInitialize();
+      ClientLifecycleEvent.CLIENT_STOPPING.register(client -> STTUtils.shutdown());
       NetworkManager.registerReceiver(NetworkManager.Side.S2C,
             new ResourceLocation("playerengine", "stream_tts"), (buf, context) -> {
                if(!enabledTTS){

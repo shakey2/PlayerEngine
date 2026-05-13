@@ -33,6 +33,9 @@ public abstract class SingleTaskChain extends TaskChain {
 
             if (!this.mainTask.isFinished() && !this.mainTask.stopped()) {
                this.mainTask.tick(this);
+            } else if (this.mainTask.isFinished() && !this.mainTask.stopped()) {
+               this.mainTask.stop(null);
+               this.onTaskFinish(this.mod);
             } else {
                this.onTaskFinish(this.mod);
             }

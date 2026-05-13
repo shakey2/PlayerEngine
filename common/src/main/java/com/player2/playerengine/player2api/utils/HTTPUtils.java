@@ -19,6 +19,10 @@ import java.util.Map.Entry;
 
 public class HTTPUtils {
 
+    /** Default timeouts so shutdown and network stalls cannot block workers indefinitely (ms). */
+    private static final int DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+    private static final int DEFAULT_READ_TIMEOUT_MS = 120_000;
+
 
     public static Map<String, JsonElement> sendRequest(String baseUrl, String endpoint, boolean postRequest, JsonObject requestBody,
                                                        @Nullable Map<String, String> extraHeaders)
@@ -31,6 +35,8 @@ public class HTTPUtils {
             throws Exception {
         URL url = new URI(baseUrl + endpoint).toURL();
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(DEFAULT_CONNECT_TIMEOUT_MS);
+        connection.setReadTimeout(DEFAULT_READ_TIMEOUT_MS);
         connection.setRequestMethod(method);
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         connection.setRequestProperty("Accept", "application/json; charset=utf-8");
