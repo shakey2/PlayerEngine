@@ -17,6 +17,8 @@ import com.player2.playerengine.player2api.manager.ConversationManager;
 import dev.architectury.event.events.common.LifecycleEvent;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
@@ -30,7 +32,21 @@ public class MCCommands {
             LOGGER.info("Server starting, registering MC commands");
             register(server);
         });
-        LifecycleEvent.SERVER_STOPPING.register(server -> PlayerEngine.shutdownBackgroundExecutors());
+        LifecycleEvent.SERVER_STOPPING.register(server -> {
+            // On dedicated, drop queued AI work before tearing down executors so the next start
+            // doesn't pick up a stuck queue. Integrated server keeps single-player conversation
+            // state for the next session.
+            if (server != null && server.isDedicatedServer()) {
+                try {
+                    ConversationManager.QueueClearSummary summary = ConversationManager.clearPendingWork();
+                    LOGGER.info("SERVER_STOPPING (dedicated): drained queues={} buckets={}",
+                            summary.queuesCleared(), summary.bucketsShutdown());
+                } catch (Exception e) {
+                    LOGGER.warn("SERVER_STOPPING clearPendingWork failed: {}", e.getMessage());
+                }
+            }
+            PlayerEngine.shutdownBackgroundExecutors();
+        });
     }
 
     public static void register(MinecraftServer server) {
@@ -43,6 +59,7 @@ public class MCCommands {
                 Commands.literal("playerengine")
                         .then(registerRelog())
                         .then(registerSummon())
+                        .then(registerQueueClear())
                         .then(registerHelp()));
     }
 
@@ -53,15 +70,51 @@ public class MCCommands {
                     Player player = context.getSource().getPlayerOrException();
                     String message = """
                         Help: here are the following
-                        - 'playerengine relog': 
+                        - 'playerengine relog':
                         - 'help': displays this help
-                        - 'tpto <username>': teleports you to AI 
+                        - 'tpto <username>': teleports you to AI
+                        - 'queue clear [player]': (OP) drop pending AI work; optional scope to one player's bots
                         - 'list': lists AI usernames
                     """;
                     // Your AgentSideEffects.broadcastChatToPlayer call (keeps original behavior)
                     AgentSideEffects.broadcastChatToPlayer(player.level().getServer(), message, (ServerPlayer) player);
                     return 1;
                 });
+    }
+
+    /**
+     * {@code /playerengine queue clear [player]} — OP-only. Flushes pending AI events and shuts
+     * down per-billing LLM buckets so a stuck or runaway queue can be recovered without a server
+     * restart. With a player argument it's scoped to that player's bots.
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> registerQueueClear() {
+        return Commands.literal("queue")
+                .requires(src -> src.hasPermission(2))
+                .then(Commands.literal("clear")
+                        .executes(ctx -> {
+                            ConversationManager.QueueClearSummary summary = ConversationManager.clearPendingWork();
+                            sendQueueClearFeedback(ctx.getSource(), summary, null);
+                            return summary.queuesCleared();
+                        })
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .executes(ctx -> {
+                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+                                    ConversationManager.QueueClearSummary summary =
+                                            ConversationManager.clearPendingWorkFor(target.getUUID());
+                                    sendQueueClearFeedback(ctx.getSource(), summary, target.getName().getString());
+                                    return summary.queuesCleared();
+                                })));
+    }
+
+    private static void sendQueueClearFeedback(CommandSourceStack src,
+            ConversationManager.QueueClearSummary summary, String targetName) {
+        String label = targetName != null
+                ? "PlayerEngine queue clear (" + targetName + ")"
+                : "PlayerEngine queue clear";
+        String body = String.format("%s: drained %d conversation queue(s), shut down %d LLM bucket(s).",
+                label, summary.queuesCleared(), summary.bucketsShutdown());
+        LOGGER.info(body);
+        src.sendSuccess(() -> Component.literal(body), true);
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> registerRelog() {

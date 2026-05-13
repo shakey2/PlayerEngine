@@ -25,7 +25,16 @@ import java.util.concurrent.TimeUnit;
 public final class Player2ClientApiBridge {
     private static final Logger LOGGER = LogManager.getLogger();
     private static final int MAX_PAYLOAD_BYTES = 1_048_576;
-    private static final long REQUEST_TIMEOUT_SECONDS = 180;
+    /** Conservative ceiling for non-chat proxy calls (auth, characters, large payloads). */
+    private static final long DEFAULT_REQUEST_TIMEOUT_SECONDS = 180;
+    /**
+     * Chat completion bridge calls drive the AI turn-by-turn loop and gate a per-billing bucket
+     * while in flight. A multi-minute wait on a slow/disconnected client client used to wedge the
+     * entire server; cap chat completions at this value so a stuck request unblocks the bucket
+     * before the operator notices.
+     */
+    private static final long CHAT_COMPLETION_TIMEOUT_SECONDS = 45;
+    private static final String CHAT_COMPLETION_ENDPOINT = "/v1/chat/completions";
     private static final Map<String, PendingRequest> PENDING_REQUESTS = new ConcurrentHashMap<>();
 
     private record PendingRequest(UUID playerId, CompletableFuture<JsonObject> future) {
@@ -34,14 +43,32 @@ public final class Player2ClientApiBridge {
     private Player2ClientApiBridge() {
     }
 
+    /** Endpoint-aware default timeout used by the unparameterised overloads. */
+    public static long defaultTimeoutForEndpoint(String endpoint) {
+        if (endpoint != null && endpoint.contains(CHAT_COMPLETION_ENDPOINT)) {
+            return CHAT_COMPLETION_TIMEOUT_SECONDS;
+        }
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS;
+    }
+
     public static Map<String, JsonElement> sendJson(ServerPlayer player, String clientId, String method,
             String endpoint, JsonObject requestBody) throws Exception {
-        JsonObject response = sendJsonObject(player, clientId, method, endpoint, requestBody);
+        return sendJson(player, clientId, method, endpoint, requestBody, defaultTimeoutForEndpoint(endpoint));
+    }
+
+    public static Map<String, JsonElement> sendJson(ServerPlayer player, String clientId, String method,
+            String endpoint, JsonObject requestBody, long timeoutSeconds) throws Exception {
+        JsonObject response = sendJsonObject(player, clientId, method, endpoint, requestBody, timeoutSeconds);
         return toMap(response);
     }
 
     public static JsonObject sendJsonObject(ServerPlayer player, String clientId, String method, String endpoint,
             JsonObject requestBody) throws Exception {
+        return sendJsonObject(player, clientId, method, endpoint, requestBody, defaultTimeoutForEndpoint(endpoint));
+    }
+
+    public static JsonObject sendJsonObject(ServerPlayer player, String clientId, String method, String endpoint,
+            JsonObject requestBody, long timeoutSeconds) throws Exception {
         String requestId = UUID.randomUUID().toString();
         CompletableFuture<JsonObject> future = new CompletableFuture<>();
         PENDING_REQUESTS.put(requestId, new PendingRequest(player.getUUID(), future));
@@ -61,12 +88,12 @@ public final class Player2ClientApiBridge {
             buf.writeUtf(endpoint == null ? "" : endpoint);
             buf.writeByteArray(payload);
 
-            LOGGER.info("Server: Player2 proxy {} {} {} -> client {}",
-                    requestId, method, endpoint, player.getName().getString());
+            LOGGER.info("Server: Player2 proxy {} {} {} (timeout={}s) -> client {}",
+                    requestId, method, endpoint, timeoutSeconds, player.getName().getString());
             player.connection.send(NetworkManager.toPacket(NetworkManager.Side.S2C,
                     PlayerEngine.CLIENT_PLAYER2_PROXY_REQUEST_PACKET_ID, buf));
 
-            return future.get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            return future.get(timeoutSeconds, TimeUnit.SECONDS);
         } finally {
             PENDING_REQUESTS.remove(requestId);
         }

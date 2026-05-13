@@ -22,6 +22,7 @@ import com.player2.playerengine.util.helpers.EntityHelper;
 import com.player2.playerengine.util.helpers.ProjectileHelper;
 import com.player2.playerengine.util.helpers.WorldHelper;
 
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
@@ -33,6 +34,7 @@ import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.entity.projectile.ThrownEnderpearl;
 import net.minecraft.world.entity.projectile.ThrownExperienceBottle;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 
 public class EntityTracker extends Tracker {
@@ -50,6 +52,20 @@ public class EntityTracker extends Tracker {
    public EntityTracker(TrackerManager manager) {
       super(manager);
       EventBus.subscribe(PlayerCollidedWithEntityEvent.class, evt -> this.registerPlayerCollision(evt.player, evt.other));
+   }
+
+   /** Do not rebuild from path worker threads: {@link #updateState()} can block the server on chunk join while holding {@link BaritoneHelper#MINECRAFT_LOCK}. */
+   @Override
+   public void ensureUpdated() {
+      Level world = this.mod.getWorld();
+      if (world != null && !world.isClientSide()) {
+         MinecraftServer server = world.getServer();
+         if (server != null && !server.isSameThread()) {
+            return;
+         }
+      }
+
+      super.ensureUpdated();
    }
 
    private static Class squashType(Class<?> type) {
