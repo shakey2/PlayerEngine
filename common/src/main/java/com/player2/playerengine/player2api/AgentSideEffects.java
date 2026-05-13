@@ -53,6 +53,10 @@ public class AgentSideEffects {
             }
             TTSManager.TTS(characterMessage.message(), sendingCharacterData.getCharacter(),
                     sendingCharacterData.getPlayer2apiService());
+            // Per-bot speaking cooldown replaces the old server-wide TTS lock: this bot is gated
+            // until its message is plausibly done playing client-side, but other bots can keep
+            // dispatching LLM calls in their own billing buckets.
+            sendingCharacterData.markSpeakingFor(characterMessage.message());
             ConversationManager.onAICharacterMessage(characterMessage,
                     characterMessage.sendingCharacterData().getUUID());
         }

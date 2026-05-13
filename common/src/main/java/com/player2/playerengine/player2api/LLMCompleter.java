@@ -10,11 +10,15 @@ import org.apache.logging.log4j.Logger;
 import com.google.gson.JsonObject;
 
 import com.player2.playerengine.util.ExecutorShutdown;
-import com.player2.playerengine.player2api.manager.ConversationManager;
 import com.player2.playerengine.player2api.utils.Utils.ThrowingFunction;
 
 public class LLMCompleter {
-    private boolean isProcessing = false; // probably don't need this anymore but can keep to be safe
+    /**
+     * Per-completer in-flight gate. Replaces the previous server-wide
+     * {@code ConversationManager.Lock.waitingForResponseLock}; each per-billing-bucket
+     * completer now serializes only its own bot's LLM round-trip.
+     */
+    private volatile boolean isProcessing = false;
 
     private final ExecutorService llmThread = Executors.newSingleThreadExecutor();
     private static final Logger LOGGER = LogManager.getLogger();
@@ -46,11 +50,6 @@ public class LLMCompleter {
             return;
         }
 
-        // set locks:
-        if (isConversation) {
-            LOGGER.info("Setting conversation lock -> true");
-            ConversationManager.Lock.waitingForResponseLock = true;
-        }
         isProcessing = true;
 
         Consumer<T> onLLMResponse = resp -> {
@@ -61,14 +60,8 @@ public class LLMCompleter {
                         "[LLMCompleter/process/onLLMResponse]: Error in external llm resp, errMsg={} llmResp={}",
                         e.getMessage(), resp.toString());
             } finally {
-                LOGGER.info(
-                        "Done processing, releasing conversation lock and setting this.completer.isprocessing -> false");
-
+                LOGGER.info("Done processing, releasing completer isProcessing -> false");
                 isProcessing = false;
-                if (isConversation) {
-                    LOGGER.info("Setting conversation lock -> false");
-                    ConversationManager.Lock.waitingForResponseLock = false;
-                }
             }
         };
 
@@ -80,13 +73,8 @@ public class LLMCompleter {
                         "[LLMCompleter/process/onErrMsg]: Error in external onErrmsg, errMsgFromException={} errMsg={}",
                         e.getMessage(), errMsg);
             } finally {
-                LOGGER.info(
-                        "Done processing, releasing conversation lock and setting this.completer.isprocessing -> false");
+                LOGGER.info("Done processing (err path), releasing completer isProcessing -> false");
                 isProcessing = false;
-                if (isConversation) {
-                    LOGGER.info("Setting conversation lock -> false");
-                    ConversationManager.Lock.waitingForResponseLock = false;
-                }
             }
         };
 

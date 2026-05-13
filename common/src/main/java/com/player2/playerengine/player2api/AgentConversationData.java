@@ -4,6 +4,7 @@ import java.util.Deque;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import org.apache.logging.log4j.LogManager;
@@ -12,12 +13,15 @@ import org.apache.logging.log4j.Logger;
 import com.google.gson.JsonObject;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.player2api.BotBlacklistPolicy;
+import com.player2.playerengine.player2api.UserBlacklistPolicy;
 import com.player2.playerengine.player2api.AgentSideEffects.CommandExecutionStopReason;
 import com.player2.playerengine.player2api.Event.InfoMessage;
 import com.player2.playerengine.player2api.status.AgentStatus;
 import com.player2.playerengine.player2api.status.StatusUtils;
 import com.player2.playerengine.player2api.status.WorldStatus;
 import com.player2.playerengine.player2api.utils.Utils;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.LivingEntity;
 
 public class AgentConversationData {
@@ -42,6 +46,16 @@ public class AgentConversationData {
     /** Latest prompting username from the current batch (prompter-pays billing). */
     private String chainInitiatorUsername;
 
+    /**
+     * Per-bot TTS pacing: nanoTime() after which this specific bot is allowed to start a new
+     * LLM/conversation round. Replaces the previous server-wide TTS lock so other bots can be
+     * processed while this one is still "speaking" client-side.
+     */
+    private volatile long ttsCooldownUntilNanos = 0L;
+
+    /** Approx TTS characters/second (matches TTSManager). */
+    private static final int TTS_CHARS_PER_SECOND = 25;
+
     public AgentConversationData(PlayerEngineController mod) {
         this.mod = mod;
     }
@@ -59,7 +73,56 @@ public class AgentConversationData {
         if (!enabled || isProcessing || eventQueue.isEmpty()) {
             return 0;
         }
+        // Self-pace: don't start a new LLM round while this bot's last response is still
+        // being spoken client-side. Other bots remain free to process during this window.
+        if (System.nanoTime() < ttsCooldownUntilNanos) {
+            return 0;
+        }
         return System.nanoTime() - lastProcessTime;
+    }
+
+    /**
+     * Read-only billing snapshot for the next dispatch round. Mirrors the initiator selection
+     * used inside {@link #process} so the bucket key the dispatcher picks matches the eventual
+     * API call. Side-effect free; safe to call from the conversation dispatch loop.
+     */
+    public Player2PayerResolution.ApiBillingContext previewBilling() {
+        String lastUserInBatch = null;
+        for (Event e : eventQueue) {
+            if (e instanceof Event.UserMessage um) {
+                lastUserInBatch = um.userName();
+            }
+        }
+        String relayInitiator = lastUserInBatch != null ? lastUserInBatch : chainInitiatorUsername;
+        return Player2PayerResolution.resolve(mod, relayInitiator,
+                mod.getPlayer2APIService().getClientId());
+    }
+
+    /**
+     * Record an estimated speech duration for this bot's most recent message and start a per-bot
+     * cooldown. Called from {@link AgentSideEffects#onEntityMessage} right after submitting the
+     * TTS payload so dispatch defers this bot (only) for the playback window.
+     */
+    public void markSpeakingFor(String message) {
+        if (message == null) {
+            return;
+        }
+        int waitTimeSec = (int) Math.ceil(message.length() / (double) TTS_CHARS_PER_SECOND) + 1;
+        long waitNanos = TimeUnit.SECONDS.toNanos(waitTimeSec);
+        ttsCooldownUntilNanos = System.nanoTime() + waitNanos;
+    }
+
+    /** Test/clear helper: drop any pending self-pace (e.g. on queue clear / disconnect). */
+    public void clearTtsCooldown() {
+        ttsCooldownUntilNanos = 0L;
+    }
+
+    /** Clear pending events and per-round flags without disturbing persisted history. */
+    public void resetForClear() {
+        eventQueue.clear();
+        isProcessing = false;
+        chainInitiatorUsername = null;
+        clearTtsCooldown();
     }
 
     // get LLM response and add to conversation history
@@ -93,6 +156,23 @@ public class AgentConversationData {
         }
         if (lastUserInBatch != null) {
             chainInitiatorUsername = lastUserInBatch;
+        }
+
+        final String relayInitiator = lastUserInBatch != null ? lastUserInBatch : chainInitiatorUsername;
+        if (relayInitiator != null && !relayInitiator.isBlank()) {
+            MinecraftServer srv = mod.getPlayer().getServer();
+            if (srv != null && BotBlacklistPolicy.isBlocked(srv, relayInitiator, this)) {
+                LOGGER.info("Skipping LLM/API: bot blacklist blocks initiator={} for bot={}", relayInitiator, getName());
+                eventQueue.clear();
+                this.isProcessing = false;
+                return;
+            }
+            if (srv != null && UserBlacklistPolicy.isBlocked(srv, relayInitiator, this)) {
+                LOGGER.info("Skipping LLM/API: user blacklist blocks initiator={} for bot={}", relayInitiator, getName());
+                eventQueue.clear();
+                this.isProcessing = false;
+                return;
+            }
         }
 
         Player2PayerResolution.ApiBillingContext billing = Player2PayerResolution.resolve(mod, chainInitiatorUsername,
@@ -145,7 +225,7 @@ public class AgentConversationData {
             try {
                 if (!llmMessage.isEmpty() || command != null) {
                     mod.getAIPersistantData().addAssistantMessage(llmMessage, mod.getPlayer2APIService());
-                    onCharacterEvent.accept(new Event.CharacterMessage(llmMessage, command, this));
+                    onCharacterEvent.accept(new Event.CharacterMessage(llmMessage, command, this, relayInitiator));
                 } else {
                     LOGGER.warn(
                             "[AICommandBridge/processChatWithAPI/onLLMResponse]: Generated null llm message and command");

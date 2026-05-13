@@ -50,7 +50,10 @@ public final class Player2DisconnectHandler {
                 LOGGER.info("Player2: stopping controller due to disconnect policy (entity={})",
                         c.getEntity().getUUID());
                 c.stop();
-                ConversationManager.Lock.waitingForResponseLock = false;
+                // Per-billing bucket replaced the old global lock: shut down the bucket keyed by
+                // the disconnecting player so an in-flight proxy call doesn't pin the executor
+                // for the full request timeout while the client is gone.
+                ConversationManager.shutdownCompleterForBillingKey(leavingId.toString());
             }
         }
     }

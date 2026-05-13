@@ -18,6 +18,20 @@ public final class Player2PayerResolution {
         public boolean useStoredToken() {
             return onlinePayer == null && storedTokenUsername != null && !storedTokenUsername.isEmpty();
         }
+
+        /**
+         * Stable bucket key for grouping conversation dispatch by billing client.
+         * Returns {@code null} when neither path is usable; callers should skip dispatch.
+         */
+        public String billingKey() {
+            if (onlinePayer != null) {
+                return onlinePayer.getUUID().toString();
+            }
+            if (storedTokenUsername != null && !storedTokenUsername.isEmpty()) {
+                return "token:" + storedTokenUsername;
+            }
+            return null;
+        }
     }
 
     private Player2PayerResolution() {

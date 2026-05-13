@@ -3,58 +3,55 @@ package com.player2.playerengine.player2api.manager;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import com.player2.playerengine.player2api.Character;
 import com.player2.playerengine.player2api.Player2APIService;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import net.minecraft.server.MinecraftServer;
-
+/**
+ * Submits TTS broadcasts on a dedicated worker thread.
+ *
+ * <p>Previously this class also held a server-wide {@code TTSLocked} flag that gated every bot's
+ * LLM dispatch while any one of them was speaking. That has moved to per-bot pacing on
+ * {@link com.player2.playerengine.player2api.AgentConversationData#markSpeakingFor(String)} so
+ * one bot's audio playback no longer freezes conversation for the rest of the server.
+ */
 public class TTSManager {
     private static final Logger LOGGER = LogManager.getLogger();
-    private static final int TTScharactersPerSecond = 25; // approx how fast (characters/sec) does the TTS talk
-    private static boolean TTSLocked = false;
-    private static long estimatedEndTime = 0;
-    private static final ExecutorService ttsThread = Executors.newSingleThreadExecutor();
+    /**
+     * Not final: lifecycle-managed via {@link #shutdownAndReset()} so an integrated-server stop
+     * followed by a restart in the same JVM gets a fresh executor (mirrors the per-bucket
+     * LLMCompleter reset behaviour).
+     */
+    private static volatile ExecutorService ttsThread = Executors.newSingleThreadExecutor();
 
     public static ExecutorService getExecutor(){
         return ttsThread;
     }
 
-    private static void setEstimatedEndTime(String message) {
-        int waitTimeSec = (int) Math.ceil(message.length() / (double) TTScharactersPerSecond) + 1;
-
-        LOGGER.info("TTSManager/ waiting time={} (sec) for message={}", waitTimeSec, message);
-
-        long waitNanos = TimeUnit.SECONDS.toNanos(waitTimeSec);
-        estimatedEndTime = System.nanoTime() + waitNanos;
+    /**
+     * Shut down the current executor and replace it with a fresh one so the next session in the
+     * same JVM (e.g. integrated server restart) is not left with a terminated thread.
+     */
+    public static synchronized void shutdownAndReset() {
+        ExecutorService prev = ttsThread;
+        if (prev != null && !prev.isShutdown()) {
+            com.player2.playerengine.util.ExecutorShutdown.shutdownNowAwait("TTSManager", prev);
+        }
+        ttsThread = Executors.newSingleThreadExecutor();
     }
 
     public static void TTS(String message, Character character, Player2APIService player2apiService) {
-        TTSLocked = true;
-        LOGGER.info("Locking TTS based on msg={}", message);
-        estimatedEndTime = Long.MAX_VALUE;
-
+        if (message == null) {
+            return;
+        }
+        LOGGER.info("TTSManager.TTS submitting broadcast for msg.len={}", message.length());
         ttsThread.submit(() -> {
             player2apiService.textToSpeech(message, character, (_unusedMap) -> {
-                setEstimatedEndTime(message);
+                // Per-bot pacing is set at the AgentSideEffects.onEntityMessage call site so the
+                // dispatcher can defer just the speaking bot until its audio is done playing.
             });
-        });
-    }
-
-    public static boolean isLocked() {
-        return TTSLocked;
-    }
-
-    public static void injectOnTick(MinecraftServer server) {
-        // release lock if we think we have finished.
-        server.execute(() -> {
-            if ((System.nanoTime() > estimatedEndTime) && TTSLocked) {
-                LOGGER.info("TTS releasing lock");
-                TTSLocked = false;
-            }
         });
     }
 }

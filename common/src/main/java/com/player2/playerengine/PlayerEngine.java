@@ -89,7 +89,9 @@ public final class PlayerEngine {
          return;
       }
       ConversationManager.shutdownAndResetLLMCompleters();
-      ExecutorShutdown.shutdownNowAwait("TTSManager", TTSManager.getExecutor());
+      // Use the manager's reset so integrated-server restart in the same JVM gets a fresh
+      // executor instead of being left with a terminated thread.
+      TTSManager.shutdownAndReset();
       ExecutorShutdown.shutdownNowAwait("PlayerEngine.workerPool", threadPool);
       ExecutorShutdown.shutdownNowAwait("AuthenticationManager.auth", AuthenticationManager.getExecutor());
       ExecutorShutdown.shutdownNowAwait("AuthenticationManager.polling", AuthenticationManager.getPollingExecutor());
