@@ -34,6 +34,8 @@ public class PlayerEngineCommands {
                   new EatFoodCommand(),
                   new SetHostileAttackCommand(),
                   new PickupDropsCommand(),
-                  new FishCommand());
+                  new FishCommand(),
+                  new ReadNearbySignsCommand(),
+                  new PlaceSignCommand());
    }
 }

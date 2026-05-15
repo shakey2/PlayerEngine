@@ -4,10 +4,10 @@ import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.util.Debug;
 
 public abstract class Command {
-   private final ArgParser parser;
+   protected final ArgParser parser;
    private final String name;
    private final String description;
-   private PlayerEngineController mod;
+   protected PlayerEngineController mod;
    private Runnable onFinish = null;
 
    public Command(String name, String description, ArgBase... args) {

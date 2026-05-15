@@ -45,6 +45,7 @@ public class Prompts {
           -- Use `stop` to cancel a command. Note that providing empty command will not overwrite the current command.
       - Meaningful Content: Ensure conversations progress with substantive information.
       - Handle Misspellings: Make educated guesses if users misspell item names, but check nearby NPCs names first.
+      - Signs (place_sign): Use integer block coords from agentStatus (feet_block, block_below_feet), not eye position floats. anchor is the solid block you attach to; face is north|south|east|west|up|down meaning from anchor toward the empty cell where the sign goes (floor standing sign under your feet: anchor = block_below_feet, face = up). Hanging signs (*_hanging_sign) never use that floor pattern: for a ceiling hang use anchor = solid block directly above the air cell with face down; for a wall bracket use anchor = the wall block at the same y as that plank row with face toward the empty cell beside the wall (not the dirt row below the wall unless that block is the wall). item_id is optional if you only carry one sign type. For text use `f0 Hello`, `f0=\"two words\"`, or `f0=§aHi` (spaces are fine); avoid a single token like `f0=Hello` unless you intend legacy codes after `=`).
       - Avoid Filler Phrases: Do not engage in repetitive or filler content.
       - If somebody asks, greets or talks to another person, don't respond. Although you can try and offer your help if needed.
       - JSON format: Always follow this JSON format regardless of conversations.
