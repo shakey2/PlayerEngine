@@ -38,6 +38,7 @@ import net.minecraft.world.effect.MobEffectUtil;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.BucketItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -441,18 +442,47 @@ public class LivingEntityInteractionManager {
          }
 
          if (!stack.isEmpty()) {
-            UseOnContext itemUsageContext = new UseOnContext(player.level(), null, hand, player.getItemInHand(hand), hitResult) {
+            final LivingEntity placer = player;
+            final @Nullable Player vanillaPlayer = player instanceof Player p ? p : null;
+            UseOnContext itemUsageContext = new UseOnContext(player.level(), vanillaPlayer, hand, player.getItemInHand(hand), hitResult) {
+               @Override
+               public Direction getHorizontalDirection() {
+                  if (vanillaPlayer != null) {
+                     return super.getHorizontalDirection();
+                  }
+                  return Direction.fromYRot(placer.getYRot());
+               }
+
+               @Override
+               public float getRotation() {
+                  if (vanillaPlayer != null) {
+                     return super.getRotation();
+                  }
+                  return placer.getYRot();
+               }
+
+               @Override
                public boolean isSecondaryUseActive() {
-                  return this.isSecondaryUseActive();
+                  return placer.isShiftKeyDown();
                }
             };
             InteractionResult actionResult2;
-            if (this.isCreative()) {
-               int i = stack.getCount();
-               actionResult2 = stack.useOn(itemUsageContext);
-               stack.setCount(i);
-            } else {
-               actionResult2 = stack.useOn(itemUsageContext);
+            boolean trackLivingForPlacement = vanillaPlayer == null;
+            if (trackLivingForPlacement) {
+               LivingEntityPlacementContext.push(player);
+            }
+            try {
+               if (this.isCreative()) {
+                  int i = stack.getCount();
+                  actionResult2 = stack.useOn(itemUsageContext);
+                  stack.setCount(i);
+               } else {
+                  actionResult2 = stack.useOn(itemUsageContext);
+               }
+            } finally {
+               if (trackLivingForPlacement) {
+                  LivingEntityPlacementContext.pop();
+               }
             }
 
             return actionResult2;

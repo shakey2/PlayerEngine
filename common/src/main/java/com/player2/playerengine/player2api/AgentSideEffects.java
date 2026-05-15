@@ -95,29 +95,41 @@ public class AgentSideEffects {
         //         "^(@build_structure)\\s+(?![\"'])(.+)$",
         //         "$1 \"$2\"");
 
-        cmdExecutor.execute(processedCommandWithPrefix, () -> {
-            if (mod.isStopping) {
-                LOGGER.info(
-                        "[AgentSideEffects/AgentSideEffects]: (%s) was cancelled. Not adding finish event to queue.",
-                        processedCommandWithPrefix);
-                // Other canceled logic here
-                onStop.accept(new CommandExecutionStopReason.Cancelled(commandWithPrefix));
-                LOGGER.info("after cancel, not running look at owner");
-            } else {
-                if (!commandWithPrefix.equals("@bodylang greeting")) {
-                    LOGGER.info("Running on stop after finish cmd={}", commandWithPrefix);
-                    onStop.accept(new CommandExecutionStopReason.Finished(commandWithPrefix));
-                } else {
-                    LOGGER.info("Ignore onStop for bodylang greeting");
-                }
-                LOGGER.info("Running look at owner task after finish cmd={}", commandWithPrefix);
-                mod.runUserTask(new LookAtOwnerTask());
-            }
-        }, (err) -> {
-            onStop.accept(new CommandExecutionStopReason.Error(commandWithPrefix, err.getMessage()));
-            LOGGER.info("Running look at owner aftr error in cmd={}", commandWithPrefix);
-            mod.runUserTask(new LookAtOwnerTask());
-        });
+        Runnable runExecute =
+                () ->
+                        cmdExecutor.execute(
+                                processedCommandWithPrefix,
+                                () -> {
+                                    if (mod.isStopping) {
+                                        LOGGER.info(
+                                                "[AgentSideEffects/AgentSideEffects]: (%s) was cancelled. Not adding finish event to queue.",
+                                                processedCommandWithPrefix);
+                                        onStop.accept(new CommandExecutionStopReason.Cancelled(commandWithPrefix));
+                                        LOGGER.info("after cancel, not running look at owner");
+                                    } else {
+                                        if (!commandWithPrefix.equals("@bodylang greeting")) {
+                                            LOGGER.info("Running on stop after finish cmd={}", commandWithPrefix);
+                                            onStop.accept(new CommandExecutionStopReason.Finished(commandWithPrefix));
+                                        } else {
+                                            LOGGER.info("Ignore onStop for bodylang greeting");
+                                        }
+                                        LOGGER.info("Running look at owner task after finish cmd={}", commandWithPrefix);
+                                        mod.runUserTask(new LookAtOwnerTask());
+                                    }
+                                },
+                                (err) -> {
+                                    onStop.accept(
+                                            new CommandExecutionStopReason.Error(commandWithPrefix, err.getMessage()));
+                                    LOGGER.info("Running look at owner aftr error in cmd={}", commandWithPrefix);
+                                    mod.runUserTask(new LookAtOwnerTask());
+                                });
+
+        MinecraftServer server = mod.getWorld().getServer();
+        if (server != null && !server.isSameThread()) {
+            server.execute(runExecute);
+        } else {
+            runExecute.run();
+        }
     }
 
     public static void broadcastChatToPlayer(MinecraftServer server, String message, ServerPlayer player) {
