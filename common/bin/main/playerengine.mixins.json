@@ -15,6 +15,7 @@
     "EntityAnimationSwungMixin",
     "LivingEntityMixin",
     "MixinAbstractFurnaceBlockEntity",
+    "MixinBlockPlaceContext",
     "PersistentProjectileEntityAccessor",
     "PlayerCollidesWithEntityMixin",
     "PlayerDamageMixin",

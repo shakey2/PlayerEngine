@@ -1,6 +1,7 @@
 package com.player2.playerengine;
 
 import com.player2.playerengine.player2api.AgentSideEffects;
+import com.player2.playerengine.retrieval.RagIndex;
 import com.google.common.base.Suppliers;
 import com.player2.playerengine.automaton.KeepName;
 import com.player2.playerengine.automaton.command.defaults.DefaultCommands;
@@ -9,6 +10,7 @@ import com.player2.playerengine.player2api.Player2ClientApiBridge;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.network.Player2DisconnectHandler;
 import com.player2.playerengine.player2api.network.Player2ServerNetworking;
+import com.player2.playerengine.player2api.network.TtsClientPreferenceStore;
 import dev.architectury.event.events.common.PlayerEvent;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -50,9 +52,11 @@ public final class PlayerEngine {
          .fromNamespaceAndPath(MOD_ID, "client_player2_proxy_request");
    public static final ResourceLocation CLIENT_PLAYER2_PROXY_RESPONSE_PACKET_ID = ResourceLocation
          .fromNamespaceAndPath(MOD_ID, "client_player2_proxy_response");
+   public static final ResourceLocation TTS_PREFERENCE_PACKET_ID = ResourceLocation.fromNamespaceAndPath(MOD_ID,
+         "tts_preference");
    public static final TagKey<Item> EMPTY_BUCKETS = TagKey.create(Registries.ITEM, id("empty_buckets"));
    public static final TagKey<Item> WATER_BUCKETS = TagKey.create(Registries.ITEM, id("water_buckets"));
-   private static final ThreadPoolExecutor threadPool;
+   private static ThreadPoolExecutor threadPool;
    private static final AtomicBoolean backgroundExecutorsShutDown = new AtomicBoolean(false);
 
    public static final DeferredRegister<EntityType<?>> ENTITY_TYPES = DeferredRegister.create(MOD_ID,
@@ -77,8 +81,23 @@ public final class PlayerEngine {
       return threadPool;
    }
 
+   /**
+    * Allow the next logical server session to register shutdown again (integrated / same JVM).
+    * Also recreates the worker pool if it was terminated by the previous session's shutdown,
+    * so pathfinding threads can be submitted without a RejectedExecutionException.
+    */
    public static void resetBackgroundExecutorsShutdownGate() {
       backgroundExecutorsShutDown.set(false);
+      if (threadPool.isShutdown()) {
+         threadPool = newWorkerPool();
+      }
+   }
+
+   private static ThreadPoolExecutor newWorkerPool() {
+      AtomicInteger threadCounter = new AtomicInteger(0);
+      return new ThreadPoolExecutor(
+            4, Integer.MAX_VALUE, 60L, TimeUnit.SECONDS, new SynchronousQueue<>(),
+            r -> new Thread(r, MOD_NAME + " Worker " + threadCounter.incrementAndGet()));
    }
 
    public static void shutdownBackgroundExecutors() {
@@ -104,6 +123,8 @@ public final class PlayerEngine {
       });
       DefaultCommands.registerAll();
       ENTITY_TYPES.register();
+      copyToolOverridesReadmeIfAbsent();
+      RagIndex.initialize();
       MCCommands.onInit();
       if (dev.architectury.platform.Platform.getEnvironment() == dev.architectury.utils.Env.SERVER) {
          NetworkManager.registerS2CPayloadType(ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"));
@@ -141,12 +162,35 @@ public final class PlayerEngine {
                      NetworkManager.Side.S2C,
                      ResourceLocation.fromNamespaceAndPath("playerengine", "response_stt"), buf2));
             });
+      NetworkManager.registerReceiver(NetworkManager.Side.C2S,
+            TTS_PREFERENCE_PACKET_ID,
+            (buf, context) -> {
+               boolean enabled = buf.readBoolean();
+               TtsClientPreferenceStore.setTtsEnabled(context.getPlayer().getUUID(), enabled);
+            });
+   }
+
+   private static void copyToolOverridesReadmeIfAbsent() {
+      try {
+         java.nio.file.Path dest = com.player2.playerengine.automaton.utils.DirUtil.getConfigDir()
+               .resolve("playerengine")
+               .resolve("tool_overrides.README.md");
+         if (!java.nio.file.Files.exists(dest)) {
+            java.nio.file.Files.createDirectories(dest.getParent());
+            try (java.io.InputStream in = PlayerEngine.class.getClassLoader()
+                  .getResourceAsStream("tool_overrides.README.md")) {
+               if (in != null) {
+                  java.nio.file.Files.copy(in, dest);
+                  LOGGER.info("PlayerEngine: copied tool_overrides.README.md to {}", dest);
+               }
+            }
+         }
+      } catch (java.io.IOException e) {
+         LOGGER.warn("PlayerEngine: could not copy tool_overrides.README.md: {}", e.getMessage());
+      }
    }
 
    static {
-      AtomicInteger threadCounter = new AtomicInteger(0);
-      threadPool = new ThreadPoolExecutor(
-            4, Integer.MAX_VALUE, 60L, TimeUnit.SECONDS, new SynchronousQueue<>(),
-            r -> new Thread(r, MOD_NAME + " Worker " + threadCounter.incrementAndGet()));
+      threadPool = newWorkerPool();
    }
 }

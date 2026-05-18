@@ -68,6 +68,23 @@ public final class Player2ServerConfigHolder {
             LOGGER.warn("Player2 config: maxStoredCharacterIdsPerPlayer out of range 0–100 (got {}); using 20.", maxStored);
             c.setMaxStoredCharacterIdsPerPlayer(20);
         }
+
+        // Phase A4: budget field validation
+        int window = c.getBudgetWindowMinutes();
+        if (window < 1 || window > 1440) {
+            LOGGER.warn("Player2 config: budgetWindowMinutes out of range 1–1440 (got {}); using 60.", window);
+            c.setBudgetWindowMinutes(60);
+        }
+        int joulesRefresh = c.getJoulesRefreshIntervalSeconds();
+        if (joulesRefresh < 60 || joulesRefresh > 86400) {
+            LOGGER.warn("Player2 config: joulesRefreshIntervalSeconds out of range 60–86400 (got {}); using 300.", joulesRefresh);
+            c.setJoulesRefreshIntervalSeconds(300);
+        }
+        int soft = c.getSoftBudgetCallsPerWindow();
+        int hard = c.getHardBudgetCallsPerWindow();
+        if (soft > 0 && hard > 0 && soft >= hard) {
+            LOGGER.warn("Player2 config: softBudgetCallsPerWindow ({}) >= hardBudgetCallsPerWindow ({}) — soft should be lower than hard.", soft, hard);
+        }
     }
 
     /** When true, companion controller tick may send /v1/health from the server for owner-paid mode. */

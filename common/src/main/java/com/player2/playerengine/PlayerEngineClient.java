@@ -17,6 +17,7 @@ import io.netty.buffer.Unpooled;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
+import com.player2.playerengine.player2api.ChatclefConfigPersistantState;
 import com.player2.playerengine.player2api.utils.STTUtils;
 import dev.architectury.event.events.client.ClientLifecycleEvent;
 import org.apache.logging.log4j.LogManager;
@@ -28,8 +29,27 @@ import java.util.concurrent.CompletableFuture;
 @KeepName
 public final class PlayerEngineClient {
    public static final Logger LOGGER = LogManager.getLogger(PlayerEngine.MOD_NAME);
-   public static boolean enabledTTS = true;
    private static final int MAX_PAYLOAD_BYTES = 1_048_576;
+
+   public static boolean isTtsEnabled() {
+      return ChatclefConfigPersistantState.isTtsEnabled();
+   }
+
+   public static void setTtsEnabled(boolean enabled) {
+      ChatclefConfigPersistantState.setTtsEnabled(enabled);
+      syncTtsPreferenceToServer();
+   }
+
+   public static void syncTtsPreferenceToServer() {
+      Minecraft mc = Minecraft.getInstance();
+      if (mc.getConnection() == null || mc.player == null) {
+         return;
+      }
+      RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(), mc.player.registryAccess());
+      buf.writeBoolean(ChatclefConfigPersistantState.isTtsEnabled());
+      mc.getConnection().send(NetworkManager.toPacket(NetworkManager.Side.C2S,
+            PlayerEngine.TTS_PREFERENCE_PACKET_ID, buf));
+   }
    private static int heartbeatTickCounter;
 
    public static void onInitializeClient() {
@@ -38,7 +58,7 @@ public final class PlayerEngineClient {
       ClientLifecycleEvent.CLIENT_STOPPING.register(client -> STTUtils.shutdown());
       NetworkManager.registerReceiver(NetworkManager.Side.S2C,
             ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"), (buf, context) -> {
-               if(!enabledTTS){
+               if (!ChatclefConfigPersistantState.isTtsEnabled()) {
                   return;
                }
                String clientId = buf.readUtf();
@@ -70,6 +90,10 @@ public final class PlayerEngineClient {
                LOGGER.info("Client: Recieved packet response_stt token from server isNullOrEmpty={}",
                      token == null || token.isEmpty());
                if (token == null || token.isEmpty()) {
+                  return;
+               }
+               if (!ChatclefConfigPersistantState.canUseStt()) {
+                  LOGGER.info("Client: response_stt received but STT not consented/enabled; discarding token.");
                   return;
                }
                STTUtils.connect(token);
