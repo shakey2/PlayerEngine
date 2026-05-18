@@ -3,6 +3,7 @@ package com.player2.playerengine.player2api;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.player2.playerengine.executor.StopReason;
 import com.player2.playerengine.PlayerEngine;
 import dev.architectury.networking.NetworkManager;
 import io.netty.buffer.Unpooled;
@@ -13,8 +14,10 @@ import org.apache.logging.log4j.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -65,6 +68,24 @@ public final class Player2ClientApiBridge {
     public static JsonObject sendJsonObject(ServerPlayer player, String clientId, String method, String endpoint,
             JsonObject requestBody) throws Exception {
         return sendJsonObject(player, clientId, method, endpoint, requestBody, defaultTimeoutForEndpoint(endpoint));
+    }
+
+    /**
+     * Completes any in-flight proxy futures for {@code playerId} so disconnect does not wait for
+     * {@link #sendJsonObject} {@code future.get} timeouts (Phase A3).
+     */
+    public static void cancelPendingForPlayer(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        for (Iterator<Map.Entry<String, PendingRequest>> it = PENDING_REQUESTS.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<String, PendingRequest> e = it.next();
+            if (playerId.equals(e.getValue().playerId())) {
+                e.getValue().future().completeExceptionally(
+                        new CancellationException(StopReason.CANCELLED_DISCONNECT.name()));
+                it.remove();
+            }
+        }
     }
 
     public static JsonObject sendJsonObject(ServerPlayer player, String clientId, String method, String endpoint,

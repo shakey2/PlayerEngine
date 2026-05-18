@@ -1,7 +1,10 @@
 package com.player2.playerengine.player2api.network;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.executor.StopReason;
 import com.player2.playerengine.player2api.AgentConversationData;
+import com.player2.playerengine.player2api.Player2ClientApiBridge;
+import com.player2.playerengine.player2api.network.TtsClientPreferenceStore;
 import com.player2.playerengine.player2api.auth.TokenStorage;
 import com.player2.playerengine.player2api.config.Player2PayerMode;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
@@ -26,6 +29,7 @@ public final class Player2DisconnectHandler {
         }
         var cfg = Player2ServerConfigHolder.get();
         var leavingId = leaving.getUUID();
+        TtsClientPreferenceStore.clear(leavingId);
         String leavingName = leaving.getName().getString();
 
         for (AgentConversationData data : ConversationManager.queueData.values()) {
@@ -49,11 +53,12 @@ public final class Player2DisconnectHandler {
             if (stopForPrompter || stopForOwner) {
                 LOGGER.info("Player2: stopping controller due to disconnect policy (entity={})",
                         c.getEntity().getUUID());
-                c.stop();
+                c.stop(StopReason.CANCELLED_DISCONNECT);
                 // Per-billing bucket replaced the old global lock: shut down the bucket keyed by
                 // the disconnecting player so an in-flight proxy call doesn't pin the executor
                 // for the full request timeout while the client is gone.
                 ConversationManager.shutdownCompleterForBillingKey(leavingId.toString());
+                Player2ClientApiBridge.cancelPendingForPlayer(leavingId);
             }
         }
     }

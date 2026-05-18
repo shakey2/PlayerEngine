@@ -1,5 +1,7 @@
 package com.player2.playerengine.player2api.utils;
 
+import com.player2.playerengine.executor.StopReason;
+import com.player2.playerengine.player2api.JoulesCache;
 import com.player2.playerengine.player2api.auth.AuthKey;
 import com.player2.playerengine.player2api.auth.AuthenticationManager;
 import com.player2.playerengine.player2api.auth.TokenStorage;
@@ -23,9 +25,31 @@ public class Player2HTTPUtils {
 
     private static final String WEB_API_URL = "https://api.player2.game";
 
-    /** Returns the best base URL: local app if running, otherwise the web API. */
+    /**
+     * Per-thread base URL override for profile-switched calls (Phase A4).
+     * When set, overrides the default discovery-based URL for the duration of one completion call.
+     * Always cleared in a {@code finally} block in {@link com.player2.playerengine.player2api.Player2APIService}.
+     */
+    private static final ThreadLocal<String> PROFILE_BASE_URL_OVERRIDE = new ThreadLocal<>();
+
+    /** Override the API base URL for the current thread (for profile-switched completions). */
+    public static void setProfileBaseUrlOverride(String url) {
+        if (url == null) {
+            PROFILE_BASE_URL_OVERRIDE.remove();
+        } else {
+            PROFILE_BASE_URL_OVERRIDE.set(url);
+        }
+    }
+
+    /** Clear any active profile base URL override for the current thread. */
+    public static void clearProfileBaseUrlOverride() {
+        PROFILE_BASE_URL_OVERRIDE.remove();
+    }
+
+    /** Returns the best base URL: profile override if active, otherwise local app or web API. */
     private static String getApiUrl() {
-        return LocalAPIDiscovery.getPreferredApiUrl(WEB_API_URL);
+        String override = PROFILE_BASE_URL_OVERRIDE.get();
+        return override != null ? override : LocalAPIDiscovery.getPreferredApiUrl(WEB_API_URL);
     }
 
     // Track players who have already attempted reauth for 402 errors (retry once only)
@@ -69,12 +93,15 @@ public class Player2HTTPUtils {
                     return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, newHeaders);
                 }
 
-                // Same token = same account with no credits - show error to player
-                LOGGER.warn("User {} is out of AI credits (same account after reauth)", player.getName().getString());
+                // Same token = same account, Joules exhausted — show error and invalidate Joules cache
+                LOGGER.warn("User {} is out of Joules (same account after reauth)", player.getName().getString());
+                JoulesCache.invalidate(authKey.playerUuid().toString());
                 if (player instanceof ServerPlayer serverPlayer) {
-                    serverPlayer.sendSystemMessage(Component.literal("Insufficient AI credits. Please top up your account at https://player2.game").withStyle(ChatFormatting.RED));
+                    serverPlayer.sendSystemMessage(Component.literal(
+                            "Insufficient Joules. Please top up your account at https://player2.game"
+                    ).withStyle(ChatFormatting.RED));
                 }
-                throw new Exception("Insufficient AI credits");
+                throw new Exception(StopReason.USER_ACTION_REQUIRED.name() + ":insufficient_joules_402");
             }
 
             throw e;
@@ -103,5 +130,26 @@ public class Player2HTTPUtils {
         }
         Map<String, String> headers = getHeaders(clientId, token);
         return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers);
+    }
+
+    /**
+     * Like {@link #sendRequest} but returns a raw {@link JsonElement} (object or array).
+     * Used for endpoints such as {@code GET /v1/ai_profiles} that return JSON arrays.
+     */
+    public static JsonElement sendRequestElement(Player player, String clientId, String endpoint,
+            String method, JsonObject requestBody) throws Exception {
+        String token = awaitToken(player, clientId);
+        Map<String, String> headers = getHeaders(clientId, token);
+        try {
+            return HTTPUtils.sendRequestElement(getApiUrl(), endpoint, method, requestBody, headers);
+        } catch (HttpApiException e) {
+            AuthKey authKey = new AuthKey(player.getUUID(), clientId);
+            if (e.getStatusCode() == 401) {
+                LOGGER.warn("Received 401 Unauthorized for {} on element request.", authKey);
+                AuthenticationManager.getInstance().invalidateToken(player, clientId);
+                throw new Exception("Token expired, re-authentication started.", e);
+            }
+            throw e;
+        }
     }
 }

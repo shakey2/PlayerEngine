@@ -5,6 +5,7 @@ import com.player2.playerengine.commands.base.Arg;
 import com.player2.playerengine.commands.base.ArgParser;
 import com.player2.playerengine.commands.base.Command;
 import com.player2.playerengine.commands.base.CommandException;
+import com.player2.playerengine.executor.RollbackPolicy;
 import com.player2.playerengine.tasks.movement.FollowPlayerTask;
 
 public class FollowCommand extends Command {
@@ -27,6 +28,10 @@ public class FollowCommand extends Command {
          username = mod.getOwner().getName().getString();
       }
 
-      mod.runUserTask(new FollowPlayerTask(username), () -> this.finish());
+      mod.runUserTaskTracked(
+         "follow_player-" + username, "follow_player",
+         new FollowPlayerTask(username), RollbackPolicy.NONE,
+         () -> this.finish()
+      );
    }
 }

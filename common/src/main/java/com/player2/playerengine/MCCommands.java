@@ -24,6 +24,11 @@ import net.minecraft.server.level.ServerPlayer;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import com.player2.playerengine.player2api.AgentConversationData;
 import com.player2.playerengine.player2api.manager.ConversationManager;
+import com.player2.playerengine.retrieval.RagIndex;
+import com.player2.playerengine.retrieval.RetrievalHit;
+import com.player2.playerengine.retrieval.SeedToolMetadata;
+import com.player2.playerengine.retrieval.ToolDocument;
+import com.player2.playerengine.retrieval.ToolRetriever;
 
 public class MCCommands {
 
@@ -63,6 +68,7 @@ public class MCCommands {
                          .then(registerRelog())
                          .then(registerSummon())
                          .then(registerQueueClear())
+                         .then(registerRag())
                         .then(registerHelp()));
     }
     private static LiteralArgumentBuilder<CommandSourceStack> registerHelp() {
@@ -118,6 +124,127 @@ public class MCCommands {
                 label, summary.queuesCleared(), summary.bucketsShutdown());
         LOGGER.info(body);
         src.sendSuccess(() -> Component.literal(body), true);
+    }
+
+    /**
+     * {@code /playerengine rag <retrieve|reload|inspect>} — OP-only (permission 2).
+     *
+     * <ul>
+     *   <li>{@code retrieve <goal>} — runs retrieval for the executing player's per-owner
+     *       index and prints top-5 results. Falls back to the global index when executed
+     *       from a non-player context (e.g. the server console).
+     *   <li>{@code reload} — re-reads all overlay files from disk, rebuilds the global
+     *       retriever, and evicts all per-owner caches.
+     *   <li>{@code inspect <toolId>} — prints all fields of the merged ToolDocument for the
+     *       executing player's index; marks keywords/examples added by an overlay with [+].
+     * </ul>
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> registerRag() {
+        return Commands.literal("rag")
+                .requires(src -> src.hasPermission(2))
+                .then(Commands.literal("retrieve")
+                        .then(Commands.argument("goal", StringArgumentType.greedyString())
+                                .executes(ctx -> {
+                                    CommandSourceStack src = ctx.getSource();
+                                    String goal = StringArgumentType.getString(ctx, "goal");
+
+                                    ToolRetriever retriever = resolveRetriever(src);
+                                    if (retriever == null) {
+                                        src.sendFailure(Component.literal("RAG index not initialized."));
+                                        return 0;
+                                    }
+                                    java.util.List<RetrievalHit> hits = retriever.retrieve(goal, 5);
+                                    StringBuilder sb = new StringBuilder();
+                                    sb.append("RAG top-").append(hits.size())
+                                      .append(" for \"").append(goal).append("\":\n");
+                                    for (int i = 0; i < hits.size(); i++) {
+                                        RetrievalHit h = hits.get(i);
+                                        sb.append(i + 1).append(". ").append(h.toolId())
+                                          .append(" (score=").append(String.format("%.4f", h.score()))
+                                          .append(", bm25=").append(
+                                              h.bm25Rank() == Integer.MAX_VALUE ? "-" : h.bm25Rank())
+                                          .append(", minhash=").append(
+                                              h.minHashRank() == Integer.MAX_VALUE ? "-" : h.minHashRank())
+                                          .append(")\n");
+                                    }
+                                    if (hits.isEmpty()) sb.append("  (no results)");
+                                    LOGGER.info(sb.toString());
+                                    src.sendSuccess(() -> Component.literal(sb.toString()), false);
+                                    return hits.size();
+                                })))
+                .then(Commands.literal("reload")
+                        .executes(ctx -> {
+                            MinecraftServer server = ctx.getSource().getServer();
+                            RagIndex.reloadAll(server);
+                            ToolRetriever global = RagIndex.getGlobal();
+                            String msg = "RAG reload complete. Global index: "
+                                    + (global != null ? global.documentCount() + " docs" : "FAILED");
+                            LOGGER.info(msg);
+                            ctx.getSource().sendSuccess(() -> Component.literal(msg), true);
+                            return 1;
+                        }))
+                .then(Commands.literal("inspect")
+                        .then(Commands.argument("toolId", StringArgumentType.word())
+                                .executes(ctx -> {
+                                    CommandSourceStack src = ctx.getSource();
+                                    String toolId = StringArgumentType.getString(ctx, "toolId");
+
+                                    ToolRetriever retriever = resolveRetriever(src);
+                                    if (retriever == null) {
+                                        src.sendFailure(Component.literal("RAG index not initialized."));
+                                        return 0;
+                                    }
+
+                                    ToolDocument merged = retriever.getRegistry().getDocument(toolId);
+                                    if (merged == null) {
+                                        src.sendFailure(Component.literal(
+                                                "No tool found with id '" + toolId + "'."));
+                                        return 0;
+                                    }
+
+                                    ToolDocument baseline = SeedToolMetadata.byId(toolId);
+                                    StringBuilder sb = new StringBuilder();
+                                    sb.append("=== inspect: ").append(toolId).append(" ===\n");
+                                    sb.append("name: ").append(merged.name()).append("\n");
+                                    sb.append("description: ").append(merged.description()).append("\n");
+                                    sb.append("whenToUse: ").append(merged.whenToUse()).append("\n");
+                                    sb.append("categoryTags: ")
+                                      .append(String.join(", ", merged.categoryTags())).append("\n");
+                                    sb.append("keywords:\n");
+                                    java.util.Set<String> baseKeywords = baseline == null
+                                            ? java.util.Collections.emptySet()
+                                            : new java.util.HashSet<>(baseline.keywords());
+                                    for (String kw : merged.keywords()) {
+                                        boolean overlay = !baseKeywords.contains(kw)
+                                                && !baseKeywords.contains(kw.toLowerCase());
+                                        sb.append("  ").append(overlay ? "[+] " : "    ").append(kw).append("\n");
+                                    }
+                                    sb.append("examples:\n");
+                                    java.util.Set<String> baseExamples = baseline == null
+                                            ? java.util.Collections.emptySet()
+                                            : new java.util.HashSet<>(baseline.examples());
+                                    for (String ex : merged.examples()) {
+                                        boolean overlay = !baseExamples.contains(ex);
+                                        sb.append("  ").append(overlay ? "[+] " : "    ").append(ex).append("\n");
+                                    }
+                                    LOGGER.info(sb.toString());
+                                    src.sendSuccess(() -> Component.literal(sb.toString()), false);
+                                    return 1;
+                                })));
+    }
+
+    /**
+     * Resolves the appropriate {@link ToolRetriever} for a command source.
+     * Uses the executing player's per-owner retriever if available; falls back to global.
+     */
+    private static ToolRetriever resolveRetriever(CommandSourceStack src) {
+        try {
+            ServerPlayer player = src.getPlayerOrException();
+            MinecraftServer server = src.getServer();
+            return RagIndex.getForOwner(server, player.getUUID());
+        } catch (Exception e) {
+            return RagIndex.getGlobal();
+        }
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> registerRelog() {

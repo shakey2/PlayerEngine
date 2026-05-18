@@ -18,6 +18,13 @@
 package com.player2.playerengine.automaton.command.defaults;
 
 import com.player2.playerengine.PlayerEngine;
+import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.executor.BudgetFallbackBehavior;
+import com.player2.playerengine.executor.BudgetTracker;
+import com.player2.playerengine.executor.StepExecution;
+import com.player2.playerengine.executor.StepState;
+import com.player2.playerengine.player2api.JoulesCache;
+import com.player2.playerengine.player2api.ProfileUrlResolver;
 import com.player2.playerengine.player2api.config.Player2PayerMode;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.network.Player2ServerNetworking;
@@ -289,6 +296,197 @@ public final class DefaultCommands {
                      Player2ServerConfigHolder.save();
                      ctx.getSource().sendSuccess(() -> Component.literal("Server maxStoredCharacterIdsPerPlayer=" + v + " (0=unlimited; server config saved)."), false);
                      return 1;
+                  })))
+            .then(Commands.literal("budget")
+                  .then(Commands.literal("soft")
+                        .then(Commands.argument("value", IntegerArgumentType.integer(0)).executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           int v = IntegerArgumentType.getInteger(ctx, "value");
+                           var c = Player2ServerConfigHolder.get();
+                           c.setSoftBudgetCallsPerWindow(v);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           ctx.getSource().sendSuccess(() -> Component.literal("softBudgetCallsPerWindow=" + v + " (0=disabled; saved)."), false);
+                           return 1;
+                        })))
+                  .then(Commands.literal("hard")
+                        .then(Commands.argument("value", IntegerArgumentType.integer(0)).executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           int v = IntegerArgumentType.getInteger(ctx, "value");
+                           var c = Player2ServerConfigHolder.get();
+                           c.setHardBudgetCallsPerWindow(v);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           ctx.getSource().sendSuccess(() -> Component.literal("hardBudgetCallsPerWindow=" + v + " (0=disabled; saved)."), false);
+                           return 1;
+                        })))
+                  .then(Commands.literal("window")
+                        .then(Commands.argument("minutes", IntegerArgumentType.integer(1, 1440)).executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           int v = IntegerArgumentType.getInteger(ctx, "minutes");
+                           var c = Player2ServerConfigHolder.get();
+                           c.setBudgetWindowMinutes(v);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           BudgetTracker.resetAll();
+                           ctx.getSource().sendSuccess(() -> Component.literal("budgetWindowMinutes=" + v + " (saved; windows reset)."), false);
+                           return 1;
+                        })))
+                  .then(Commands.literal("joules_soft")
+                        .then(Commands.argument("value", IntegerArgumentType.integer(0)).executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           int v = IntegerArgumentType.getInteger(ctx, "value");
+                           var c = Player2ServerConfigHolder.get();
+                           c.setSoftJoulesThreshold(v);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           ctx.getSource().sendSuccess(() -> Component.literal("softJoulesThreshold=" + v + " (0=disabled; saved)."), false);
+                           return 1;
+                        })))
+                  .then(Commands.literal("joules_hard")
+                        .then(Commands.argument("value", IntegerArgumentType.integer(0)).executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           int v = IntegerArgumentType.getInteger(ctx, "value");
+                           var c = Player2ServerConfigHolder.get();
+                           c.setHardJoulesThreshold(v);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           ctx.getSource().sendSuccess(() -> Component.literal("hardJoulesThreshold=" + v + " (0=disabled; saved)."), false);
+                           return 1;
+                        })))
+                  .then(Commands.literal("joules_refresh")
+                        .then(Commands.argument("seconds", IntegerArgumentType.integer(60, 86400)).executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           int v = IntegerArgumentType.getInteger(ctx, "seconds");
+                           var c = Player2ServerConfigHolder.get();
+                           c.setJoulesRefreshIntervalSeconds(v);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           ctx.getSource().sendSuccess(() -> Component.literal("joulesRefreshIntervalSeconds=" + v + " (saved)."), false);
+                           return 1;
+                        })))
+                  .then(Commands.literal("fallback_profile")
+                        .then(Commands.argument("name", StringArgumentType.string()).executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           String raw = StringArgumentType.getString(ctx, "name");
+                           String profileName = raw.equalsIgnoreCase("none") ? null : raw;
+                           var c = Player2ServerConfigHolder.get();
+                           c.setFallbackProfile(profileName);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           ProfileUrlResolver.invalidateCache();
+                           String display = profileName == null ? "none" : profileName;
+                           ctx.getSource().sendSuccess(() -> Component.literal("fallbackProfile=" + display + " (saved; profile cache cleared)."), false);
+                           return 1;
+                        })))
+                  .then(Commands.literal("fallback_behavior")
+                        .then(Commands.literal("switch").executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           var c = Player2ServerConfigHolder.get();
+                           c.setBudgetFallbackBehavior(BudgetFallbackBehavior.SWITCH_PROFILE);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           ctx.getSource().sendSuccess(() -> Component.literal("budgetFallbackBehavior=SWITCH_PROFILE (saved)."), false);
+                           return 1;
+                        }))
+                        .then(Commands.literal("stop").executes(ctx -> {
+                           if (!isLogicalServer(ctx.getSource())) return 0;
+                           var c = Player2ServerConfigHolder.get();
+                           c.setBudgetFallbackBehavior(BudgetFallbackBehavior.HARD_STOP);
+                           Player2ServerConfigHolder.validateAndFix(c);
+                           Player2ServerConfigHolder.save();
+                           ctx.getSource().sendSuccess(() -> Component.literal("budgetFallbackBehavior=HARD_STOP (saved)."), false);
+                           return 1;
+                        })))
+                  .then(Commands.literal("reset").executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) return 0;
+                     BudgetTracker.resetAll();
+                     JoulesCache.invalidateAll();
+                     ProfileUrlResolver.invalidateCache();
+                     ctx.getSource().sendSuccess(() -> Component.literal("Budget windows, Joules cache, and profile cache cleared."), false);
+                     return 1;
+                  }))
+                  .then(Commands.literal("status").executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) return 0;
+                     var config = Player2ServerConfigHolder.get();
+                     var source = ctx.getSource();
+                     source.sendSuccess(() -> Component.literal("=== Budget Status ==="), false);
+                     source.sendSuccess(() -> Component.literal(
+                             "Call limits: soft=" + config.getSoftBudgetCallsPerWindow()
+                                     + " hard=" + config.getHardBudgetCallsPerWindow()
+                                     + " window=" + config.getBudgetWindowMinutes() + "min"), false);
+                     source.sendSuccess(() -> Component.literal(
+                             "Joules thresholds: soft=" + config.getSoftJoulesThreshold()
+                                     + " hard=" + config.getHardJoulesThreshold()
+                                     + " refresh=" + config.getJoulesRefreshIntervalSeconds() + "s"), false);
+                     source.sendSuccess(() -> Component.literal(
+                             "Fallback: profile=" + config.getFallbackProfile()
+                                     + " behavior=" + config.getBudgetFallbackBehavior()), false);
+                     // Per-billing-key call windows
+                     var windows = BudgetTracker.statusSnapshot(config);
+                     if (windows.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("No active call windows."), false);
+                     } else {
+                        long now = System.currentTimeMillis();
+                        for (var entry : windows.entrySet()) {
+                           var snap = entry.getValue();
+                           long resets = Math.max(0, snap.windowEndMs() - now) / 1000L;
+                           source.sendSuccess(() -> Component.literal(
+                                   "  " + entry.getKey() + ": calls=" + snap.callCount()
+                                           + " resets_in=" + resets + "s"), false);
+                        }
+                     }
+                     // Per-billing-key Joules snapshots
+                     var joulesSnaps = JoulesCache.statusSnapshot();
+                     if (joulesSnaps.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("No cached Joules data."), false);
+                     } else {
+                        for (var entry : joulesSnaps.entrySet()) {
+                           var snap = entry.getValue();
+                           long ageS = (System.currentTimeMillis() - snap.refreshedAtMs) / 1000L;
+                           source.sendSuccess(() -> Component.literal(
+                                   "  " + entry.getKey() + ": joules=" + snap.joulesDisplay()
+                                           + " patron=" + (snap.patronTier.isEmpty() ? "none" : snap.patronTier)
+                                           + " age=" + ageS + "s"), false);
+                        }
+                     }
+                     return 1;
+                  })))
+            .then(Commands.literal("chain")
+                  .then(Commands.literal("status").executes(ctx -> {
+                     if (!isLogicalServer(ctx.getSource())) return 0;
+                     var source = ctx.getSource();
+                     var controllers = PlayerEngineController.staticControllers;
+                     if (controllers.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("No active PlayerEngine bots."), false);
+                        return 1;
+                     }
+                     for (var entry : controllers.entrySet()) {
+                        PlayerEngineController bot = entry.getValue();
+                        String botName = bot.getEntity().getName().getString();
+                        source.sendSuccess(() -> Component.literal("=== Chain Status: " + botName + " ==="), false);
+                        var execOpt = bot.getStepExecutorAdapter().getActiveExecution();
+                        if (execOpt.isEmpty()) {
+                           source.sendSuccess(() -> Component.literal("No step has run yet."), false);
+                           continue;
+                        }
+                        StepExecution exec = execOpt.get();
+                        if (exec.getState() == StepState.RUNNING) {
+                           long secs = exec.getElapsedMs() / 1000L;
+                           source.sendSuccess(() -> Component.literal(
+                                   "Active step:    " + exec.getStepKind() + " [RUNNING] (" + secs + "s)"), false);
+                           String last = exec.getLastLogEntry();
+                           source.sendSuccess(() -> Component.literal("Last log entry: " + last), false);
+                        } else {
+                           source.sendSuccess(() -> Component.literal(
+                                   "Last step: " + exec.getStepKind() + " [" + exec.getState() + "]"), false);
+                        }
+                        source.sendSuccess(() -> Component.literal("--- Full log ---"), false);
+                        for (String logEntry : exec.getLog()) {
+                           source.sendSuccess(() -> Component.literal("  " + logEntry), false);
+                        }
+                     }
+                     return 1;
                   }))));
       root.then(Commands.argument("command", StringArgumentType.greedyString())
             .executes(command -> {
@@ -388,6 +586,10 @@ public final class DefaultCommands {
       source.sendSuccess(() -> Component.literal("=== PlayerEngine (no in-world Automaton) ==="), false);
       source.sendSuccess(() -> Component.literal(
             "Server admin: /playerengine player2 reload | payer prompter|owner | dedicated <true|false> | owner_offline_continue <true|false> | call_by_name <true|false>"), false);
+      source.sendSuccess(() -> Component.literal(
+            "Budget: /playerengine player2 budget soft|hard|window|joules_soft|joules_hard|joules_refresh|fallback_profile|fallback_behavior|reset|status"), false);
+      source.sendSuccess(() -> Component.literal(
+            "Chain diagnostics: /playerengine player2 chain status"), false);
       source.sendSuccess(() -> Component.literal("In-game (as a player): /playerengine help — or load an Automaton for full console Baritone routing."), false);
    }
 

@@ -2,6 +2,9 @@ package com.player2.playerengine.player2api;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import org.apache.logging.log4j.LogManager;
@@ -9,10 +12,24 @@ import org.apache.logging.log4j.Logger;
 
 import com.google.gson.JsonObject;
 
+import com.player2.playerengine.executor.StopReason;
+
 import com.player2.playerengine.util.ExecutorShutdown;
 import com.player2.playerengine.player2api.utils.Utils.ThrowingFunction;
 
 public class LLMCompleter {
+    /**
+     * Caps blocking LLM work at proxy chat-completion ceiling + buffer ({@link Player2ClientApiBridge}, Phase A3).
+     */
+    private static final long LLM_CHAT_WORKER_TIMEOUT_SECONDS =
+            Player2ClientApiBridge.defaultTimeoutForEndpoint("/v1/chat/completions") + 15L;
+
+    private static final ScheduledExecutorService LLM_WATCHDOG_SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "playerengine-llm-watchdog");
+        t.setDaemon(true);
+        return t;
+    });
+
     /**
      * Per-completer in-flight gate. Replaces the previous server-wide
      * {@code ConversationManager.Lock.waitingForResponseLock}; each per-billing-bucket
@@ -79,13 +96,24 @@ public class LLMCompleter {
         };
 
         llmThread.submit(() -> {
+            Thread workerThread = Thread.currentThread();
+            ScheduledFuture<?> watchdog = LLM_WATCHDOG_SCHEDULER.schedule(() -> workerThread.interrupt(),
+                    LLM_CHAT_WORKER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             try {
                 T response = completeConversation.apply(history);
                 LOGGER.info("LLMCompleter returned json={}", response);
                 onLLMResponse.accept(response);
             } catch (Exception e) {
-                onErrMsg.accept(
-                        e.getMessage() == null ? "Unknown error from CompleteConversation API" : e.getMessage());
+                if (isInterruptedLike(e)) {
+                    Thread.currentThread().interrupt();
+                    onErrMsg.accept(StopReason.FATAL.name() + ":llm_worker_timeout");
+                } else {
+                    onErrMsg.accept(
+                            e.getMessage() == null ? "Unknown error from CompleteConversation API" : e.getMessage());
+                }
+            } finally {
+                watchdog.cancel(false);
+                Thread.interrupted(); // clear interrupt bit for worker reuse
             }
         });
     }
@@ -112,5 +140,18 @@ public class LLMCompleter {
 
     public boolean isAvailible() {
         return !isProcessing;
+    }
+
+    private static boolean isInterruptedLike(Throwable e) {
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        while (e != null) {
+            if (e instanceof InterruptedException) {
+                return true;
+            }
+            e = e.getCause();
+        }
+        return false;
     }
 }

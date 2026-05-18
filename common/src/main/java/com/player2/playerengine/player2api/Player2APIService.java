@@ -1,9 +1,16 @@
 package com.player2.playerengine.player2api;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.executor.BudgetFallbackBehavior;
+import com.player2.playerengine.executor.BudgetTracker;
+import com.player2.playerengine.executor.StopReason;
 import com.player2.playerengine.player2api.auth.TokenStorage;
+import com.player2.playerengine.player2api.config.BudgetThresholds;
+import com.player2.playerengine.player2api.config.Player2PayerMode;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
+import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
 import com.player2.playerengine.player2api.manager.HeartbeatManager;
+import com.player2.playerengine.player2api.network.TtsClientPreferenceStore;
 import com.player2.playerengine.player2api.utils.Player2HTTPUtils;
 import com.player2.playerengine.player2api.utils.Utils;
 import com.google.gson.JsonArray;
@@ -18,8 +25,9 @@ import java.util.function.Consumer;
 
 import dev.architectury.networking.NetworkManager;
 import io.netty.buffer.Unpooled;
+import net.minecraft.ChatFormatting;
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -120,6 +128,87 @@ public class Player2APIService {
    }
 
    private Map<String, JsonElement> sendChatCompletionRequest(JsonObject requestBody) throws Exception {
+      Player2PayerResolution.ApiBillingContext billing = billingOrFallback();
+      String billingKey = billing != null ? billing.billingKey() : null;
+      Player2ServerRuntimeConfig config = Player2ServerConfigHolder.get();
+
+      ServerPlayer payerToNotify = billing != null ? billing.onlinePayer() : null;
+
+      // --- Phase A4: budget guard ---
+      // Per-player thresholds (call-count + Joules limits) come from the player's own config in
+      // PROMPTER_PAYS mode. Profile routing decisions always come from the server config.
+      BudgetThresholds thresholds;
+      if (config.getPayerMode() == Player2PayerMode.PROMPTER_PAYS && payerToNotify != null) {
+         thresholds = PlayerBudgetConfigHolder.load(payerToNotify.getServer(), payerToNotify.getUUID());
+      } else {
+         thresholds = config;
+      }
+
+      BudgetTracker.BudgetCheckResult callResult = BudgetTracker.checkAndRecord(billingKey, thresholds);
+      JoulesCache.maybeRefresh(this, billingKey, thresholds);
+      JoulesCache.JoulesSnapshot joulesSnap = JoulesCache.get(billingKey).orElse(null);
+      BudgetTracker.BudgetCheckResult joulesResult = JoulesCache.checkJoulesThreshold(joulesSnap, thresholds);
+      BudgetTracker.BudgetCheckResult result = BudgetTracker.stricter(callResult, joulesResult);
+
+      if (result == BudgetTracker.BudgetCheckResult.HARD_LIMIT) {
+         boolean callWasFirst = callResult == BudgetTracker.BudgetCheckResult.HARD_LIMIT
+                 && BudgetTracker.shouldSendHardMessage(billingKey);
+         boolean joulesWasFirst = joulesResult == BudgetTracker.BudgetCheckResult.HARD_LIMIT
+                 && JoulesCache.shouldSendHardMessage(billingKey);
+         if ((callWasFirst || joulesWasFirst) && payerToNotify != null) {
+            if (callResult == BudgetTracker.BudgetCheckResult.HARD_LIMIT) {
+               payerToNotify.sendSystemMessage(Component.literal(
+                       "[PlayerEngine] AI call budget hard limit reached. No new AI requests until window resets (~"
+                               + thresholds.getBudgetWindowMinutes() + " min)."
+               ).withStyle(ChatFormatting.RED));
+            } else {
+               payerToNotify.sendSystemMessage(Component.literal(
+                       "[PlayerEngine] Joules balance too low to continue. No new AI requests until balance is restored."
+               ).withStyle(ChatFormatting.RED));
+            }
+         }
+         throw new Exception(StopReason.BUDGET_HARD_LIMIT.name() + ":limit_reached");
+      }
+
+      if (result == BudgetTracker.BudgetCheckResult.SOFT_LIMIT) {
+         // Profile routing is always a server-level decision regardless of payer mode
+         String fallbackProfile = config.getFallbackProfile();
+         boolean isDedicatedProxy = config.isDedicatedClientProxy();
+
+         if (config.getBudgetFallbackBehavior() == BudgetFallbackBehavior.HARD_STOP || fallbackProfile == null || isDedicatedProxy) {
+            boolean shouldMsg = BudgetTracker.shouldSendSoftMessage(billingKey)
+                    || JoulesCache.shouldSendSoftMessage(billingKey);
+            if (shouldMsg && payerToNotify != null) {
+               payerToNotify.sendSystemMessage(Component.literal(
+                       "[PlayerEngine] AI budget soft limit reached. AI requests paused. "
+                               + "Use /player2npc budget reset to resume."
+               ).withStyle(ChatFormatting.YELLOW));
+            }
+            throw new Exception(StopReason.BUDGET_HARD_LIMIT.name() + ":soft_limit_hard_stop");
+         }
+
+         // SWITCH_PROFILE path
+         java.util.Optional<String> profileUrl = ProfileUrlResolver.resolve(this, fallbackProfile);
+         if (profileUrl.isPresent()) {
+            boolean shouldMsg = BudgetTracker.shouldSendSoftMessage(billingKey)
+                    || JoulesCache.shouldSendSoftMessage(billingKey);
+            if (shouldMsg && payerToNotify != null) {
+               payerToNotify.sendSystemMessage(Component.literal(
+                       "[PlayerEngine] AI budget soft limit reached. Switching to fallback profile: " + fallbackProfile + "."
+               ).withStyle(ChatFormatting.YELLOW));
+            }
+            Player2HTTPUtils.setProfileBaseUrlOverride(profileUrl.get());
+            try {
+               return api("POST", "/v1/chat/completions", requestBody);
+            } finally {
+               Player2HTTPUtils.clearProfileBaseUrlOverride();
+            }
+         }
+         // Profile not found — fall through to normal call with a warning
+         LOGGER.warn("sendChatCompletionRequest: fallback profile '{}' could not be resolved; using default", fallbackProfile);
+      }
+      // --- end budget guard ---
+
       return api("POST", "/v1/chat/completions", requestBody);
    }
 
@@ -132,6 +221,9 @@ public class Player2APIService {
          double TTS_RANGE = 64.0;
 
          for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (!TtsClientPreferenceStore.isTtsEnabled(player.getUUID())) {
+               continue;
+            }
             if (player.level() == owner.level() && player.distanceTo(owner) <= TTS_RANGE) {
                FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
                buf.writeUtf(clientId);

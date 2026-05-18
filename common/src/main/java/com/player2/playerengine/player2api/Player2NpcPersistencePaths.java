@@ -15,7 +15,10 @@ public final class Player2NpcPersistencePaths {
     public static final String BOT_WHITELIST_FILE_NAME = "botwhitelist.json";
     public static final String USER_WHITELIST_FILE_NAME = "userwhitelist.json";
     public static final String USER_SETTINGS_FILE_NAME = "user-settings.json";
+    public static final String PLAYER_BUDGET_FILE_NAME = "player-budget.json";
     public static final String SERVER_USERNAME_UUID_CACHE_FILE_NAME = "server_username_uuid_cache.json";
+    /** Filename for per-owner (and global) tool keyword/example overlay files. */
+    public static final String TOOL_OVERRIDES_FILE_NAME = "tool_overrides.json";
 
     private Player2NpcPersistencePaths() {
     }
@@ -48,8 +51,16 @@ public final class Player2NpcPersistencePaths {
         return ownersRoot(worldRoot).resolve(ownerUuid.toString()).resolve(USER_SETTINGS_FILE_NAME);
     }
 
+    public static Path playerBudgetFile(Path worldRoot, UUID ownerUuid) {
+        return ownersRoot(worldRoot).resolve(ownerUuid.toString()).resolve(PLAYER_BUDGET_FILE_NAME);
+    }
+
     public static Path serverUsernameUuidCacheFile(Path worldRoot) {
         return persistentDataRoot(worldRoot).resolve(SERVER_USERNAME_UUID_CACHE_FILE_NAME);
+    }
+
+    public static Path toolOverridesFile(Path worldRoot, UUID ownerUuid) {
+        return ownersRoot(worldRoot).resolve(ownerUuid.toString()).resolve(TOOL_OVERRIDES_FILE_NAME);
     }
 
     public static Path botBlacklistFile(MinecraftServer server, UUID ownerUuid) {
@@ -72,7 +83,15 @@ public final class Player2NpcPersistencePaths {
         return userSettingsFile(server.getWorldPath(LevelResource.ROOT), ownerUuid);
     }
 
+    public static Path playerBudgetFile(MinecraftServer server, UUID ownerUuid) {
+        return playerBudgetFile(server.getWorldPath(LevelResource.ROOT), ownerUuid);
+    }
+
     public static Path serverUsernameUuidCacheFile(MinecraftServer server) {
         return serverUsernameUuidCacheFile(server.getWorldPath(LevelResource.ROOT));
+    }
+
+    public static Path toolOverridesFile(MinecraftServer server, UUID ownerUuid) {
+        return toolOverridesFile(server.getWorldPath(LevelResource.ROOT), ownerUuid);
     }
 }

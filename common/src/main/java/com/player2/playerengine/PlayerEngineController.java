@@ -39,7 +39,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
+import com.player2.playerengine.executor.IStepExecutorAdapter;
+import com.player2.playerengine.executor.RollbackPolicy;
+import com.player2.playerengine.executor.StepExecution;
+import com.player2.playerengine.executor.StopReason;
+import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.util.Playground;
 import dev.architectury.event.events.common.TickEvent;
@@ -60,6 +66,7 @@ public class PlayerEngineController {
    private TrackerManager trackerManager;
    private BotBehaviour botBehaviour;
    private UserTaskChain userTaskChain;
+   private TaskStepExecutorAdapter stepExecutorAdapter;
    private FoodChain foodChain;
    private ForceEquipShieldArmorChain ForceEquipShieldArmorChain;
    private MobDefenseChain mobDefenseChain;
@@ -84,6 +91,8 @@ public class PlayerEngineController {
    public boolean isStopping = false;
    private Player owner;
    public static HashMap<UUID, Player2APIService> staticAPIServices = new HashMap<>();
+   /** Registry of all active PlayerEngineController instances by bot entity UUID. Used by server admin commands. */
+   public static final ConcurrentHashMap<UUID, PlayerEngineController> staticControllers = new ConcurrentHashMap<>();
    private boolean shouldDefendFromHostiles = false;
 
    public PlayerEngineController(IBaritone baritone, Character character, String player2GameId) {
@@ -93,6 +102,7 @@ public class PlayerEngineController {
       this.taskRunner = new TaskRunner(this);
       this.trackerManager = new TrackerManager(this);
       this.userTaskChain = new UserTaskChain(this.taskRunner);
+      this.stepExecutorAdapter = new TaskStepExecutorAdapter(this);
       this.mobDefenseChain = new MobDefenseChain(this.taskRunner);
       new PlayerInteractionFixChain(this.taskRunner);
       this.mlgBucketChain = new MLGBucketFallChain(this.taskRunner);
@@ -141,6 +151,7 @@ public class PlayerEngineController {
       this.aiPersistantData = new AIPersistantData(this, character);
       this.player2apiService = new Player2APIService(this, player2GameId);
       staticAPIServices.put(this.getEntity().getUUID(), this.player2apiService);
+      staticControllers.put(this.getEntity().getUUID(), this);
       this.chunkLoader = new ChunkLoadingTracker(this);
    }
 
@@ -167,7 +178,20 @@ public class PlayerEngineController {
       ConversationManager.injectOnTick(server);
    }
 
+   /**
+    * Stops Baritone/input and cancels the user task chain. When a tracked step is running,
+    * {@link StopReason#CANCELLED_OPERATOR} is recorded on the step execution log.
+    */
    public void stop() {
+      stop(StopReason.CANCELLED_OPERATOR);
+   }
+
+   /**
+    * Same as {@link #stop()} but records {@code trackedStepCancelReason} on the active
+    * {@link TaskStepExecutorAdapter} when applicable (e.g. disconnect policy).
+    */
+   public void stop(StopReason trackedStepCancelReason) {
+      this.stepExecutorAdapter.armPendingChainCancel(trackedStepCancelReason);
       this.getUserTaskChain().cancel(this);
       if (this.taskRunner.getCurrentTaskChain() != null) {
          this.taskRunner.getCurrentTaskChain().stop();
@@ -217,6 +241,30 @@ public class PlayerEngineController {
    public void runUserTask(Task task) {
       this.runUserTask(task, () -> {
       });
+   }
+
+   /**
+    * Submit a task for tracked execution through the Phase A2 executor adapter.
+    *
+    * The adapter validates preconditions, records PENDING -> RUNNING ->
+    * SUCCEEDED/FAILED state transitions, and always invokes {@code onComplete}
+    * at the terminal state so CommandExecutor's sequential chain is preserved.
+    *
+    * @param stepId         Stable log identifier for this step.
+    * @param stepKind       Action family descriptor (e.g. {@code follow_player}).
+    * @param task           Pre-built Task to execute on UserTaskChain.
+    * @param rollbackPolicy Compensating action policy on failure.
+    * @param onComplete     Callback invoked at any terminal state.
+    * @return The StepExecution tracker for observing state and log.
+    */
+   public StepExecution runUserTaskTracked(String stepId, String stepKind,
+                                           Task task, RollbackPolicy rollbackPolicy,
+                                           Runnable onComplete) {
+      return this.stepExecutorAdapter.submit(stepId, stepKind, task, rollbackPolicy, onComplete);
+   }
+
+   public IStepExecutorAdapter getStepExecutorAdapter() {
+      return this.stepExecutorAdapter;
    }
 
    public void cancelUserTask() {
