@@ -84,22 +84,6 @@ public final class PlayerEngineClient {
             });
 
       NetworkManager.registerReceiver(NetworkManager.Side.S2C,
-            ResourceLocation.fromNamespaceAndPath("playerengine", "response_stt"),
-            (buf, context) -> {
-               String token = buf.readUtf();
-               LOGGER.info("Client: Recieved packet response_stt token from server isNullOrEmpty={}",
-                     token == null || token.isEmpty());
-               if (token == null || token.isEmpty()) {
-                  return;
-               }
-               if (!ChatclefConfigPersistantState.canUseStt()) {
-                  LOGGER.info("Client: response_stt received but STT not consented/enabled; discarding token.");
-                  return;
-               }
-               STTUtils.connect(token);
-            });
-
-      NetworkManager.registerReceiver(NetworkManager.Side.S2C,
             PlayerEngine.CLIENT_PLAYER2_PROXY_REQUEST_PACKET_ID,
             (buf, context) -> {
                String requestId = buf.readUtf();

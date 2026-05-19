@@ -27,7 +27,10 @@ public class CataloguedResourceTask extends ResourceTask {
 
       for (ItemTarget target : targets) {
          if (target != null) {
-            this.tasksToComplete.add(TaskCatalogue.getItemTask(target));
+            ResourceTask task = TaskCatalogue.getItemTask(target);
+            if (task != null) {
+               this.tasksToComplete.add(task);
+            }
          }
       }
 
@@ -105,6 +108,10 @@ public class CataloguedResourceTask extends ResourceTask {
       }
 
       public void addTask(ResourceTask t) {
+         if (t == null) {
+            return;
+         }
+
          Class type = t.getClass();
          if (this.squashMap.containsKey(type)) {
             this.squashMap.get(type).add(t);

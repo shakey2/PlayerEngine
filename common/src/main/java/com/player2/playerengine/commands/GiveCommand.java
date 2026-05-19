@@ -7,10 +7,12 @@ import com.player2.playerengine.commands.base.Arg;
 import com.player2.playerengine.commands.base.ArgParser;
 import com.player2.playerengine.commands.base.Command;
 import com.player2.playerengine.commands.base.CommandException;
+import com.player2.playerengine.tasks.ResourceTask;
 import com.player2.playerengine.tasks.entity.GiveItemToPlayerTask;
 import com.player2.playerengine.util.ItemTarget;
 import com.player2.playerengine.util.helpers.FuzzySearchHelper;
 import com.player2.playerengine.util.helpers.ItemHelper;
+import com.player2.playerengine.util.helpers.StorageHelper;
 import java.util.HashSet;
 import java.util.Set;
 import net.minecraft.world.item.ItemStack;
@@ -69,6 +71,18 @@ public class GiveCommand extends Command {
          this.finish();
       } else {
          if (target != null) {
+            boolean alreadyHaveItems = StorageHelper.itemTargetsMet(mod, target);
+            ResourceTask obtainTask = alreadyHaveItems ? null : TaskCatalogue.getItemTask(target);
+            if (!alreadyHaveItems && obtainTask == null) {
+               mod.log(
+                  "Cannot give \""
+                     + item
+                     + "\": no catalogue task to obtain that item and it is not already in inventory."
+               );
+               this.finish();
+               return;
+            }
+
             Debug.logMessage("USER: " + username + " : ITEM: " + item + " x " + count);
             mod.runUserTask(new GiveItemToPlayerTask(username, target), () -> this.finish());
          } else {

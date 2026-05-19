@@ -72,7 +72,22 @@ public class Player2APIService {
       return Player2ApiDispatcher.route(controller, clientId, method, endpoint, body, billingOrFallback());
    }
 
+   /**
+    * NPC chat / command pick — uses {@link AiTaskClass#DECISION} (default tier).
+    *
+    * @deprecated Call {@link #completeConversation(ConversationHistory, AiTaskClass)} with an
+    *             explicit task class. Kept for legacy/test call sites.
+    */
+   @Deprecated
    public JsonObject completeConversation(ConversationHistory conversationHistory) throws Exception {
+      return completeConversation(conversationHistory, AiTaskClass.DECISION);
+   }
+
+   /**
+    * Complete a conversation and parse the response JSON, routing to the appropriate Player2
+    * profile based on {@code taskClass} (B3) and the A4 budget guard.
+    */
+   public JsonObject completeConversation(ConversationHistory conversationHistory, AiTaskClass taskClass) throws Exception {
       JsonObject requestBody = new JsonObject();
       JsonArray messagesArray = new JsonArray();
 
@@ -84,7 +99,7 @@ public class Player2APIService {
 
       requestBody.add("messages", messagesArray);
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
-      Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody);
+      Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody, taskClass);
       if (responseMap.containsKey("choices")) {
          JsonArray choices = responseMap.get("choices").getAsJsonArray();
          if (choices.size() != 0) {
@@ -100,7 +115,11 @@ public class Player2APIService {
       throw new Exception("Invalid response format: " + responseMap.toString());
    }
 
-   public String completeConversationToString(ConversationHistory conversationHistory) throws Exception {
+   /**
+    * Complete a conversation and return the raw text content, routing to the appropriate
+    * Player2 profile based on {@code taskClass} (B3) and the A4 budget guard.
+    */
+   public String completeConversationToString(ConversationHistory conversationHistory, AiTaskClass taskClass) throws Exception {
       JsonObject requestBody = new JsonObject();
       JsonArray messagesArray = new JsonArray();
 
@@ -112,7 +131,7 @@ public class Player2APIService {
       String lastMessageForDebug = conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1)
             .toString();
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
-      Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody);
+      Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody, taskClass);
       if (responseMap.containsKey("choices")) {
          JsonArray choices = responseMap.get("choices").getAsJsonArray();
          if (choices.size() != 0) {
@@ -127,7 +146,18 @@ public class Player2APIService {
       throw new Exception("Invalid response format: " + responseMap.toString());
    }
 
-   private Map<String, JsonElement> sendChatCompletionRequest(JsonObject requestBody) throws Exception {
+   /**
+    * History summarization — uses {@link AiTaskClass#SUMMARIZATION} (Default profile).
+    *
+    * @deprecated Call {@link #completeConversationToString(ConversationHistory, AiTaskClass)}
+    *             with an explicit task class. Kept for legacy/test call sites.
+    */
+   @Deprecated
+   public String completeConversationToString(ConversationHistory conversationHistory) throws Exception {
+      return completeConversationToString(conversationHistory, AiTaskClass.SUMMARIZATION);
+   }
+
+   private Map<String, JsonElement> sendChatCompletionRequest(JsonObject requestBody, AiTaskClass taskClass) throws Exception {
       Player2PayerResolution.ApiBillingContext billing = billingOrFallback();
       String billingKey = billing != null ? billing.billingKey() : null;
       Player2ServerRuntimeConfig config = Player2ServerConfigHolder.get();
@@ -208,6 +238,22 @@ public class Player2APIService {
          LOGGER.warn("sendChatCompletionRequest: fallback profile '{}' could not be resolved; using default", fallbackProfile);
       }
       // --- end budget guard ---
+
+      // --- Phase B3: task-class routing (only runs when A4 did not already set a profile override) ---
+      RoutingDecision routing = ModelTierRouter.resolve(taskClass, this, joulesSnap, thresholds, config);
+      if (routing.isOnDevice()) {
+         LOGGER.error("ModelTierRouter: RETRIEVAL task class reached sendChatCompletionRequest — caller bug; using Default");
+         return api("POST", "/v1/chat/completions", requestBody);
+      }
+      if (routing.profileBaseUrlOverride().isPresent()) {
+         Player2HTTPUtils.setProfileBaseUrlOverride(routing.profileBaseUrlOverride().get());
+         try {
+            return api("POST", "/v1/chat/completions", requestBody);
+         } finally {
+            Player2HTTPUtils.clearProfileBaseUrlOverride();
+         }
+      }
+      // --- end B3 routing ---
 
       return api("POST", "/v1/chat/completions", requestBody);
    }

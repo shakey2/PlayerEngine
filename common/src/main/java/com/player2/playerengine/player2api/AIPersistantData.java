@@ -74,12 +74,26 @@ public class AIPersistantData {
     public Optional<String> getLastAssistantContent() {
         return this.conversationHistory.getLastAssistantContent();
     }
+
     public Character getCharacter(){
         return this.character;
     }
 
     public void updateSystemPrompt(){
         String systemPrompt = Prompts.getAINPCSystemPrompt(character, mod.getCommandExecutor().allCommands(), mod.getOwnerUsername());
+        conversationHistory.setBaseSystemPrompt(systemPrompt);
+    }
+
+    /**
+     * Updates the system prompt using a pre-built valid-commands block from {@code RagPromptBuilder}
+     * rather than the full command list (Phase B3 live RAG path).
+     *
+     * @param validCommandsBlock formatted commands block from
+     *        {@link com.player2.playerengine.retrieval.RagPromptBuilder#buildValidCommandsBlock}
+     */
+    public void updateSystemPromptWithBlock(String validCommandsBlock) {
+        String block = validCommandsBlock != null ? validCommandsBlock : "";
+        String systemPrompt = Prompts.getAINPCSystemPromptWithValidCommandsBlock(character, block, mod.getOwnerUsername());
         conversationHistory.setBaseSystemPrompt(systemPrompt);
     }
 
@@ -115,7 +129,7 @@ public class AIPersistantData {
 
     /**
      * Canonical: {@code player2npc/persistentdata/owners/<ownerUuid>/<characterId>/conversation.jsonl}.
-     * If owner is unknown, uses legacy entity-UUID segment.
+     * If owner is unknown, uses legacy entity-UUID segment (same as pre-owner layout).
      */
     private static Path getConversationHistoryFileOrNull(PlayerEngineController mod, Path worldRoot, String characterId) {
         if (mod == null || mod.getPlayer() == null) return null;
@@ -145,6 +159,9 @@ public class AIPersistantData {
         }
     }
 
+    /**
+     * If the UUID-scoped file is missing, copy from older locations (do not delete sources).
+     */
     private static void migrateLegacyHistoryIfPresent(Character character, String characterId, Path worldRoot, Path newHistoryFile, PlayerEngineController mod) {
         if (newHistoryFile == null) return;
         try {
@@ -154,18 +171,19 @@ public class AIPersistantData {
                 Files.createDirectories(newHistoryFile.getParent());
             }
 
+            // 1) Legacy: global config dir, name-keyed .txt (duplicate-name or canonical slug)
             if (character != null) {
                 String characterName = character.name();
                 if (characterName != null && !characterName.isBlank()) {
-                    String fileName = characterName.replaceAll("\\s+", "_") + "_" + characterName.replaceAll("\\s+", "_") + ".txt";
-                    Path legacyFile = DirUtil.getConfigDir().resolve(fileName);
-                    if (Files.exists(legacyFile)) {
+                    Path legacyFile = resolveLegacyGlobalHistoryFile(characterName);
+                    if (legacyFile != null) {
                         Files.copy(legacyFile, newHistoryFile);
                     }
                 }
             }
             if (Files.exists(newHistoryFile)) return;
 
+            // 2) Intermediate: per-world persistentdata/<characterId>/conversation.jsonl (no entity UUID segment)
             if (worldRoot != null && characterId != null && !characterId.isBlank()) {
                 Path intermediate = worldRoot
                         .resolve("player2npc")
@@ -178,6 +196,7 @@ public class AIPersistantData {
             }
             if (Files.exists(newHistoryFile)) return;
 
+            // 3) Old entity-scoped path (same layout whether or not owner is now known)
             if (worldRoot != null && characterId != null && !characterId.isBlank() && mod.getPlayer() != null) {
                 UUID entityUuid = mod.getPlayer().getUUID();
                 Path oldEntityScoped = worldRoot
@@ -193,5 +212,22 @@ public class AIPersistantData {
         } catch (Exception e) {
             // Best-effort migration; ignore failures.
         }
+    }
+
+    /** Legacy config-dir history files (pre-UUID paths). */
+    private static Path resolveLegacyGlobalHistoryFile(String characterName) {
+        String slug = characterName.replaceAll("\\s+", "_");
+        Path configDir = DirUtil.getConfigDir();
+        Path duplicateNameFile = configDir.resolve(slug + "_" + slug + ".txt");
+        if (Files.exists(duplicateNameFile)) {
+            return duplicateNameFile;
+        }
+
+        Path canonicalFile = configDir.resolve(slug + "_conversation.txt");
+        if (Files.exists(canonicalFile)) {
+            return canonicalFile;
+        }
+
+        return null;
     }
 }

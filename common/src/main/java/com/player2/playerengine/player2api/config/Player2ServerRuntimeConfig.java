@@ -42,6 +42,13 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     /** What to do at soft limits: SWITCH_PROFILE or HARD_STOP. */
     private BudgetFallbackBehavior budgetFallbackBehavior = BudgetFallbackBehavior.HARD_STOP;
 
+    // --- Phase B3: RAG live prompt ---
+
+    private int ragTopK = 12;
+    private boolean ragFallbackToFullList = true;
+    private boolean ragLiveEnabled = true;
+    private int ragMinGoalChars = 3;
+
     public Player2PayerMode getPayerMode() {
         return payerMode == null ? Player2PayerMode.PROMPTER_PAYS : payerMode;
     }
@@ -128,5 +135,39 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     }
     public void setBudgetFallbackBehavior(BudgetFallbackBehavior v) {
         this.budgetFallbackBehavior = v == null ? BudgetFallbackBehavior.HARD_STOP : v;
+    }
+
+    public int getRagTopK() { return ragTopK; }
+
+    public void setRagTopK(int v) { this.ragTopK = v; }
+
+    public int getRagTopKClamped() {
+        int k = ragTopK;
+        if (k < 5) return 5;
+        if (k > 20) return 20;
+        return k;
+    }
+
+    public boolean isRagFallbackToFullList() { return ragFallbackToFullList; }
+
+    public void setRagFallbackToFullList(boolean ragFallbackToFullList) {
+        this.ragFallbackToFullList = ragFallbackToFullList;
+    }
+
+    public boolean isRagLiveEnabled() { return ragLiveEnabled; }
+
+    public void setRagLiveEnabled(boolean ragLiveEnabled) {
+        this.ragLiveEnabled = ragLiveEnabled;
+    }
+
+    public int getRagMinGoalChars() { return ragMinGoalChars; }
+
+    public void setRagMinGoalChars(int v) { this.ragMinGoalChars = v; }
+
+    public int getRagMinGoalCharsClamped() {
+        int m = ragMinGoalChars;
+        if (m < 1) return 1;
+        if (m > 16) return 16;
+        return m;
     }
 }

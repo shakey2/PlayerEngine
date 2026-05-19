@@ -24,6 +24,7 @@ import net.sandrohc.schematic4j.schematic.types.SchematicBlock;
 import com.google.gson.JsonObject;
 import com.mojang.datafixers.util.Either;
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.player2api.AiTaskClass;
 import com.player2.playerengine.player2api.ConversationHistory;
 import com.player2.playerengine.player2api.LLMCompleter;
 import com.player2.playerengine.player2api.Player2APIService;
@@ -137,7 +138,7 @@ public class BuildStructureTask extends Task {
             }, errStr -> {
                 LOGGER.info("LLM Transport Error={}", errStr);
                 finished = true;
-            }, false);
+            }, false, AiTaskClass.PLANNING);
         }
 
         private static <T extends Enum<T> & StringRepresentable & Comparable<T>> BlockState setEnumProp(EnumProperty<T> enumProp, BlockState blockState, String value) {
@@ -284,7 +285,7 @@ public class BuildStructureTask extends Task {
             }, errStr -> {
                 LOGGER.info("LLM Transport Error={}", errStr);
                 llmResult = Optional.of(Either.right(errStr));
-            }, false);
+            }, false, AiTaskClass.PLANNING);
         }
 
         @Override

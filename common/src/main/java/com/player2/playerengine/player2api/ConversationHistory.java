@@ -43,8 +43,20 @@ public class ConversationHistory {
     */
    public ConversationHistory(String initialSystemPrompt, String characterName, String characterShortName) {
       Path configDir = DirUtil.getConfigDir();
-      String fileName = characterName.replaceAll("\\s+", "_") + "_" + characterName.replaceAll("\\s+", "_") + ".txt";
-      this.historyFile = configDir.resolve(fileName);
+      String nameSlug = characterName.replaceAll("\\s+", "_");
+      String shortSlug = characterShortName != null && !characterShortName.isBlank()
+         ? characterShortName.replaceAll("\\s+", "_")
+         : "conversation";
+      Path canonicalFile = configDir.resolve(nameSlug + "_" + shortSlug + ".txt");
+      Path legacyDuplicateNameFile = configDir.resolve(nameSlug + "_" + nameSlug + ".txt");
+      if (Files.exists(canonicalFile)) {
+         this.historyFile = canonicalFile;
+      } else if (Files.exists(legacyDuplicateNameFile)) {
+         this.historyFile = legacyDuplicateNameFile;
+      } else {
+         this.historyFile = canonicalFile;
+      }
+
       if (Files.exists(this.historyFile)) {
          this.loadFromFile();
          this.setBaseSystemPrompt(initialSystemPrompt);
@@ -103,7 +115,7 @@ public class ConversationHistory {
       }
 
       try {
-         String resp = player2apiService.completeConversationToString(temp);
+         String resp = player2apiService.completeConversationToString(temp, AiTaskClass.SUMMARIZATION);
          return resp;
       } catch (Exception var6) {
          var6.printStackTrace();

@@ -91,6 +91,39 @@ public final class BudgetTracker {
     }
 
     /**
+     * Read-only budget check for probe / status (does not increment call count).
+     */
+    public static BudgetCheckResult peek(String billingKey, BudgetThresholds config) {
+        if (billingKey == null) {
+            return BudgetCheckResult.OK;
+        }
+        int soft = config.getSoftBudgetCallsPerWindow();
+        int hard = config.getHardBudgetCallsPerWindow();
+        if (soft == 0 && hard == 0) {
+            return BudgetCheckResult.OK;
+        }
+        long windowMs = (long) config.getBudgetWindowMinutes() * 60_000L;
+        WindowState ws = WINDOWS.get(billingKey);
+        if (ws == null) {
+            return BudgetCheckResult.OK;
+        }
+        synchronized (ws) {
+            long now = System.currentTimeMillis();
+            if (now > ws.windowStartMs + windowMs) {
+                return BudgetCheckResult.OK;
+            }
+            int nextCount = ws.callCount.get() + 1;
+            if (hard > 0 && nextCount > hard) {
+                return BudgetCheckResult.HARD_LIMIT;
+            }
+            if (soft > 0 && nextCount > soft) {
+                return BudgetCheckResult.SOFT_LIMIT;
+            }
+            return BudgetCheckResult.OK;
+        }
+    }
+
+    /**
      * Returns true (and marks the flag) the first time a soft-limit message should be sent in the
      * current window for this billing key. Subsequent calls within the same window return false.
      */

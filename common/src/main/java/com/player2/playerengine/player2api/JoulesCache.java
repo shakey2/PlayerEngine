@@ -58,6 +58,13 @@ public final class JoulesCache {
         }
     }
 
+    /**
+     * Synthetic snapshot for routing probe / self-tests (does not touch the live cache).
+     */
+    public static JoulesSnapshot snapshotForProbe(long joulesDisplay, String patronTier) {
+        return new JoulesSnapshot(joulesDisplay, patronTier != null ? patronTier : "", "probe");
+    }
+
     private static final ConcurrentHashMap<String, JoulesSnapshot> CACHE = new ConcurrentHashMap<>();
 
     /** Return the cached snapshot for the billing key, if present. */
