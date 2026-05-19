@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Resolves a configured fallback profile name to its API base URL (Phase A4).
@@ -53,6 +54,36 @@ public final class ProfileUrlResolver {
                     profileName, profiles.keySet());
         }
         return Optional.ofNullable(url);
+    }
+
+    /**
+     * Returns the base URL of the sole named (non-Default) profile, for B3 task-class routing.
+     *
+     * <p>A profile is "named" if its name is not {@code "default"} (case-insensitive).
+     * Returns empty if there are zero named profiles or more than one named profile.
+     * Callers must not assume a specific name for the patron tier.
+     */
+    public static Optional<String> getSoleNamedProfileBaseUrl(Player2APIService apiService) {
+        Map<String, String> profiles = ensureLoaded(apiService);
+        String found = null;
+        for (Map.Entry<String, String> entry : profiles.entrySet()) {
+            if (!"default".equalsIgnoreCase(entry.getKey())) {
+                if (found != null) {
+                    LOGGER.debug("ProfileUrlResolver.getSoleNamedProfileBaseUrl: >1 named profiles — returning empty");
+                    return Optional.empty();
+                }
+                found = entry.getValue();
+            }
+        }
+        return Optional.ofNullable(found);
+    }
+
+    /**
+     * Returns all known profile names (for debug / routing probe commands).
+     * Returns an empty set if the profile list has not been fetched yet or the fetch failed.
+     */
+    public static Set<String> getProfileNames(Player2APIService apiService) {
+        return Collections.unmodifiableSet(ensureLoaded(apiService).keySet());
     }
 
     /** Force re-fetch of the profile list on next use (e.g., after server reload). */

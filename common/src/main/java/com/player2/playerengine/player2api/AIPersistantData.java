@@ -84,6 +84,19 @@ public class AIPersistantData {
         conversationHistory.setBaseSystemPrompt(systemPrompt);
     }
 
+    /**
+     * Updates the system prompt using a pre-built valid-commands block from {@code RagPromptBuilder}
+     * rather than the full command list (Phase B3 live RAG path).
+     *
+     * @param validCommandsBlock formatted commands block from
+     *        {@link com.player2.playerengine.retrieval.RagPromptBuilder#buildValidCommandsBlock}
+     */
+    public void updateSystemPromptWithBlock(String validCommandsBlock) {
+        String block = validCommandsBlock != null ? validCommandsBlock : "";
+        String systemPrompt = Prompts.getAINPCSystemPromptWithValidCommandsBlock(character, block, mod.getOwnerUsername());
+        conversationHistory.setBaseSystemPrompt(systemPrompt);
+    }
+
     public void saveHistoryNow() {
         conversationHistory.saveNow();
     }
@@ -158,13 +171,12 @@ public class AIPersistantData {
                 Files.createDirectories(newHistoryFile.getParent());
             }
 
-            // 1) Legacy: global config dir, name-keyed .txt
+            // 1) Legacy: global config dir, name-keyed .txt (duplicate-name or canonical slug)
             if (character != null) {
                 String characterName = character.name();
                 if (characterName != null && !characterName.isBlank()) {
-                    String fileName = characterName.replaceAll("\\s+", "_") + "_" + characterName.replaceAll("\\s+", "_") + ".txt";
-                    Path legacyFile = DirUtil.getConfigDir().resolve(fileName);
-                    if (Files.exists(legacyFile)) {
+                    Path legacyFile = resolveLegacyGlobalHistoryFile(characterName);
+                    if (legacyFile != null) {
                         Files.copy(legacyFile, newHistoryFile);
                     }
                 }
@@ -200,5 +212,22 @@ public class AIPersistantData {
         } catch (Exception e) {
             // Best-effort migration; ignore failures.
         }
+    }
+
+    /** Legacy config-dir history files (pre-UUID paths). */
+    private static Path resolveLegacyGlobalHistoryFile(String characterName) {
+        String slug = characterName.replaceAll("\\s+", "_");
+        Path configDir = DirUtil.getConfigDir();
+        Path duplicateNameFile = configDir.resolve(slug + "_" + slug + ".txt");
+        if (Files.exists(duplicateNameFile)) {
+            return duplicateNameFile;
+        }
+
+        Path canonicalFile = configDir.resolve(slug + "_conversation.txt");
+        if (Files.exists(canonicalFile)) {
+            return canonicalFile;
+        }
+
+        return null;
     }
 }

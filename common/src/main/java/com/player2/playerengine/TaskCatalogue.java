@@ -114,20 +114,31 @@ public class TaskCatalogue {
 
       result.forceDimension(Dimension.OVERWORLD);
       if (nameToResourceTask.containsKey(name)) {
-         return result;
+         Debug.logWarning("TaskCatalogue: duplicate catalogue name \"" + name + "\"; keeping first registration.");
       } else {
          nameToResourceTask.put(name, result);
          nameToItemMatches.put(name, matches);
-         resourcesObtainable.addAll(Arrays.asList(matches));
-         if (matches.length == 1) {
-            if (itemToResourceTask.containsKey(matches[0])) {
-               throw new IllegalStateException("Tried cataloguing " + matches[0].getDescriptionId() + " twice!");
+      }
+
+      registerObtainableItems(matches, result);
+      return result;
+   }
+
+   private static void registerObtainableItems(Item[] matches, TaskCatalogue.CataloguedResource result) {
+      resourcesObtainable.addAll(Arrays.asList(matches));
+      if (matches.length == 1) {
+         Item item = matches[0];
+         if (itemToResourceTask.containsKey(item)) {
+            if (itemToResourceTask.get(item) != result) {
+               Debug.logWarning(
+                  "TaskCatalogue: item "
+                     + item.getDescriptionId()
+                     + " already mapped to another catalogue entry; keeping first mapping."
+               );
             }
-
-            itemToResourceTask.put(matches[0], result);
+         } else {
+            itemToResourceTask.put(item, result);
          }
-
-         return result;
       }
    }
 
@@ -317,7 +328,7 @@ public class TaskCatalogue {
          MapColor mCol = dCol.getMapColor();
          ItemHelper.ColorfulItems color = ItemHelper.getColorfulItems(mCol);
          String prefix = color.colorName;
-         put(prefix + "_" + prefix, new Item[]{getMatch.apply(color)}, count -> getTask.apply(color, count));
+         put(prefix + "_" + baseName, new Item[]{getMatch.apply(color)}, count -> getTask.apply(color, count));
       }
    }
 
@@ -353,7 +364,7 @@ public class TaskCatalogue {
       BiFunction<ItemHelper.WoodItems, Integer, ResourceTask> getTask,
       boolean requireNetherForNetherStuff
    ) {
-      return woodTasks(woodItem -> woodItem.prefix + "_" + woodItem.prefix, getMatch, getTask, requireNetherForNetherStuff);
+      return woodTasks(woodItem -> woodItem.prefix + "_" + baseName, getMatch, getTask, requireNetherForNetherStuff);
    }
 
    private static TaskCatalogue.CataloguedResource[] woodTasks(

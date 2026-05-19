@@ -118,24 +118,66 @@ public class LLMCompleter {
         });
     }
 
+    /**
+     * Submit a JSON-parsed LLM completion request for the given task class.
+     *
+     * @param taskClass determines which Player2 profile is used (B3 routing)
+     */
+    public void processToJson(
+            Player2APIService player2apiService,
+            ConversationHistory history,
+            Consumer<JsonObject> extOnLLMResponse,
+            Consumer<String> extOnErrMsg,
+            boolean isConversation,
+            AiTaskClass taskClass) {
+        process(player2apiService, history, extOnLLMResponse, extOnErrMsg,
+                h -> player2apiService.completeConversation(h, taskClass), isConversation);
+    }
+
+    /**
+     * NPC chat / command pick. Defaults to {@link AiTaskClass#DECISION}.
+     *
+     * @deprecated Pass an explicit {@link AiTaskClass}. Kept for compatibility.
+     */
+    @Deprecated
     public void processToJson(
             Player2APIService player2apiService,
             ConversationHistory history,
             Consumer<JsonObject> extOnLLMResponse,
             Consumer<String> extOnErrMsg,
             boolean isConversation) {
-        process(player2apiService, history, extOnLLMResponse, extOnErrMsg,
-                player2apiService::completeConversation, isConversation);
+        processToJson(player2apiService, history, extOnLLMResponse, extOnErrMsg, isConversation, AiTaskClass.DECISION);
     }
 
+    /**
+     * Submit a plain-text LLM completion request for the given task class.
+     *
+     * @param taskClass determines which Player2 profile is used (B3 routing)
+     */
+    public void processToString(
+            Player2APIService player2apiService,
+            ConversationHistory history,
+            Consumer<String> extOnLLMResponse,
+            Consumer<String> extOnErrMsg,
+            boolean isConversation,
+            AiTaskClass taskClass) {
+        process(player2apiService, history, extOnLLMResponse, extOnErrMsg,
+                h -> player2apiService.completeConversationToString(h, taskClass), isConversation);
+    }
+
+    /**
+     * Defaults to {@link AiTaskClass#DECISION}.
+     *
+     * @deprecated Pass an explicit {@link AiTaskClass}. Kept for compatibility.
+     */
+    @Deprecated
     public void processToString(
             Player2APIService player2apiService,
             ConversationHistory history,
             Consumer<String> extOnLLMResponse,
             Consumer<String> extOnErrMsg,
             boolean isConversation) {
-        process(player2apiService, history, extOnLLMResponse, extOnErrMsg,
-                player2apiService::completeConversationToString, isConversation);
+        processToString(player2apiService, history, extOnLLMResponse, extOnErrMsg, isConversation, AiTaskClass.DECISION);
     }
 
     public boolean isAvailible() {

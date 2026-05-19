@@ -9,7 +9,9 @@ public abstract class TypeSquasher<T extends ResourceTask> {
    private final List<T> tasks = new ArrayList<>();
 
    void add(T task) {
-      this.tasks.add(task);
+      if (task != null) {
+         this.tasks.add(task);
+      }
    }
 
    public List<ResourceTask> getSquashed() {

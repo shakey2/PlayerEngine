@@ -1,16 +1,37 @@
 package com.player2.playerengine;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.builder.ArgumentBuilder;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
 
+import com.player2.playerengine.executor.BudgetFallbackBehavior;
+import com.player2.playerengine.executor.BudgetTracker;
+import com.player2.playerengine.player2api.AiTaskClass;
+import com.player2.playerengine.player2api.JoulesCache;
+import com.player2.playerengine.player2api.ModelTierRouter;
+import com.player2.playerengine.player2api.Player2PayerResolution;
+import com.player2.playerengine.player2api.ProfileUrlResolver;
+import com.player2.playerengine.player2api.RoutingResult;
 import com.player2.playerengine.player2api.auth.AuthenticationManager;
 import com.player2.playerengine.player2api.Player2APIService;
+import com.player2.playerengine.player2api.config.BudgetThresholds;
+import com.player2.playerengine.player2api.config.Player2PayerMode;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
+import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
+import com.player2.playerengine.player2api.PlayerBudgetConfigHolder;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -33,6 +54,9 @@ import com.player2.playerengine.retrieval.ToolRetriever;
 public class MCCommands {
 
     public static final Logger LOGGER = LogManager.getLogger(PlayerEngine.MOD_NAME);
+
+    /** Max {@code --category} flags before the goal string on {@code rag retrieve}. */
+    private static final int RAG_RETRIEVE_MAX_CATEGORIES = 8;
 
     public static void onInit() {
         LifecycleEvent.SERVER_STARTING.register(server -> {
@@ -69,6 +93,7 @@ public class MCCommands {
                          .then(registerSummon())
                          .then(registerQueueClear())
                          .then(registerRag())
+                         .then(registerRouting())
                         .then(registerHelp()));
     }
     private static LiteralArgumentBuilder<CommandSourceStack> registerHelp() {
@@ -130,9 +155,10 @@ public class MCCommands {
      * {@code /playerengine rag <retrieve|reload|inspect>} — OP-only (permission 2).
      *
      * <ul>
-     *   <li>{@code retrieve <goal>} — runs retrieval for the executing player's per-owner
-     *       index and prints top-5 results. Falls back to the global index when executed
-     *       from a non-player context (e.g. the server console).
+     *   <li>{@code retrieve <goal>} or {@code retrieve --category <tag> ... <goal>} — runs
+     *       retrieval for the executing player's per-owner index and prints top-5 results
+     *       (category flags must precede the goal). Falls back to the global index when
+     *       executed from a non-player context (e.g. the server console).
      *   <li>{@code reload} — re-reads all overlay files from disk, rebuilds the global
      *       retriever, and evicts all per-owner caches.
      *   <li>{@code inspect <toolId>} — prints all fields of the merged ToolDocument for the
@@ -142,36 +168,7 @@ public class MCCommands {
     private static LiteralArgumentBuilder<CommandSourceStack> registerRag() {
         return Commands.literal("rag")
                 .requires(src -> src.hasPermission(2))
-                .then(Commands.literal("retrieve")
-                        .then(Commands.argument("goal", StringArgumentType.greedyString())
-                                .executes(ctx -> {
-                                    CommandSourceStack src = ctx.getSource();
-                                    String goal = StringArgumentType.getString(ctx, "goal");
-
-                                    ToolRetriever retriever = resolveRetriever(src);
-                                    if (retriever == null) {
-                                        src.sendFailure(Component.literal("RAG index not initialized."));
-                                        return 0;
-                                    }
-                                    java.util.List<RetrievalHit> hits = retriever.retrieve(goal, 5);
-                                    StringBuilder sb = new StringBuilder();
-                                    sb.append("RAG top-").append(hits.size())
-                                      .append(" for \"").append(goal).append("\":\n");
-                                    for (int i = 0; i < hits.size(); i++) {
-                                        RetrievalHit h = hits.get(i);
-                                        sb.append(i + 1).append(". ").append(h.toolId())
-                                          .append(" (score=").append(String.format("%.4f", h.score()))
-                                          .append(", bm25=").append(
-                                              h.bm25Rank() == Integer.MAX_VALUE ? "-" : h.bm25Rank())
-                                          .append(", minhash=").append(
-                                              h.minHashRank() == Integer.MAX_VALUE ? "-" : h.minHashRank())
-                                          .append(")\n");
-                                    }
-                                    if (hits.isEmpty()) sb.append("  (no results)");
-                                    LOGGER.info(sb.toString());
-                                    src.sendSuccess(() -> Component.literal(sb.toString()), false);
-                                    return hits.size();
-                                })))
+                .then(buildRagRetrieveCommand())
                 .then(Commands.literal("reload")
                         .executes(ctx -> {
                             MinecraftServer server = ctx.getSource().getServer();
@@ -233,10 +230,258 @@ public class MCCommands {
                                 })));
     }
 
+    private static LiteralArgumentBuilder<CommandSourceStack> buildRagRetrieveCommand() {
+        LiteralArgumentBuilder<CommandSourceStack> retrieve = Commands.literal("retrieve");
+        retrieve.then(Commands.argument("goal", StringArgumentType.greedyString())
+                .executes(ctx -> executeRagRetrieve(ctx, Collections.emptyList())));
+        ArgumentBuilder<CommandSourceStack, ?> withCategories =
+                Commands.argument("goal", StringArgumentType.greedyString())
+                        .executes(ctx -> executeRagRetrieve(ctx, collectRagCategoryArgs(ctx)));
+        for (int i = RAG_RETRIEVE_MAX_CATEGORIES; i >= 1; i--) {
+            final int idx = i;
+            withCategories = Commands.literal("--category")
+                    .then(Commands.argument("cat" + idx, StringArgumentType.word())
+                            .then(withCategories));
+        }
+        retrieve.then(withCategories);
+        return retrieve;
+    }
+
+    private static List<String> collectRagCategoryArgs(CommandContext<CommandSourceStack> ctx) {
+        List<String> cats = new ArrayList<>();
+        for (int i = 1; i <= RAG_RETRIEVE_MAX_CATEGORIES; i++) {
+            String key = "cat" + i;
+            try {
+                cats.add(StringArgumentType.getString(ctx, key));
+            } catch (IllegalArgumentException ignored) {
+                break;
+            }
+        }
+        return cats;
+    }
+
+    private static int executeRagRetrieve(CommandContext<CommandSourceStack> ctx, List<String> categoryTags) {
+        CommandSourceStack src = ctx.getSource();
+        String goal = StringArgumentType.getString(ctx, "goal");
+
+        ToolRetriever retriever = resolveRetriever(src);
+        if (retriever == null) {
+            src.sendFailure(Component.literal("RAG index not initialized."));
+            return 0;
+        }
+
+        Set<String> filter = categoryTags.isEmpty()
+                ? null
+                : new HashSet<>(categoryTags);
+        List<RetrievalHit> hits = retriever.retrieve(goal, 5, filter);
+
+        StringBuilder sb = new StringBuilder();
+        if (filter != null && !filter.isEmpty()) {
+            sb.append("Categories: ").append(String.join(", ", filter)).append("\n");
+        }
+        sb.append("RAG top-").append(hits.size())
+          .append(" for \"").append(goal).append("\":\n");
+        for (int i = 0; i < hits.size(); i++) {
+            RetrievalHit h = hits.get(i);
+            sb.append(i + 1).append(". ").append(h.toolId())
+              .append(" (score=").append(String.format("%.4f", h.score()))
+              .append(", bm25=").append(
+                  h.bm25Rank() == Integer.MAX_VALUE ? "-" : h.bm25Rank())
+              .append(", minhash=").append(
+                  h.minHashRank() == Integer.MAX_VALUE ? "-" : h.minHashRank())
+              .append(")\n");
+        }
+        if (hits.isEmpty()) {
+            sb.append("  (no results)");
+        }
+        LOGGER.info(sb.toString());
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return hits.size();
+    }
+
     /**
      * Resolves the appropriate {@link ToolRetriever} for a command source.
      * Uses the executing player's per-owner retriever if available; falls back to global.
      */
+    /**
+     * {@code /playerengine routing probe <TASK_CLASS>} — OP-only (permission 2).
+     * Optional {@code --simulate-joules <n>} and {@code --simulate-soft-budget} (read-only; no HTTP).
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> registerRouting() {
+        return Commands.literal("routing")
+                .requires(src -> src.hasPermission(2))
+                .then(buildRoutingProbeCommand());
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> buildRoutingProbeCommand() {
+        LiteralArgumentBuilder<CommandSourceStack> probe = Commands.literal("probe");
+
+        probe.then(routingProbeTaskClassArg(null, false));
+
+        probe.then(Commands.literal("--simulate-soft-budget")
+                .then(routingProbeTaskClassArg(null, true)));
+
+        probe.then(Commands.literal("--simulate-joules")
+                .then(Commands.argument("joules", IntegerArgumentType.integer(0))
+                        .then(routingProbeTaskClassArg("joules", false))));
+
+        probe.then(Commands.literal("--simulate-joules")
+                .then(Commands.argument("joules", IntegerArgumentType.integer(0))
+                        .then(Commands.literal("--simulate-soft-budget")
+                                .then(routingProbeTaskClassArg("joules", true)))));
+
+        return probe;
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> routingProbeTaskClassArg(
+            String joulesArgName, boolean simulateSoftBudget) {
+        return Commands.argument("taskClass", StringArgumentType.word())
+                .suggests(ROUTING_TASK_CLASS_SUGGEST)
+                .executes(ctx -> {
+                    Integer simJoules = joulesArgName != null
+                            ? IntegerArgumentType.getInteger(ctx, joulesArgName)
+                            : null;
+                    return executeRoutingProbe(ctx, simJoules, simulateSoftBudget);
+                });
+    }
+
+    private static final SuggestionProvider<CommandSourceStack> ROUTING_TASK_CLASS_SUGGEST = (ctx, builder) -> {
+        for (AiTaskClass c : AiTaskClass.values()) {
+            builder.suggest(c.name());
+        }
+        return builder.buildFuture();
+    };
+
+    private static int executeRoutingProbe(CommandContext<CommandSourceStack> ctx,
+            Integer simulateJoules,
+            boolean simulateSoftBudget) {
+        CommandSourceStack src = ctx.getSource();
+        String taskClassRaw = StringArgumentType.getString(ctx, "taskClass");
+        AiTaskClass taskClass;
+        try {
+            taskClass = AiTaskClass.valueOf(taskClassRaw.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            src.sendFailure(Component.literal("Unknown task class: " + taskClassRaw
+                    + ". Use RETRIEVAL, RERANKING, SUMMARIZATION, PLANNING, or DECISION."));
+            return 0;
+        }
+
+        if (PlayerEngineController.staticAPIServices.isEmpty()) {
+            src.sendFailure(Component.literal("No Player2 API service registered (no active bots)."));
+            return 0;
+        }
+        Player2APIService apiService = PlayerEngineController.staticAPIServices.values().iterator().next();
+        PlayerEngineController controller = apiService.getController();
+
+        String initiatorName = null;
+        try {
+            initiatorName = src.getPlayerOrException().getName().getString();
+        } catch (Exception ignored) {
+        }
+
+        Player2PayerResolution.ApiBillingContext billing =
+                Player2PayerResolution.resolve(controller, initiatorName, apiService.getClientId());
+        String billingKey = billing.billingKey();
+
+        Player2ServerRuntimeConfig serverConfig = Player2ServerConfigHolder.get();
+        BudgetThresholds thresholds;
+        if (serverConfig.getPayerMode() == Player2PayerMode.PROMPTER_PAYS && billing.onlinePayer() != null) {
+            thresholds = PlayerBudgetConfigHolder.load(
+                    billing.onlinePayer().getServer(), billing.onlinePayer().getUUID());
+        } else {
+            thresholds = serverConfig;
+        }
+
+        JoulesCache.JoulesSnapshot liveSnap = billingKey != null
+                ? JoulesCache.get(billingKey).orElse(null)
+                : null;
+        JoulesCache.JoulesSnapshot snap = liveSnap;
+        if (simulateJoules != null) {
+            String tier = liveSnap != null ? liveSnap.patronTier : "";
+            snap = JoulesCache.snapshotForProbe(simulateJoules, tier);
+        }
+
+        BudgetTracker.BudgetCheckResult callBudget = simulateSoftBudget
+                ? BudgetTracker.BudgetCheckResult.SOFT_LIMIT
+                : BudgetTracker.peek(billingKey, thresholds);
+        BudgetTracker.BudgetCheckResult joulesBudget =
+                JoulesCache.checkJoulesThreshold(snap, thresholds);
+        BudgetTracker.BudgetCheckResult combined =
+                BudgetTracker.stricter(callBudget, joulesBudget);
+
+        boolean a4WouldSupersede = false;
+        String a4Note = "no";
+        if (combined == BudgetTracker.BudgetCheckResult.SOFT_LIMIT) {
+            String fallback = serverConfig.getFallbackProfile();
+            boolean dedicated = serverConfig.isDedicatedClientProxy();
+            if (serverConfig.getBudgetFallbackBehavior() == BudgetFallbackBehavior.SWITCH_PROFILE
+                    && fallback != null && !fallback.isBlank() && !dedicated) {
+                a4WouldSupersede = ProfileUrlResolver.resolve(apiService, fallback).isPresent();
+                a4Note = a4WouldSupersede
+                        ? "yes — A4 SWITCH_PROFILE would use fallback '" + fallback + "' (B3 skipped)"
+                        : "soft budget active but fallback profile '" + fallback + "' not resolved";
+            } else if (simulateSoftBudget) {
+                a4Note = "simulated soft budget — "
+                        + (serverConfig.getBudgetFallbackBehavior() == BudgetFallbackBehavior.HARD_STOP
+                        ? "HARD_STOP would block"
+                        : "no SWITCH_PROFILE / missing fallback / dedicated proxy");
+            } else {
+                a4Note = "soft budget active — "
+                        + serverConfig.getBudgetFallbackBehavior().name();
+            }
+        } else if (combined == BudgetTracker.BudgetCheckResult.HARD_LIMIT) {
+            a4Note = "hard budget — all AI calls blocked (B3 not reached)";
+        }
+
+        RoutingResult routing = ModelTierRouter.resolveWithRule(
+                taskClass,
+                ProfileUrlResolver.getSoleNamedProfileBaseUrl(apiService),
+                snap,
+                thresholds,
+                serverConfig);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Routing probe — ").append(taskClass.name()).append('\n');
+        sb.append("  B3 outcome: ").append(ModelTierRouter.describeOutcome(routing.decision())).append('\n');
+        sb.append("  B3 matched rule: ").append(routing.matchedRule()).append('\n');
+        sb.append("  on-device: ").append(routing.decision().isOnDevice()).append('\n');
+        if (snap != null) {
+            sb.append("  joules: ").append(snap.joulesDisplay());
+            if (simulateJoules != null) {
+                sb.append(" (simulated)");
+            }
+            sb.append('\n');
+            sb.append("  patron_tier: ").append(snap.patronTier.isEmpty() ? "(none)" : snap.patronTier).append('\n');
+            long ageMs = System.currentTimeMillis() - snap.refreshedAtMs;
+            sb.append("  joules cache age: ").append(ageMs / 1000).append("s\n");
+        } else {
+            sb.append("  joules: (no cached snapshot)\n");
+        }
+        sb.append("  softJoulesThreshold: ").append(thresholds.getSoftJoulesThreshold()).append('\n');
+        sb.append("  hardJoulesThreshold: ").append(thresholds.getHardJoulesThreshold()).append('\n');
+        sb.append("  call budget (peek): ").append(callBudget.name());
+        if (simulateSoftBudget) {
+            sb.append(" (simulated soft)");
+        }
+        sb.append('\n');
+        sb.append("  joules budget: ").append(joulesBudget.name()).append('\n');
+        sb.append("  combined budget: ").append(combined.name()).append('\n');
+        sb.append("  A4 would supersede B3: ").append(a4Note).append('\n');
+        sb.append("  fallbackProfile: ")
+                .append(serverConfig.getFallbackProfile() != null ? serverConfig.getFallbackProfile() : "(none)")
+                .append('\n');
+        sb.append("  budgetFallbackBehavior: ").append(serverConfig.getBudgetFallbackBehavior().name()).append('\n');
+        sb.append("  dedicatedClientProxy: ").append(serverConfig.isDedicatedClientProxy()).append('\n');
+        sb.append("  cached ai_profiles: ").append(ProfileUrlResolver.getProfileNames(apiService)).append('\n');
+        sb.append("  sole named profile URL: ")
+                .append(ProfileUrlResolver.getSoleNamedProfileBaseUrl(apiService).orElse("(none)")).append('\n');
+        sb.append("  billingKey: ").append(billingKey != null ? billingKey : "(none)").append('\n');
+
+        LOGGER.info(sb.toString());
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+    }
+
     private static ToolRetriever resolveRetriever(CommandSourceStack src) {
         try {
             ServerPlayer player = src.getPlayerOrException();

@@ -49,10 +49,13 @@ public class Prompts {
       - Avoid Filler Phrases: Do not engage in repetitive or filler content.
       - If somebody asks, greets or talks to another person, don't respond. Although you can try and offer your help if needed.
       - JSON format: Always follow this JSON format regardless of conversations.
-      Valid Commands:
+      Valid Commands (subset retrieved for this turn — use idle/stop/bodylang if none fit; only listed command ids can be selected):
       {{validCommands}}
       """;
 
+  /**
+   * Full command list (pre-B3 / rollback when {@code ragLiveEnabled} is false).
+   */
   public static String getAINPCSystemPrompt(Character character, Collection<Command> altoclefCommands,
       String ownerUsername) {
     StringBuilder commandListBuilder = new StringBuilder();
@@ -72,6 +75,22 @@ public class Prompts {
             "validCommands",
             validCommandsFormatted, "ownerUsername", ownerUsername));
     return newPrompt;
+  }
+
+  /**
+   * RAG-backed prompt: {@code validCommandsBlock} is produced by {@link com.player2.playerengine.retrieval.RagPromptBuilder}.
+   */
+  public static String getAINPCSystemPromptWithValidCommandsBlock(
+      Character character,
+      String validCommandsBlock,
+      String ownerUsername) {
+    String block = validCommandsBlock == null ? "" : validCommandsBlock;
+    return Utils.replacePlaceholders(aiNPCPromptTemplate,
+        Map.of(
+            "characterDescription", character.description(),
+            "characterName", character.name(),
+            "validCommands", block,
+            "ownerUsername", ownerUsername));
   }
 
   private final static String buildStructurePrompt = """

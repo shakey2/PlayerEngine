@@ -33,6 +33,9 @@ public final class Player2ServerConfigHolder {
         LOGGER.info("Player2 server config: payerMode={} dedicated={} ownerOfflineContinue={} callByNameChat={} maxSpawnedCompanions={} maxStoredCharacterIds={}",
                 cached.getPayerMode(), cached.isDedicatedClientProxy(), cached.isOwnerOfflineServerContinuation(),
                 cached.isCallByNameChat(), cached.getMaxSpawnedCompanionsPerPlayer(), cached.getMaxStoredCharacterIdsPerPlayer());
+        LOGGER.info("Player2 RAG config: ragLiveEnabled={} ragTopK={} ragFallbackToFullList={} ragMinGoalChars={}",
+                cached.isRagLiveEnabled(), cached.getRagTopKClamped(), cached.isRagFallbackToFullList(),
+                cached.getRagMinGoalCharsClamped());
     }
 
     public static void save() {
@@ -84,6 +87,18 @@ public final class Player2ServerConfigHolder {
         int hard = c.getHardBudgetCallsPerWindow();
         if (soft > 0 && hard > 0 && soft >= hard) {
             LOGGER.warn("Player2 config: softBudgetCallsPerWindow ({}) >= hardBudgetCallsPerWindow ({}) — soft should be lower than hard.", soft, hard);
+        }
+
+        // Phase B3: RAG field validation (clamp on read via getters; fix stored values if out of range)
+        int ragTopK = c.getRagTopK();
+        if (ragTopK < 5 || ragTopK > 20) {
+            LOGGER.warn("Player2 config: ragTopK out of range 5–20 (got {}); using clamped value {}.", ragTopK, c.getRagTopKClamped());
+            c.setRagTopK(c.getRagTopKClamped());
+        }
+        int ragMin = c.getRagMinGoalChars();
+        if (ragMin < 1 || ragMin > 16) {
+            LOGGER.warn("Player2 config: ragMinGoalChars out of range 1–16 (got {}); using clamped value {}.", ragMin, c.getRagMinGoalCharsClamped());
+            c.setRagMinGoalChars(c.getRagMinGoalCharsClamped());
         }
     }
 

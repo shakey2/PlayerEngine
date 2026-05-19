@@ -42,6 +42,17 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     /** What to do at soft limits: SWITCH_PROFILE or HARD_STOP. */
     private BudgetFallbackBehavior budgetFallbackBehavior = BudgetFallbackBehavior.HARD_STOP;
 
+    // --- Phase B3: RAG live prompt ---
+
+    /** Max tools injected into the NPC system prompt per turn (clamped 5–20 on read). */
+    private int ragTopK = 12;
+    /** When retrieval fails, fall back to the full command list instead of always-include only. */
+    private boolean ragFallbackToFullList = true;
+    /** When false, NPC prompts use the full command list (pre-B3 behavior). */
+    private boolean ragLiveEnabled = true;
+    /** Minimum alphanumeric goal length before running retrieval (clamped 1–16 on read). */
+    private int ragMinGoalChars = 3;
+
     public Player2PayerMode getPayerMode() {
         return payerMode == null ? Player2PayerMode.PROMPTER_PAYS : payerMode;
     }
@@ -128,5 +139,43 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     }
     public void setBudgetFallbackBehavior(BudgetFallbackBehavior v) {
         this.budgetFallbackBehavior = v == null ? BudgetFallbackBehavior.HARD_STOP : v;
+    }
+
+    // --- Phase B3 getters/setters ---
+
+    public int getRagTopK() { return ragTopK; }
+
+    public void setRagTopK(int v) { this.ragTopK = v; }
+
+    /** Clamped to [5, 20]. */
+    public int getRagTopKClamped() {
+        int k = ragTopK;
+        if (k < 5) return 5;
+        if (k > 20) return 20;
+        return k;
+    }
+
+    public boolean isRagFallbackToFullList() { return ragFallbackToFullList; }
+
+    public void setRagFallbackToFullList(boolean ragFallbackToFullList) {
+        this.ragFallbackToFullList = ragFallbackToFullList;
+    }
+
+    public boolean isRagLiveEnabled() { return ragLiveEnabled; }
+
+    public void setRagLiveEnabled(boolean ragLiveEnabled) {
+        this.ragLiveEnabled = ragLiveEnabled;
+    }
+
+    public int getRagMinGoalChars() { return ragMinGoalChars; }
+
+    public void setRagMinGoalChars(int v) { this.ragMinGoalChars = v; }
+
+    /** Clamped to [1, 16]. */
+    public int getRagMinGoalCharsClamped() {
+        int m = ragMinGoalChars;
+        if (m < 1) return 1;
+        if (m > 16) return 16;
+        return m;
     }
 }

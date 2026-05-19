@@ -1,6 +1,7 @@
 package com.player2.playerengine.player2api;
 
 import java.util.Deque;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -17,10 +18,16 @@ import com.player2.playerengine.player2api.BotBlacklistPolicy;
 import com.player2.playerengine.player2api.UserBlacklistPolicy;
 import com.player2.playerengine.player2api.AgentSideEffects.CommandExecutionStopReason;
 import com.player2.playerengine.player2api.Event.InfoMessage;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
+import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
 import com.player2.playerengine.player2api.status.AgentStatus;
 import com.player2.playerengine.player2api.status.StatusUtils;
 import com.player2.playerengine.player2api.status.WorldStatus;
 import com.player2.playerengine.player2api.utils.Utils;
+import com.player2.playerengine.retrieval.RagIndex;
+import com.player2.playerengine.retrieval.RagPromptBuilder;
+import com.player2.playerengine.retrieval.RetrievalHit;
+import com.player2.playerengine.retrieval.ToolRetriever;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.LivingEntity;
 
@@ -45,6 +52,14 @@ public class AgentConversationData {
 
     /** Latest prompting username from the current batch (prompter-pays billing). */
     private String chainInitiatorUsername;
+
+    // --- Phase B3: per-turn RAG prompt cache ---
+    /** Most recent retrieval hits; reused when the goal text is short or the batch has no user message. */
+    private List<RetrievalHit> cachedRetrievalHits = List.of();
+    /** Hash of the last injected tool-id set; used to skip redundant system-prompt rewrites. */
+    private int cachedPromptIdHash = 0;
+    /** Suppress repeated warnings when the RAG index is not yet initialised for this bot. */
+    private boolean ragFallbackWarnedOnce = false;
 
     /**
      * Per-bot TTS pacing: nanoTime() after which this specific bot is allowed to start a new
@@ -123,6 +138,8 @@ public class AgentConversationData {
         isProcessing = false;
         chainInitiatorUsername = null;
         clearTtsCooldown();
+        cachedRetrievalHits = List.of();
+        cachedPromptIdHash = 0;
     }
 
     // get LLM response and add to conversation history
@@ -184,10 +201,21 @@ public class AgentConversationData {
             return;
         }
 
+        // --- Phase B3: capture last user message text before the queue is drained ---
+        Event.UserMessage lastUserMsgForRag = null;
+        for (Event e : eventQueue) {
+            if (e instanceof Event.UserMessage um) {
+                lastUserMsgForRag = um;
+            }
+        }
+
         // prepare conversation history for LLM call
         Event lastEvent = mod.getAIPersistantData().dumpEventQueueToConversationHistoryAndReturnLastEvent(eventQueue,
                 mod.getPlayer2APIService());
         Optional<String> reminderString = getReminderStringFromLastEvent(lastEvent);
+
+        // --- Phase B3: update system prompt with RAG-retrieved commands ---
+        maybeUpdateRagSystemPrompt(lastUserMsgForRag);
 
         // remove all invalid npcs:
         String defaultReminderString = " | REMEMBER TO OUTPUT ONLY VALID JSON OUTPUT";
@@ -237,7 +265,7 @@ public class AgentConversationData {
                 this.isProcessing = false;
             }
         };
-        completer.processToJson(mod.getPlayer2APIService(), historyWithWrappedStatus, onLLMResponse, onErrMsg, true);
+        completer.processToJson(mod.getPlayer2APIService(), historyWithWrappedStatus, onLLMResponse, onErrMsg, true, AiTaskClass.DECISION);
     }
 
     private boolean isEventDuplicateOfLastMessage(Event evt) {
@@ -271,6 +299,121 @@ public class AgentConversationData {
         }
         return Optional.of(Prompts.generalConversationReminder);
     }
+
+    // --- Phase B3: per-turn RAG helpers ---
+
+    /**
+     * Updates the NPC system prompt with a RAG-retrieved command set for the given turn.
+     *
+     * <p>Skips retrieval on greeting turns and when the goal text is too short.
+     * Reuses cached hits when the batch contains only InfoMessage events.
+     * Falls back to the full command list when the RAG index is not initialised,
+     * controlled by {@code ragFallbackToFullList}.
+     */
+    private void maybeUpdateRagSystemPrompt(Event.UserMessage lastUserMsgForRag) {
+        Player2ServerRuntimeConfig config = Player2ServerConfigHolder.get();
+        if (!config.isRagLiveEnabled()) {
+            return;
+        }
+
+        // Greeting turn: inject the always-include set only (no content-based retrieval yet).
+        if (isGreetingResponse) {
+            updateSystemPromptAlwaysIncludeOnly();
+            LOGGER.debug("[RAG] skip retrieval: greeting turn for bot={}", getName());
+            return;
+        }
+
+        // InfoMessage-only batch or autonomous step: reuse cached hits from the previous user turn.
+        if (lastUserMsgForRag == null) {
+            applyRagPromptFromCache(config);
+            return;
+        }
+
+        // Short goal text: not enough signal for BM25 — reuse cached hits.
+        String goalText = lastUserMsgForRag.message();
+        if (!RagPromptBuilder.hasSubstantiveGoalText(goalText, config.getRagMinGoalCharsClamped())) {
+            LOGGER.debug("[RAG] skip retrieval: short goal for bot={}", getName());
+            applyRagPromptFromCache(config);
+            return;
+        }
+
+        // Resolve owner-scoped retriever.
+        MinecraftServer server = mod.getPlayer().getServer();
+        UUID ownerUuid = mod.getOwner() != null ? mod.getOwner().getUUID() : null;
+        ToolRetriever retriever = RagIndex.getForOwner(server, ownerUuid);
+
+        if (retriever == null) {
+            if (!ragFallbackWarnedOnce) {
+                LOGGER.warn("[RAG] retriever null for bot={} owner={}; set ragLiveEnabled=false to silence. "
+                        + "Falling back to full command list.", getName(), ownerUuid);
+                ragFallbackWarnedOnce = true;
+            }
+            if (config.isRagFallbackToFullList()) {
+                mod.getAIPersistantData().updateSystemPrompt();
+            } else {
+                updateSystemPromptAlwaysIncludeOnly();
+            }
+            return;
+        }
+
+        List<RetrievalHit> hits = retriever.retrieve(goalText, config.getRagTopKClamped(), null);
+
+        if (hits.isEmpty()) {
+            LOGGER.debug("[RAG] empty retrieval for goal=\"{}\" bot={}", goalText, getName());
+            cachedRetrievalHits = hits;
+            cachedPromptIdHash = 0;
+            if (config.isRagFallbackToFullList()) {
+                mod.getAIPersistantData().updateSystemPrompt();
+            } else {
+                updateSystemPromptAlwaysIncludeOnly();
+            }
+            return;
+        }
+
+        // Skip prompt rewrite when the retrieved tool set hasn't changed since last turn.
+        int newHash = RagPromptBuilder.toolIdSetHash(RagPromptBuilder.ALWAYS_INCLUDE_IDS, hits);
+        if (newHash == cachedPromptIdHash) {
+            LOGGER.debug("[RAG] same tool set (hash={}), skipping prompt update for bot={}", newHash, getName());
+            return;
+        }
+
+        cachedRetrievalHits = hits;
+        cachedPromptIdHash = newHash;
+
+        String block = RagPromptBuilder.buildValidCommandsBlock(
+                retriever.getRegistry(), hits, mod.getCommandExecutor(), RagPromptBuilder.ALWAYS_INCLUDE_IDS);
+        LOGGER.debug("[RAG] injecting {} hits into prompt for goal=\"{}\" bot={}", hits.size(), goalText, getName());
+        mod.getAIPersistantData().updateSystemPromptWithBlock(block);
+    }
+
+    private void applyRagPromptFromCache(Player2ServerRuntimeConfig config) {
+        if (cachedRetrievalHits.isEmpty()) {
+            // No prior retrieval this session; use full list or always-include only.
+            if (config.isRagFallbackToFullList()) {
+                mod.getAIPersistantData().updateSystemPrompt();
+            } else {
+                updateSystemPromptAlwaysIncludeOnly();
+            }
+        }
+        // Otherwise the existing system prompt already contains the cached set — nothing to do.
+    }
+
+    private void updateSystemPromptAlwaysIncludeOnly() {
+        ToolRetriever global = RagIndex.getGlobal();
+        if (global == null) {
+            mod.getAIPersistantData().updateSystemPrompt();
+            return;
+        }
+        String block = RagPromptBuilder.buildValidCommandsBlock(
+                global.getRegistry(), List.of(), mod.getCommandExecutor(), RagPromptBuilder.ALWAYS_INCLUDE_IDS);
+        if (block.isBlank()) {
+            mod.getAIPersistantData().updateSystemPrompt();
+            return;
+        }
+        mod.getAIPersistantData().updateSystemPromptWithBlock(block);
+    }
+
+    // --- end B3 ---
 
     public void onEvent(Event event) {
         addEventToQueue(event);
