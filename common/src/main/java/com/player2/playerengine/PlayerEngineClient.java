@@ -70,6 +70,7 @@ public final class PlayerEngineClient {
                for (int i = 0; i < voiceIdCount; i++) {
                   voiceIds[i] = buf.readUtf();
                }
+               String botUuid = buf.readUtf();
 
                CompletableFuture.runAsync(() -> {
                   try {
@@ -77,6 +78,7 @@ public final class PlayerEngineClient {
                            ? Player2HTTPUtils.awaitToken(Minecraft.getInstance().player, clientId)
                            : token;
                      AudioUtils.streamAudio(clientId, tokenToUse, text, speed, voiceIds);
+                     sendTtsPlaybackDone(botUuid);
                   } catch (Exception e) {
                      LOGGER.warn("Client: TTS request failed for clientId={}: {}", clientId, e.getMessage());
                   }
@@ -154,6 +156,22 @@ public final class PlayerEngineClient {
          LOGGER.warn("Client: Player2 proxy {} failed: {}", requestId, e.getMessage());
          sendProxyResponse(requestId, false, e.getMessage() == null ? e.toString() : e.getMessage());
       }
+   }
+
+   private static void sendTtsPlaybackDone(String botUuid) {
+      Minecraft mc = Minecraft.getInstance();
+      if (mc.getConnection() == null || mc.player == null) {
+         return;
+      }
+      mc.execute(() -> {
+         if (mc.getConnection() == null) {
+            return;
+         }
+         FriendlyByteBuf doneBuf = new FriendlyByteBuf(Unpooled.buffer());
+         doneBuf.writeUtf(botUuid);
+         mc.getConnection().send(NetworkManager.toPacket(NetworkManager.Side.C2S,
+               PlayerEngine.TTS_PLAYBACK_DONE_PACKET_ID, doneBuf));
+      });
    }
 
    private static void sendProxyResponse(String requestId, boolean success, String payloadText) {

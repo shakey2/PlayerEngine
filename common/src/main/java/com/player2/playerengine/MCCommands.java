@@ -50,6 +50,19 @@ import com.player2.playerengine.retrieval.RetrievalHit;
 import com.player2.playerengine.retrieval.SeedToolMetadata;
 import com.player2.playerengine.retrieval.ToolDocument;
 import com.player2.playerengine.retrieval.ToolRetriever;
+import com.player2.playerengine.modintelligence.ModIntelligenceService;
+import com.player2.playerengine.modintelligence.ModIntelligenceStatus;
+import com.player2.playerengine.modintelligence.capability.CapabilityMap;
+import com.player2.playerengine.modintelligence.capability.CapabilitySubjectKind;
+import com.player2.playerengine.modintelligence.enrich.CapabilityEnrichmentService;
+import com.player2.playerengine.modintelligence.query.CapabilityHit;
+import com.player2.playerengine.modintelligence.query.CapabilityQuery;
+import com.player2.playerengine.modintelligence.query.CapabilityQueryService;
+
+import java.util.EnumSet;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
 
 public class MCCommands {
 
@@ -63,6 +76,7 @@ public class MCCommands {
             PlayerEngine.resetBackgroundExecutorsShutdownGate();
             LOGGER.info("Server starting, registering MC commands");
             register(server);
+            ModIntelligenceService.initialize(server);
         });
         LifecycleEvent.SERVER_STOPPING.register(server -> {
             // On dedicated, drop queued AI work before tearing down executors so the next start
@@ -94,6 +108,7 @@ public class MCCommands {
                          .then(registerQueueClear())
                          .then(registerRag())
                          .then(registerRouting())
+                         .then(registerCapability())
                         .then(registerHelp()));
     }
     private static LiteralArgumentBuilder<CommandSourceStack> registerHelp() {
@@ -540,6 +555,115 @@ public class MCCommands {
                             }
                             return 1;
                         }));
-    } 
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> registerCapability() {
+        return Commands.literal("capability")
+                .requires(src -> src.hasPermission(2))
+                .then(Commands.literal("status")
+                        .executes(ctx -> capabilityStatus(ctx.getSource())))
+                .then(Commands.literal("query")
+                        .then(Commands.argument("text", StringArgumentType.greedyString())
+                                .executes(ctx -> capabilityQuery(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "text"), null, null, null))))
+                .then(Commands.literal("inspect")
+                        .then(Commands.argument("kind", StringArgumentType.word())
+                                .then(Commands.argument("id", StringArgumentType.greedyString())
+                                        .executes(ctx -> capabilityInspect(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "kind"),
+                                                StringArgumentType.getString(ctx, "id"))))))
+                .then(Commands.literal("rebuild")
+                        .executes(ctx -> capabilityRebuild(ctx.getSource(), false))
+                        .then(Commands.literal("force")
+                                .executes(ctx -> capabilityRebuild(ctx.getSource(), true))))
+                .then(Commands.literal("enrich")
+                        .executes(ctx -> capabilityEnrich(ctx.getSource(), 0))
+                        .then(Commands.argument("limit", IntegerArgumentType.integer(1, 500))
+                                .executes(ctx -> capabilityEnrich(ctx.getSource(),
+                                        IntegerArgumentType.getInteger(ctx, "limit")))));
+    }
+
+    private static int capabilityStatus(CommandSourceStack src) {
+        ModIntelligenceStatus st = ModIntelligenceService.status();
+        String msg = String.format(
+                "ModIntelligence enabled=%s inspecting=%s enriching=%s entries=%d ready=%d partial=%d unknown=%d inspectFailed=%d tombstoned=%d queued=%d enriched=%d enrichFailures=%d lastBatch=%d/%d/%d packFp=%s lastError=%s",
+                st.isEnabled(), st.isInspecting(), st.isEnriching(), st.getTotalEntries(),
+                st.getReadyEntries(), st.getPartialEntries(), st.getUnknownEntries(),
+                st.getFailedEntries(), st.getTombstonedEntries(), st.getQueuedEnrichments(),
+                st.getEnrichedEntries(), st.getEnrichmentFailures(),
+                st.getLastBatchValidated(), st.getLastBatchFailures(), st.getLastBatchRemaining(),
+                st.getActivePackFingerprint() != null ? st.getActivePackFingerprint().substring(0,
+                        Math.min(24, st.getActivePackFingerprint().length())) : "",
+                st.getLastError() != null ? st.getLastError() : "");
+        src.sendSuccess(() -> Component.literal(msg), false);
+        return 1;
+    }
+
+    private static int capabilityQuery(CommandSourceStack src, String text, String kindFilter,
+                                         String capFilter, Double minConf) {
+        Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
+        CapabilityQuery query = CapabilityQuery.defaults()
+                .setText(text)
+                .setMinConfidence(minConf != null ? minConf : cfg.getModIntelligenceMinQueryConfidence());
+        if (kindFilter != null) {
+            CapabilitySubjectKind kind = CapabilitySubjectKind.valueOf(kindFilter.toUpperCase(Locale.ROOT));
+            query.setSubjectKinds(EnumSet.of(kind));
+        }
+        if (capFilter != null) {
+            query.setRequiredCapabilities(Set.of(capFilter));
+        }
+        List<CapabilityHit> hits = ModIntelligenceService.queryService()
+                .query(query, cfg.getModIntelligenceQueryTopKClamped());
+        StringBuilder sb = new StringBuilder("Capability query (").append(hits.size()).append(" hits):\n");
+        for (CapabilityHit hit : hits) {
+            sb.append(String.format("  %s %s score=%.3f conf=%.2f caps=%s status=%s%n",
+                    hit.getSubjectKind(), hit.getSubjectId(), hit.getScore(),
+                    hit.getBestCapabilityConfidence(), hit.getMatchedCapabilities(), hit.getStatus()));
+        }
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+    }
+
+    private static int capabilityInspect(CommandSourceStack src, String kindRaw, String id) {
+        CapabilitySubjectKind kind = CapabilitySubjectKind.valueOf(kindRaw.toUpperCase(Locale.ROOT));
+        Optional<CapabilityMap> map = ModIntelligenceService.queryService().get(kind, id);
+        if (map.isEmpty()) {
+            src.sendFailure(Component.literal("No capability map for " + kind + " " + id));
+            return 0;
+        }
+        CapabilityMap m = map.get();
+        StringBuilder sb = new StringBuilder();
+        sb.append("inspect ").append(kind).append(' ').append(id).append('\n');
+        sb.append("status=").append(m.getStatus()).append(" fingerprint=").append(m.getEntryFingerprint()).append('\n');
+        sb.append("capabilities=").append(m.getCapabilities().size()).append(" warnings=").append(m.getWarnings()).append('\n');
+        if (m.getEnrichment() != null) {
+            sb.append("enrichment=").append(m.getEnrichment().getShortDescription()).append('\n');
+        }
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+    }
+
+    private static int capabilityRebuild(CommandSourceStack src, boolean force) {
+        MinecraftServer server = src.getServer();
+        src.sendSuccess(() -> Component.literal("ModIntelligence rebuild started (async)"), false);
+        PlayerEngine.getExecutor().execute(() -> ModIntelligenceService.runIngestion(server, force));
+        return 1;
+    }
+
+    private static int capabilityEnrich(CommandSourceStack src, int limit) {
+        if (!Player2ServerConfigHolder.get().isModIntelligenceEnrichmentEnabled()) {
+            src.sendFailure(Component.literal("Enrichment disabled in server_player2.json"));
+            return 0;
+        }
+        MinecraftServer server = src.getServer();
+        int queued = ModIntelligenceService.status().getQueuedEnrichments();
+        if (queued == 0) {
+            src.sendFailure(Component.literal("ModIntelligence enrichment queue is empty"));
+            return 0;
+        }
+        src.sendSuccess(() -> Component.literal("ModIntelligence enrichment batch started (queued=" + queued + ")"), false);
+        ModIntelligenceService.scheduleEnrichmentBatch(server);
+        return 1;
+    }
 
 }

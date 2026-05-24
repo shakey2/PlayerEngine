@@ -8,7 +8,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import dev.architectury.event.events.common.ChunkEvent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.phys.Vec3;
@@ -22,6 +21,7 @@ abstract class ChunkSearchTask extends Task {
    private final ArrayList<ChunkPos> justLoaded = new ArrayList<>();
    private boolean first = true;
    private boolean finished = false;
+   private java.util.function.Consumer<ChunkPos> chunkLoadCallback;
 
    public ChunkSearchTask(BlockPos startPoint) {
       this.startPoint = startPoint;
@@ -50,15 +50,14 @@ abstract class ChunkSearchTask extends Task {
          }
       }
 
-      ChunkEvent.LOAD_DATA.register((chunk, level, data) -> {
-         if (chunk != null) {
-            synchronized (this.searchMutex) {
-               if (!this.searchedAlready.contains(chunk.getPos())) {
-                  this.justLoaded.add(chunk.getPos());
-               }
+      this.chunkLoadCallback = pos -> {
+         synchronized (this.searchMutex) {
+            if (!this.searchedAlready.contains(pos)) {
+               this.justLoaded.add(pos);
             }
          }
-      });
+      };
+      this.controller.getChunkTracker().addLoadCallback(this.chunkLoadCallback);
    }
 
    @Override
@@ -109,6 +108,10 @@ abstract class ChunkSearchTask extends Task {
 
    @Override
    protected void onStop(Task interruptTask) {
+      if (this.chunkLoadCallback != null) {
+         this.controller.getChunkTracker().removeLoadCallback(this.chunkLoadCallback);
+         this.chunkLoadCallback = null;
+      }
    }
 
    @Override

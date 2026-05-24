@@ -3,7 +3,7 @@ package com.player2.playerengine.retrieval.overlay;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonSyntaxException;
-import com.player2.playerengine.automaton.utils.DirUtil;
+import com.player2.playerengine.PlayerEnginePaths;
 import com.player2.playerengine.player2api.Player2NpcPersistencePaths;
 import net.minecraft.server.MinecraftServer;
 import org.apache.logging.log4j.LogManager;
@@ -22,7 +22,7 @@ import java.util.UUID;
  *
  * <p>Two overlay locations are recognised:
  * <ul>
- *   <li><b>Global</b> ({@code config/playerengine/tool_overrides.json}) — operator-managed,
+ *   <li><b>Global</b> ({@code playerengine/tool_overrides.json}) — operator-managed,
  *       never written from chat or the B5 learning path.
  *   <li><b>Per-owner</b> ({@code world/player2npc/persistentdata/owners/<uuid>/tool_overrides.json})
  *       — written by the B5 alias-learning loop (Phase B5, not yet active).
@@ -48,13 +48,11 @@ public final class ToolOverlayLoader {
     // -------------------------------------------------------------------------
 
     /**
-     * Loads the global overlay from {@code config/playerengine/tool_overrides.json}.
+     * Loads the global overlay from {@code playerengine/tool_overrides.json}.
      * Returns {@code Optional.empty()} if the file is absent or unreadable.
      */
     public static Optional<ToolOverlay> loadGlobal() {
-        Path file = DirUtil.getConfigDir()
-                .resolve("playerengine")
-                .resolve(Player2NpcPersistencePaths.TOOL_OVERRIDES_FILE_NAME);
+        Path file = PlayerEnginePaths.userFile(Player2NpcPersistencePaths.TOOL_OVERRIDES_FILE_NAME);
         return loadFromFile(file, "global");
     }
 

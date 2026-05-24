@@ -11,6 +11,7 @@ import com.player2.playerengine.util.slots.Slot;
 import com.player2.playerengine.automaton.api.entity.IInventoryProvider;
 import com.player2.playerengine.automaton.api.entity.LivingEntityInventory;
 import com.player2.playerengine.automaton.utils.ToolSet;
+import com.player2.playerengine.multiversion.equip.EquipVer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -40,8 +41,10 @@ public class StorageHelper {
 
    public static boolean isArmorEquipped(PlayerEngineController controller, Item... any) {
       for (Item item : any) {
-         if (item instanceof ArmorItem armor) {
-            ItemStack equippedStack = controller.getEntity().getItemBySlot(armor.getType().getSlot());
+         ItemStack probe = new ItemStack(item);
+         Optional<EquipmentSlot> armorSlot = EquipVer.getBodyArmorSlot(probe);
+         if (armorSlot.isPresent()) {
+            ItemStack equippedStack = controller.getEntity().getItemBySlot(armorSlot.get());
             if (equippedStack.is(item)) {
                return true;
             }

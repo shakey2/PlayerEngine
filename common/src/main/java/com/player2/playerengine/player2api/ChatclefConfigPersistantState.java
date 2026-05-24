@@ -1,6 +1,6 @@
 package com.player2.playerengine.player2api;
 
-import com.player2.playerengine.automaton.utils.DirUtil;
+import com.player2.playerengine.PlayerEnginePaths;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import java.io.IOException;
@@ -9,7 +9,7 @@ import java.nio.file.Path;
 
 public class ChatclefConfigPersistantState {
    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-   private static final Path CONFIG_PATH = DirUtil.getConfigDir().resolve("chatclef_config.json");
+   private static final Path CONFIG_PATH = PlayerEnginePaths.userFile("chatclef_config.json");
    private static ChatclefConfigPersistantState config = load();
    private boolean sttHintEnabled = true;
    // Both default false — Gson leaves missing fields at their Java-declared default,
@@ -87,6 +87,7 @@ public class ChatclefConfigPersistantState {
       System.out.println("[ChatclefConfigPersistantState]: save() called");
 
       try {
+         Files.createDirectories(CONFIG_PATH.getParent());
          Files.writeString(CONFIG_PATH, GSON.toJson(config));
          System.out.println("[ChatclefConfigPersistantState]: Writing to file...");
       } catch (IOException var1) {

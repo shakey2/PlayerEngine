@@ -19,6 +19,7 @@ public final class Player2NpcOwnerSettingsReader {
 
     public static final String KEY_USER_LIST_MODE = "userListMode";
     public static final String KEY_BOT_LIST_MODE = "botListMode";
+    public static final String KEY_AUTO_EQUIP_ARMOR = "autoEquipArmor";
 
     public enum ListMode {
         BLACKLIST,
@@ -43,20 +44,31 @@ public final class Player2NpcOwnerSettingsReader {
         return load(server, settingsOwnerUuid).bot;
     }
 
-    private static final class Modes {
+    public static boolean autoEquipArmor(MinecraftServer server, UUID settingsOwnerUuid) {
+        return isAutoEquipEnabled(server, settingsOwnerUuid);
+    }
+
+    /** Gates armor and main-hand weapon pickup auto-equip (persisted as {@code autoEquipArmor}). */
+    public static boolean isAutoEquipEnabled(MinecraftServer server, UUID settingsOwnerUuid) {
+        return load(server, settingsOwnerUuid).autoEquipArmor;
+    }
+
+    private static final class Settings {
         final ListMode user;
         final ListMode bot;
+        final boolean autoEquipArmor;
 
-        Modes(ListMode user, ListMode bot) {
+        Settings(ListMode user, ListMode bot, boolean autoEquipArmor) {
             this.user = user;
             this.bot = bot;
+            this.autoEquipArmor = autoEquipArmor;
         }
     }
 
-    private static Modes load(MinecraftServer server, UUID ownerUuid) {
+    private static Settings load(MinecraftServer server, UUID ownerUuid) {
         Path path = Player2NpcPersistencePaths.userSettingsFile(server, ownerUuid);
         if (!Files.isRegularFile(path)) {
-            return new Modes(ListMode.BLACKLIST, ListMode.BLACKLIST);
+            return new Settings(ListMode.BLACKLIST, ListMode.BLACKLIST, true);
         }
         try {
             String raw = Files.readString(path, StandardCharsets.UTF_8);
@@ -67,10 +79,11 @@ public final class Player2NpcOwnerSettingsReader {
             ListMode b = root.has(KEY_BOT_LIST_MODE)
                     ? ListMode.fromJson(root.get(KEY_BOT_LIST_MODE).getAsString())
                     : ListMode.BLACKLIST;
-            return new Modes(u, b);
+            boolean autoEquip = !root.has(KEY_AUTO_EQUIP_ARMOR) || root.get(KEY_AUTO_EQUIP_ARMOR).getAsBoolean();
+            return new Settings(u, b, autoEquip);
         } catch (Exception e) {
             LOGGER.warn("Failed reading user settings at {}", path, e);
-            return new Modes(ListMode.BLACKLIST, ListMode.BLACKLIST);
+            return new Settings(ListMode.BLACKLIST, ListMode.BLACKLIST, true);
         }
     }
 }

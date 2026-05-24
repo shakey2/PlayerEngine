@@ -18,6 +18,7 @@ import net.minecraft.world.level.chunk.EmptyLevelChunk;
 public class SimpleChunkTracker {
    private final PlayerEngineController mod;
    private final Set<ChunkPos> loaded = new HashSet<>();
+   private final List<Consumer<ChunkPos>> loadCallbacks = new ArrayList<>();
 
    public SimpleChunkTracker(PlayerEngineController mod) {
       this.mod = mod;
@@ -25,8 +26,22 @@ public class SimpleChunkTracker {
       ChunkEvent.SAVE_DATA.register((chunk, level, data) -> this.onUnload(chunk.getPos()));
    }
 
+   /** In-process chunk-load notifications (safe during gameplay; does not touch Architectury's listener list). */
+   public void addLoadCallback(Consumer<ChunkPos> callback) {
+      this.loadCallbacks.add(callback);
+   }
+
+   public void removeLoadCallback(Consumer<ChunkPos> callback) {
+      this.loadCallbacks.remove(callback);
+   }
+
    private void onLoad(ChunkPos pos) {
       this.loaded.add(pos);
+      if (!this.loadCallbacks.isEmpty()) {
+         for (Consumer<ChunkPos> callback : List.copyOf(this.loadCallbacks)) {
+            callback.accept(pos);
+         }
+      }
    }
 
    private void onUnload(ChunkPos pos) {

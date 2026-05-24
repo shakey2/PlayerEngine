@@ -1,5 +1,6 @@
 package com.player2.playerengine;
 
+import com.player2.playerengine.player2api.AgentConversationData;
 import com.player2.playerengine.player2api.AgentSideEffects;
 import com.player2.playerengine.retrieval.RagIndex;
 import com.google.common.base.Suppliers;
@@ -7,11 +8,14 @@ import com.player2.playerengine.automaton.KeepName;
 import com.player2.playerengine.automaton.command.defaults.DefaultCommands;
 import com.player2.playerengine.automaton.entity.CustomFishingBobberEntity;
 import com.player2.playerengine.player2api.Player2ClientApiBridge;
+import com.player2.playerengine.modintelligence.ModIntelligenceService;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.network.Player2DisconnectHandler;
 import com.player2.playerengine.player2api.network.Player2ServerNetworking;
 import com.player2.playerengine.player2api.network.TtsClientPreferenceStore;
 import dev.architectury.event.events.common.PlayerEvent;
+import dev.architectury.event.events.common.TickEvent;
+import java.util.UUID;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -39,6 +43,7 @@ import com.player2.playerengine.util.ExecutorShutdown;
 import com.player2.playerengine.player2api.Event;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.player.Player;
 import dev.architectury.networking.NetworkManager;
 import io.netty.buffer.Unpooled;
 
@@ -51,6 +56,7 @@ public final class PlayerEngine {
    public static final ResourceLocation CLIENT_PLAYER2_PROXY_REQUEST_PACKET_ID = id("client_player2_proxy_request");
    public static final ResourceLocation CLIENT_PLAYER2_PROXY_RESPONSE_PACKET_ID = id("client_player2_proxy_response");
    public static final ResourceLocation TTS_PREFERENCE_PACKET_ID = id("tts_preference");
+   public static final ResourceLocation TTS_PLAYBACK_DONE_PACKET_ID = id("tts_playback_done");
    public static final TagKey<Item> EMPTY_BUCKETS = TagKey.create(Registries.ITEM, id("empty_buckets"));
    public static final TagKey<Item> WATER_BUCKETS = TagKey.create(Registries.ITEM, id("water_buckets"));
    private static ThreadPoolExecutor threadPool;
@@ -120,9 +126,13 @@ public final class PlayerEngine {
       PlayerEvent.PLAYER_JOIN.register(Player2ServerNetworking::sendConfigSync);
       DefaultCommands.registerAll();
       ENTITY_TYPES.register();
+      PlayerEngineStorageMigration.runOnce();
       copyToolOverridesReadmeIfAbsent();
       RagIndex.initialize();
       MCCommands.onInit();
+      TickEvent.SERVER_POST.register(PlayerEngineController::staticServerTick);
+      ConversationManager.init();
+      ModIntelligenceService.registerEventHandlers();
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
             CLIENT_PLAYER2_PROXY_RESPONSE_PACKET_ID,
             (buf, context) -> {
@@ -158,18 +168,43 @@ public final class PlayerEngine {
                boolean enabled = buf.readBoolean();
                TtsClientPreferenceStore.setTtsEnabled(context.getPlayer().getUUID(), enabled);
             });
+      NetworkManager.registerReceiver(NetworkManager.Side.C2S,
+            TTS_PLAYBACK_DONE_PACKET_ID,
+            (buf, context) -> {
+               if (!Player2ServerConfigHolder.get().isBotTtsPlaybackAckEnabled()) {
+                  return;
+               }
+               ServerPlayer sender = (ServerPlayer) context.getPlayer();
+               String botUuidStr = buf.readUtf();
+               UUID botUuid;
+               try {
+                  botUuid = UUID.fromString(botUuidStr);
+               } catch (IllegalArgumentException e) {
+                  LOGGER.warn("PlayerEngine: tts_playback_done invalid bot UUID: {}", botUuidStr);
+                  return;
+               }
+               AgentConversationData botData = ConversationManager.queueData.get(botUuid);
+               if (botData == null) {
+                  return;
+               }
+               Player owner = botData.getMod().getOwner();
+               if (owner == null || !owner.getUUID().equals(sender.getUUID())) {
+                  return;
+               }
+               LOGGER.info("PlayerEngine: tts_playback_done ACK for bot={} from owner={}",
+                     botData.getName(), sender.getName().getString());
+               botData.clearTtsCooldown();
+            });
    }
 
    /**
     * Copies {@code tool_overrides.README.md} from the JAR resources to
-    * {@code config/playerengine/} on first launch so operators always have a reference
+    * {@code playerengine/} on first launch so operators always have a reference
     * file alongside the live overlay location. Does nothing if the file already exists.
     */
    private static void copyToolOverridesReadmeIfAbsent() {
       try {
-         java.nio.file.Path dest = com.player2.playerengine.automaton.utils.DirUtil.getConfigDir()
-               .resolve("playerengine")
-               .resolve("tool_overrides.README.md");
+         java.nio.file.Path dest = PlayerEnginePaths.userFile("tool_overrides.README.md");
          if (!java.nio.file.Files.exists(dest)) {
             java.nio.file.Files.createDirectories(dest.getParent());
             try (java.io.InputStream in = PlayerEngine.class.getClassLoader()

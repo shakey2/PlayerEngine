@@ -144,6 +144,19 @@ public class LivingEntityInventory implements Container, Nameable {
       return -1;
    }
 
+   public int findMainSlotForStack(ItemStack probe) {
+      if (probe.isEmpty()) {
+         return -1;
+      }
+      for (int i = 0; i < this.main.size(); i++) {
+         ItemStack stack = (ItemStack)this.main.get(i);
+         if (!stack.isEmpty() && ItemStack.isSameItemSameTags(probe, stack)) {
+            return i;
+         }
+      }
+      return -1;
+   }
+
    public int getSwappableHotbarSlot() {
       for (int i = 0; i < 9; i++) {
          int j = (this.selectedSlot + i) % 9;

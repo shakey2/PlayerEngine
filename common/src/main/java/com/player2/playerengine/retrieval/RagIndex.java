@@ -1,6 +1,6 @@
 package com.player2.playerengine.retrieval;
 
-import com.player2.playerengine.automaton.utils.DirUtil;
+import com.player2.playerengine.PlayerEnginePaths;
 import com.player2.playerengine.retrieval.overlay.ToolOverlay;
 import com.player2.playerengine.retrieval.overlay.ToolOverlayLoader;
 import com.player2.playerengine.retrieval.overlay.ToolOverlayMerger;
@@ -23,8 +23,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * <h3>Architecture</h3>
  * <ul>
  *   <li>{@link #globalInstance} — baseline seed metadata + global overlay
- *       ({@code config/playerengine/tool_overrides.json}). Disk-cached at
- *       {@code config/playerengine/rag_index/}; survives restarts without rebuild cost.
+ *       ({@code playerengine/tool_overrides.json}). Disk-cached at
+ *       {@code playerengine/data/rag_index/}; survives restarts without rebuild cost.
  *   <li>{@link #perOwnerCache} — per-owner retrievers built in-memory by merging the same
  *       global overlay with the per-owner overlay
  *       ({@code world/player2npc/.../owners/<uuid>/tool_overrides.json}). Lazy-built on
@@ -186,7 +186,7 @@ public final class RagIndex {
 
             Collection<ToolDocument> merged = ToolOverlayMerger.merge(SeedToolMetadata.all(), overlays);
             ToolMetadataRegistry registry = ToolMetadataRegistry.create(merged);
-            Path indexDir = DirUtil.getConfigDir().resolve("playerengine").resolve("rag_index");
+            Path indexDir = PlayerEnginePaths.ragIndexRoot();
             ToolRetriever retriever = ToolRetriever.loadOrRebuild(registry, indexDir);
             LOGGER.info("RAG: global retriever ready ({} documents, token {}...).",
                     retriever.documentCount(), registry.getVersionToken().substring(0, 8));

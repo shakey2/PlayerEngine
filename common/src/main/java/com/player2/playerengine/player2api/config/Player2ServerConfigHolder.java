@@ -6,7 +6,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 /**
- * Loads {@code config/playerengine/server_player2.json}. Thread-safe reads.
+ * Loads {@code playerengine/server_player2.json}. Thread-safe reads.
  */
 public final class Player2ServerConfigHolder {
     private static final Logger LOGGER = LogManager.getLogger();
@@ -36,6 +36,7 @@ public final class Player2ServerConfigHolder {
         LOGGER.info("Player2 RAG config: ragLiveEnabled={} ragTopK={} ragFallbackToFullList={} ragMinGoalChars={}",
                 cached.isRagLiveEnabled(), cached.getRagTopKClamped(), cached.isRagFallbackToFullList(),
                 cached.getRagMinGoalCharsClamped());
+        LOGGER.info("Player2 TTS pacing config: botTtsPlaybackAckEnabled={}", cached.isBotTtsPlaybackAckEnabled());
     }
 
     public static void save() {
@@ -99,6 +100,36 @@ public final class Player2ServerConfigHolder {
         if (ragMin < 1 || ragMin > 16) {
             LOGGER.warn("Player2 config: ragMinGoalChars out of range 1–16 (got {}); using clamped value {}.", ragMin, c.getRagMinGoalCharsClamped());
             c.setRagMinGoalChars(c.getRagMinGoalCharsClamped());
+        }
+
+        int inspectCap = c.getModIntelligenceMaxInspectEntriesPerLaunch();
+        if (inspectCap < 0 || inspectCap > 50000) {
+            LOGGER.warn("Player2 config: modIntelligenceMaxInspectEntriesPerLaunch out of range 0–50000 (got {}); using 5000.", inspectCap);
+            c.setModIntelligenceMaxInspectEntriesPerLaunch(5000);
+        }
+        int enrichCalls = c.getModIntelligenceMaxEnrichmentCallsPerLaunch();
+        if (enrichCalls < 0 || enrichCalls > 1000) {
+            LOGGER.warn("Player2 config: modIntelligenceMaxEnrichmentCallsPerLaunch out of range 0–1000 (got {}); using 50.", enrichCalls);
+            c.setModIntelligenceMaxEnrichmentCallsPerLaunch(50);
+        }
+        int enrichFails = c.getModIntelligenceMaxEnrichmentFailuresPerLaunch();
+        if (enrichFails < 1 || enrichFails > 500) {
+            LOGGER.warn("Player2 config: modIntelligenceMaxEnrichmentFailuresPerLaunch out of range 1–500 (got {}); using 20.", enrichFails);
+            c.setModIntelligenceMaxEnrichmentFailuresPerLaunch(20);
+        }
+        int capTopK = c.getModIntelligenceQueryTopK();
+        if (capTopK < 1 || capTopK > 50) {
+            c.setModIntelligenceQueryTopK(c.getModIntelligenceQueryTopKClamped());
+        }
+        double minConf = c.getModIntelligenceMinQueryConfidence();
+        if (minConf < 0.0 || minConf > 1.0) {
+            LOGGER.warn("Player2 config: modIntelligenceMinQueryConfidence out of range 0–1 (got {}); using 0.5.", minConf);
+            c.setModIntelligenceMinQueryConfidence(0.5);
+        }
+        int obsCap = c.getModIntelligenceMaxObservedSamplesPerSubject();
+        if (obsCap < 0 || obsCap > 50) {
+            LOGGER.warn("Player2 config: modIntelligenceMaxObservedSamplesPerSubject out of range 0–50 (got {}); using 5.", obsCap);
+            c.setModIntelligenceMaxObservedSamplesPerSubject(5);
         }
     }
 

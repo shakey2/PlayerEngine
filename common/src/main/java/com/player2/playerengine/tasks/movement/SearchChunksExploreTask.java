@@ -7,13 +7,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import dev.architectury.event.events.common.ChunkEvent;
 import net.minecraft.world.level.ChunkPos;
 
 public abstract class SearchChunksExploreTask extends Task {
    private final Object searcherMutex = new Object();
    private final Set<ChunkPos> alreadyExplored = new HashSet<>();
    private ChunkSearchTask searcher;
+   private java.util.function.Consumer<ChunkPos> chunkLoadCallback;
 
    protected ChunkPos getBestChunkOverride(PlayerEngineController mod, List<ChunkPos> chunks) {
       return null;
@@ -21,8 +21,8 @@ public abstract class SearchChunksExploreTask extends Task {
 
    @Override
    protected void onStart() {
-
-      ChunkEvent.LOAD_DATA.register((chunk, level, data) -> this.onChunkLoad(chunk.getPos()));
+      this.chunkLoadCallback = this::onChunkLoad;
+      this.controller.getChunkTracker().addLoadCallback(this.chunkLoadCallback);
       this.resetSearch();
    }
 
@@ -52,6 +52,10 @@ public abstract class SearchChunksExploreTask extends Task {
 
    @Override
    protected void onStop(Task interruptTask) {
+      if (this.chunkLoadCallback != null) {
+         this.controller.getChunkTracker().removeLoadCallback(this.chunkLoadCallback);
+         this.chunkLoadCallback = null;
+      }
    }
 
    private void onChunkLoad(ChunkPos pos) {

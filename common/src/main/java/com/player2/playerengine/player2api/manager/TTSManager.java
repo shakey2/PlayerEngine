@@ -1,6 +1,7 @@
 package com.player2.playerengine.player2api.manager;
 
 
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -42,13 +43,13 @@ public class TTSManager {
         ttsThread = Executors.newSingleThreadExecutor();
     }
 
-    public static void TTS(String message, Character character, Player2APIService player2apiService) {
+    public static void TTS(String message, Character character, Player2APIService player2apiService, UUID botUuid) {
         if (message == null) {
             return;
         }
         LOGGER.info("TTSManager.TTS submitting broadcast for msg.len={}", message.length());
         ttsThread.submit(() -> {
-            player2apiService.textToSpeech(message, character, (_unusedMap) -> {
+            player2apiService.textToSpeech(message, character, botUuid, (_unusedMap) -> {
                 // Per-bot pacing is set at the AgentSideEffects.onEntityMessage call site so the
                 // dispatcher can defer just the speaking bot until its audio is done playing.
             });

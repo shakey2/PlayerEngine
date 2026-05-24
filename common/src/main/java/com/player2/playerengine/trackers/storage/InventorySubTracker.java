@@ -153,7 +153,8 @@ public class InventorySubTracker extends Tracker {
       Item item = stack.isEmpty() ? Items.AIR : stack.getItem();
       int count = stack.getCount();
       this.itemCountsPlayer.put(item, this.itemCountsPlayer.getOrDefault(item, 0) + count);
-      if (inventory instanceof NonNullList) {
+      LivingEntityInventory livingInventory = ((IInventoryProvider)this.mod.getEntity()).getLivingInventory();
+      if (inventory == livingInventory.main) {
          this.itemToSlotPlayer.computeIfAbsent(item, k -> new ArrayList<>()).add(index);
       }
    }

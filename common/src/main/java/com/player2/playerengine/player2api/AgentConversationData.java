@@ -84,14 +84,28 @@ public class AgentConversationData {
     // 0 => should not process,
     // otherwise gives a number that increases based on higher priority
     // (for now it is #ns from last processing time)
+    public long getTtsCooldownUntilNanos() {
+        return ttsCooldownUntilNanos;
+    }
+
     public long getPriority() {
         if (!enabled || isProcessing || eventQueue.isEmpty()) {
             return 0;
         }
         // Self-pace: don't start a new LLM round while this bot's last response is still
-        // being spoken client-side. Other bots remain free to process during this window.
+        // being spoken client-side.
         if (System.nanoTime() < ttsCooldownUntilNanos) {
             return 0;
+        }
+        // Listener-pace: defer until another bot's line at the head of the queue has finished
+        // playing (estimated cooldown on the sender, or early-clear via tts_playback_done ACK).
+        Event head = eventQueue.peek();
+        if (head instanceof Event.CharacterMessage charMsg) {
+            AgentConversationData sender = charMsg.sendingCharacterData();
+            if (!sender.getUUID().equals(getUUID())
+                    && System.nanoTime() < sender.getTtsCooldownUntilNanos()) {
+                return 0;
+            }
         }
         return System.nanoTime() - lastProcessTime;
     }

@@ -102,7 +102,7 @@ public final class BlockOptionalMeta {
 
    public boolean matches(ItemStack stack) {
       int hash = ((IItemStack)(Object)stack).getBaritoneHash();
-      hash -= stack.getDamageValue();
+      hash -= BaritoneStackDamage.storedDamage(stack);
       return this.stackHashes.contains(hash);
    }
 

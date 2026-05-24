@@ -1,5 +1,6 @@
 package com.player2.playerengine.mixins.baritone;
 
+import com.player2.playerengine.automaton.api.utils.BaritoneStackDamage;
 import com.player2.playerengine.automaton.api.utils.accessor.IItemStack;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -18,20 +19,17 @@ public abstract class MixinItemStack implements IItemStack {
    private Item item;
    @Unique
    private int baritoneHash;
+   @Unique
+   private boolean baritoneHashValid;
 
-   @Shadow
-   public abstract int getDamageValue();
-
+   /**
+    * Do not call {@link ItemStack#getDamageValue()} here: Forge item extensions may call
+    * {@link net.minecraft.world.item.Item#getMaxDamage()} during stack construction or copy.
+    */
    private void recalculateHash() {
-      this.baritoneHash = this.item == null ? -1 : this.item.hashCode() + this.getDamageValue();
-   }
-
-   @Inject(
-      method = {"<init>*"},
-      at = {@At("RETURN")}
-   )
-   private void onInit(CallbackInfo ci) {
-      this.recalculateHash();
+      ItemStack self = (ItemStack)(Object)this;
+      this.baritoneHash = this.item == null ? -1 : this.item.hashCode() + BaritoneStackDamage.storedDamage(self);
+      this.baritoneHashValid = true;
    }
 
    @Inject(
@@ -44,6 +42,10 @@ public abstract class MixinItemStack implements IItemStack {
 
    @Override
    public int getBaritoneHash() {
+      if (!this.baritoneHashValid) {
+         this.recalculateHash();
+      }
+
       return this.baritoneHash;
    }
 }
