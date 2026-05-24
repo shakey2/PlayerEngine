@@ -271,9 +271,6 @@ public class ConversationManager {
 
     // side effects are here:
     public static void injectOnTick(MinecraftServer server) {
-        if (!hasInit) {
-            init();
-        }
         queueData.forEach((k, v) -> {
             if(v.getMod().getPlayer().getServer() != server){
                 despwnCompanion(k);

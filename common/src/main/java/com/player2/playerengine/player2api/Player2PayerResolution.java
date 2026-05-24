@@ -77,4 +77,39 @@ public final class Player2PayerResolution {
         }
         return null;
     }
+
+    /**
+     * Resolves billing for server-wide tasks (e.g. mod-intelligence enrichment) without an NPC controller.
+     * Uses any online player in PROMPTER_PAYS mode, or stored owner token in OWNER_PAYS_ALL + offline continuation.
+     */
+    public static ApiBillingContext resolveForServer(MinecraftServer server, String clientId) {
+        Player2ServerConfigHolder.get();
+        var cfg = Player2ServerConfigHolder.get();
+        if (server == null) {
+            return new ApiBillingContext(null, null);
+        }
+
+        for (ServerPlayer online : server.getPlayerList().getPlayers()) {
+            if (cfg.getPayerMode() == Player2PayerMode.OWNER_PAYS_ALL) {
+                return new ApiBillingContext(online, null);
+            }
+            return new ApiBillingContext(online, null);
+        }
+
+        if (cfg.getPayerMode() == Player2PayerMode.OWNER_PAYS_ALL
+                && cfg.isOwnerOfflineServerContinuation()
+                && !cfg.isDedicatedClientProxy()) {
+            String storedUser = TokenStorage.findFirstUsernameWithToken(clientId);
+            if (storedUser != null && !TokenStorage.getToken(storedUser, clientId).isEmpty()) {
+                return new ApiBillingContext(null, storedUser);
+            }
+        }
+
+        return new ApiBillingContext(null, null);
+    }
+
+    public static boolean canBillServer(MinecraftServer server, String clientId) {
+        ApiBillingContext ctx = resolveForServer(server, clientId);
+        return ctx.billingKey() != null;
+    }
 }

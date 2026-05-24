@@ -7,7 +7,12 @@ import com.player2.playerengine.util.slots.PlayerSlot;
 import com.player2.playerengine.util.slots.Slot;
 import com.player2.playerengine.automaton.api.entity.IInventoryProvider;
 import com.player2.playerengine.automaton.api.entity.LivingEntityInventory;
+import com.player2.playerengine.multiversion.equip.EquipVer;
+import com.player2.playerengine.multiversion.equip.WeaponVer;
+import com.player2.playerengine.util.equip.ArmorEquipScorer;
+import com.player2.playerengine.util.equip.WeaponEquipScorer;
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.function.Predicate;
 import net.minecraft.core.NonNullList;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -246,24 +251,107 @@ public class SlotHandler {
       this.swapSlots(slot, target);
    }
 
+   public boolean equipArmorFromMainSlot(PlayerEngineController controller, int mainSlot, EquipmentSlot armorSlot) {
+      if (mainSlot < 0 || mainSlot >= LivingEntityInventory.MAIN_SIZE) {
+         return false;
+      }
+      LivingEntityInventory inventory = ((IInventoryProvider) controller.getEntity()).getLivingInventory();
+      ItemStack candidate = inventory.main.get(mainSlot);
+      if (candidate.isEmpty()) {
+         return false;
+      }
+      Optional<EquipmentSlot> slotType = EquipVer.getBodyArmorSlot(candidate);
+      if (slotType.isEmpty() || slotType.get() != armorSlot) {
+         return false;
+      }
+      ItemStack equipped = controller.getEntity().getItemBySlot(armorSlot);
+      if (!ArmorEquipScorer.isUpgrade(candidate, equipped, armorSlot)) {
+         return false;
+      }
+      ItemStack currentlyEquipped = equipped.copy();
+      ItemStack candidateCopy = candidate.copy();
+      inventory.main.set(mainSlot, ItemStack.EMPTY);
+      if (!currentlyEquipped.isEmpty()) {
+         int displacedDest = findMainSlotForDisplacedArmor(inventory, mainSlot, inventory.selectedSlot);
+         if (displacedDest >= 0) {
+            inventory.main.set(displacedDest, currentlyEquipped);
+         } else {
+            controller.getEntity().spawnAtLocation(currentlyEquipped, 0.5F);
+         }
+      }
+      controller.getEntity().setItemSlot(armorSlot, candidateCopy);
+      this.registerSlotAction();
+      return true;
+   }
+
+   private static int findMainSlotForDisplacedArmor(LivingEntityInventory inventory, int sourceSlot, int selectedSlot) {
+      for (int i = 0; i < LivingEntityInventory.MAIN_SIZE; i++) {
+         if (i != sourceSlot && i != selectedSlot && inventory.main.get(i).isEmpty()) {
+            return i;
+         }
+      }
+      for (int i = 0; i < LivingEntityInventory.MAIN_SIZE; i++) {
+         if (i != sourceSlot && inventory.main.get(i).isEmpty()) {
+            return i;
+         }
+      }
+      return -1;
+   }
+
+   public boolean equipWeaponToMainHand(PlayerEngineController controller, int mainSlot) {
+      if (mainSlot < 0 || mainSlot >= LivingEntityInventory.MAIN_SIZE) {
+         return false;
+      }
+      LivingEntityInventory inventory = ((IInventoryProvider) controller.getEntity()).getLivingInventory();
+      ItemStack candidate = inventory.main.get(mainSlot);
+      if (!WeaponVer.isMeleeWeapon(candidate)) {
+         return false;
+      }
+      ItemStack held = inventory.getMainHandStack();
+      if (!WeaponEquipScorer.isUpgrade(candidate, held)) {
+         return false;
+      }
+      if (mainSlot == inventory.selectedSlot) {
+         controller.getEntity().setItemSlot(EquipmentSlot.MAINHAND, candidate.copy());
+         this.registerSlotAction();
+         return true;
+      }
+      if (LivingEntityInventory.isValidHotbarIndex(mainSlot)) {
+         inventory.selectedSlot = mainSlot;
+         controller.getEntity().setItemSlot(EquipmentSlot.MAINHAND, inventory.getMainHandStack());
+         this.registerSlotAction();
+         return true;
+      }
+      ItemStack handStack = inventory.getMainHandStack();
+      inventory.main.set(inventory.selectedSlot, inventory.main.get(mainSlot));
+      inventory.main.set(mainSlot, handStack);
+      controller.getEntity().setItemSlot(EquipmentSlot.MAINHAND, inventory.getMainHandStack());
+      this.registerSlotAction();
+      return true;
+   }
+
    public void forceEquipArmor(PlayerEngineController controller, ItemTarget target) {
       LivingEntityInventory inventory = ((IInventoryProvider) controller.getEntity()).getLivingInventory();
 
       for (Item item : target.getMatches()) {
-         if (item instanceof ArmorItem armorItem) {
-            EquipmentSlot slotType = armorItem.getType().getSlot();
-            if (!controller.getEntity().getItemBySlot(slotType).is(item)) {
-               for (int i = 0; i < inventory.getContainerSize(); i++) {
-                  ItemStack stackInSlot = inventory.getItem(i);
-                  if (stackInSlot.is(item)) {
-                     ItemStack currentlyEquipped = controller.getEntity().getItemBySlot(slotType).copy();
-                     controller.getEntity().setItemSlot(slotType, stackInSlot.copy());
-                     inventory.setItem(i, currentlyEquipped);
-                     this.registerSlotAction();
-                     break;
-                  }
-               }
+         for (int i = 0; i < LivingEntityInventory.MAIN_SIZE; i++) {
+            ItemStack stackInSlot = inventory.getItem(i);
+            if (stackInSlot.isEmpty() || !stackInSlot.is(item)) {
+               continue;
             }
+            Optional<EquipmentSlot> slotType = EquipVer.getBodyArmorSlot(stackInSlot);
+            if (slotType.isEmpty()) {
+               continue;
+            }
+            EquipmentSlot slot = slotType.get();
+            if (!controller.getEntity().getItemBySlot(slot).is(item)) {
+               ItemStack currentlyEquipped = controller.getEntity().getItemBySlot(slot).copy();
+               ItemStack toEquip = stackInSlot.copy();
+               inventory.setItem(i, currentlyEquipped);
+               controller.getEntity().setItemSlot(slot, toEquip);
+               this.registerSlotAction();
+            }
+            break;
          }
       }
    }

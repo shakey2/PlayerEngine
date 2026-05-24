@@ -9,17 +9,26 @@ import net.minecraft.world.item.Item;
 
 public class EquipArmorTask extends Task {
    private final ItemTarget[] toEquip;
+   private final boolean pinExplicitSlots;
 
    public EquipArmorTask(ItemTarget... toEquip) {
+      this(false, toEquip);
+   }
+
+   public EquipArmorTask(boolean pinExplicitSlots, ItemTarget... toEquip) {
+      this.pinExplicitSlots = pinExplicitSlots;
       this.toEquip = toEquip;
    }
 
    public EquipArmorTask(Item... toEquip) {
-      this(Arrays.stream(toEquip).map(ItemTarget::new).toArray(ItemTarget[]::new));
+      this(false, Arrays.stream(toEquip).map(ItemTarget::new).toArray(ItemTarget[]::new));
    }
 
    @Override
    protected void onStart() {
+      if (this.pinExplicitSlots) {
+         this.controller.getExplicitEquipPolicy().pin(this.toEquip);
+      }
    }
 
    @Override

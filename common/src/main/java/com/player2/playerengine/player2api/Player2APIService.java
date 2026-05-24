@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.Consumer;
 
 import dev.architectury.networking.NetworkManager;
@@ -258,7 +259,8 @@ public class Player2APIService {
       return api("POST", "/v1/chat/completions", requestBody);
    }
 
-   public void textToSpeech(String message, Character character, Consumer<Map<String, JsonElement>> onFinish) {
+   public void textToSpeech(String message, Character character, UUID botUuid,
+         Consumer<Map<String, JsonElement>> onFinish) {
       try {
          ServerPlayer owner = (ServerPlayer) controller.getOwner();
          MinecraftServer server = owner.getServer();
@@ -281,6 +283,7 @@ public class Player2APIService {
                for (String id : character.voiceIds()) {
                   buf.writeUtf(id);
                }
+               buf.writeUtf(botUuid.toString());
 
                player.connection.send(NetworkManager.toPacket(NetworkManager.Side.S2C,
                      ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"), buf));

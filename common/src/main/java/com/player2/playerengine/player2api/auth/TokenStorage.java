@@ -26,6 +26,28 @@ public class TokenStorage {
         return getInstance().tokensStored.getString(getInstance().makeKey(username, clientId));
     }
 
+    /**
+     * First username with a non-empty stored token for {@code clientId}, for server-side calls when no
+     * player is online (OWNER_PAYS_ALL + owner-offline continuation).
+     */
+    public static String findFirstUsernameWithToken(String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            return null;
+        }
+        String suffix = ":" + clientId;
+        TokenStorage storage = getInstance();
+        for (String key : storage.tokensStored.getAllKeys()) {
+            if (!key.endsWith(suffix)) {
+                continue;
+            }
+            String token = storage.tokensStored.getString(key);
+            if (token != null && !token.isEmpty()) {
+                return key.substring(0, key.length() - suffix.length());
+            }
+        }
+        return null;
+    }
+
     static void storeToken(String username, String clientId, String token) {
         System.out.println("[TokenStorage]: Storing token for player " + username + " and client " + clientId);
         getInstance().tokensStored.putString(getInstance().makeKey(username, clientId), token);

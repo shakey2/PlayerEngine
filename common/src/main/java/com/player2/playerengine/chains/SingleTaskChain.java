@@ -52,7 +52,12 @@ public abstract class SingleTaskChain extends TaskChain {
    }
 
    public void setTask(Task task) {
-      if (this.mainTask == null || !this.mainTask.equals(task)) {
+      boolean replace =
+            this.mainTask == null
+                  || this.mainTask.isFinished()
+                  || this.mainTask.stopped()
+                  || !this.mainTask.equals(task);
+      if (replace) {
          if (this.mainTask != null) {
             this.mainTask.stop(task);
          }

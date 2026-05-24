@@ -518,7 +518,7 @@ public final class DefaultCommands {
    private static boolean isLogicalServer(CommandSourceStack source) {
       if (source.getLevel().isClientSide()) {
          source.sendFailure(Component.literal(
-               "Player2 admin commands apply to the server's config/playerengine files and only run on the logical server."));
+               "Player2 admin commands apply to the server's playerengine/ files and only run on the logical server."));
          return false;
       }
       return true;

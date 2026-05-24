@@ -3,7 +3,7 @@ package com.player2.playerengine;
 import com.player2.playerengine.automaton.AdditionalBaritoneSettings;
 import com.player2.playerengine.chains.FoodChain;
 import com.player2.playerengine.chains.MLGBucketFallChain;
-import com.player2.playerengine.chains.ForceEquipShieldArmorChain;
+import com.player2.playerengine.chains.ForceEquipGearChain;
 import com.player2.playerengine.chains.MobDefenseChain;
 import com.player2.playerengine.chains.PlayerDefenseChain;
 import com.player2.playerengine.chains.PlayerInteractionFixChain;
@@ -16,6 +16,9 @@ import com.player2.playerengine.commands.base.CommandExecutor;
 import com.player2.playerengine.control.InputControls;
 import com.player2.playerengine.control.PlayerExtraController;
 import com.player2.playerengine.control.SlotHandler;
+import com.player2.playerengine.equip.ExplicitEquipPolicy;
+import com.player2.playerengine.equip.PickupArmorEvalQueue;
+import com.player2.playerengine.equip.PickupWeaponEvalQueue;
 
 import com.player2.playerengine.player2api.manager.ConversationManager;
 import com.player2.playerengine.player2api.AIPersistantData;
@@ -48,7 +51,6 @@ import com.player2.playerengine.executor.StopReason;
 import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.util.Playground;
-import dev.architectury.event.events.common.TickEvent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -69,7 +71,7 @@ public class PlayerEngineController {
    private TaskStepExecutorAdapter stepExecutorAdapter;
    private FoodChain foodChain;
    private MobDefenseChain mobDefenseChain;
-   private ForceEquipShieldArmorChain ForceEquipShieldArmorChain;
+   private ForceEquipGearChain forceEquipGearChain;
    private MLGBucketFallChain mlgBucketChain;
    private ItemStorageTracker storageTracker;
    private ContainerSubTracker containerSubTracker;
@@ -83,6 +85,9 @@ public class PlayerEngineController {
    private UserBlockRangeTracker userBlockRangeTracker;
    private InputControls inputControls;
    private SlotHandler slotHandler;
+   private final ExplicitEquipPolicy explicitEquipPolicy = new ExplicitEquipPolicy();
+   private final PickupArmorEvalQueue pickupArmorEvalQueue;
+   private final PickupWeaponEvalQueue pickupWeaponEvalQueue;
    private PlayerExtraController extraController;
    private PlayerEngineSettings settings;
    private ChunkLoadingTracker chunkLoader;
@@ -110,7 +115,7 @@ public class PlayerEngineController {
       new PreEquipItemChain(this.taskRunner);
       new WorldSurvivalChain(this.taskRunner);
       this.foodChain = new FoodChain(this.taskRunner);
-      this.ForceEquipShieldArmorChain = new ForceEquipShieldArmorChain(this.taskRunner);
+      this.forceEquipGearChain = new ForceEquipGearChain(this.taskRunner);
       new PlayerDefenseChain(this.taskRunner);
       this.storageTracker = new ItemStorageTracker(this, this.trackerManager,
             container -> this.containerSubTracker = container);
@@ -123,6 +128,8 @@ public class PlayerEngineController {
       this.userBlockRangeTracker = new UserBlockRangeTracker(this.trackerManager);
       this.inputControls = new InputControls(this);
       this.slotHandler = new SlotHandler(this);
+      this.pickupArmorEvalQueue = new PickupArmorEvalQueue(this);
+      this.pickupWeaponEvalQueue = new PickupWeaponEvalQueue(this);
       this.extraController = new PlayerExtraController(this);
       this.initializeBaritoneSettings();
       this.botBehaviour = new BotBehaviour(this);
@@ -167,10 +174,6 @@ public class PlayerEngineController {
       this.baritone.serverTick();
       this.player2apiService.trySendHeartbeat();
       this.chunkLoader.tick();
-   }
-
-   static {
-      TickEvent.SERVER_POST.register(PlayerEngineController::staticServerTick);
    }
 
    public static void staticServerTick(MinecraftServer server) {
@@ -389,6 +392,18 @@ public class PlayerEngineController {
 
    public SlotHandler getSlotHandler() {
       return this.slotHandler;
+   }
+
+   public PickupArmorEvalQueue getPickupArmorEvalQueue() {
+      return this.pickupArmorEvalQueue;
+   }
+
+   public PickupWeaponEvalQueue getPickupWeaponEvalQueue() {
+      return this.pickupWeaponEvalQueue;
+   }
+
+   public ExplicitEquipPolicy getExplicitEquipPolicy() {
+      return this.explicitEquipPolicy;
    }
 
    public LivingEntityInventory getInventory() {

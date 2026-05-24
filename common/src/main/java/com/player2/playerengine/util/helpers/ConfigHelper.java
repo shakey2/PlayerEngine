@@ -4,7 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
-import com.player2.playerengine.PlayerEngine;
+import com.player2.playerengine.PlayerEnginePaths;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.util.serialization.IFailableConfigFile;
 import com.player2.playerengine.util.serialization.IListConfigFile;
@@ -43,8 +43,7 @@ public class ConfigHelper {
            .create();
 
    private static File getConfigFile(String path) {
-      String fullPath = PlayerEngine.MOD_ID + File.separator + path;
-      return new File(fullPath);
+      return PlayerEnginePaths.root().resolve(path).toFile();
    }
 
    public static void reloadAllConfigs() {

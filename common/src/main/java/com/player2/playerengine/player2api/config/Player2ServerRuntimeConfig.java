@@ -49,6 +49,22 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     private boolean ragLiveEnabled = true;
     private int ragMinGoalChars = 3;
 
+    // --- Phase B4: Mod intelligence ---
+
+    private boolean modIntelligenceEnabled = true;
+    private boolean modIntelligenceInspectOnLaunch = true;
+    private boolean modIntelligenceEnrichmentEnabled = false;
+    private int modIntelligenceMaxInspectEntriesPerLaunch = 5000;
+    private int modIntelligenceMaxEnrichmentCallsPerLaunch = 50;
+    private int modIntelligenceMaxEnrichmentFailuresPerLaunch = 20;
+    private int modIntelligenceQueryTopK = 12;
+    private double modIntelligenceMinQueryConfidence = 0.5;
+    private boolean modIntelligenceObserveRuntimeNbt = false;
+    private int modIntelligenceMaxObservedSamplesPerSubject = 5;
+
+    /** When true, owner clients may send {@code tts_playback_done} to early-clear speaker cooldown. */
+    private boolean botTtsPlaybackAckEnabled = false;
+
     public Player2PayerMode getPayerMode() {
         return payerMode == null ? Player2PayerMode.PROMPTER_PAYS : payerMode;
     }
@@ -169,5 +185,62 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
         if (m < 1) return 1;
         if (m > 16) return 16;
         return m;
+    }
+
+    public boolean isModIntelligenceEnabled() { return modIntelligenceEnabled; }
+    public void setModIntelligenceEnabled(boolean v) { this.modIntelligenceEnabled = v; }
+
+    public boolean isModIntelligenceInspectOnLaunch() { return modIntelligenceInspectOnLaunch; }
+    public void setModIntelligenceInspectOnLaunch(boolean v) { this.modIntelligenceInspectOnLaunch = v; }
+
+    public boolean isModIntelligenceEnrichmentEnabled() { return modIntelligenceEnrichmentEnabled; }
+    public void setModIntelligenceEnrichmentEnabled(boolean v) { this.modIntelligenceEnrichmentEnabled = v; }
+
+    public int getModIntelligenceMaxInspectEntriesPerLaunch() { return modIntelligenceMaxInspectEntriesPerLaunch; }
+    public void setModIntelligenceMaxInspectEntriesPerLaunch(int v) {
+        this.modIntelligenceMaxInspectEntriesPerLaunch = v;
+    }
+
+    public int getModIntelligenceMaxEnrichmentCallsPerLaunch() { return modIntelligenceMaxEnrichmentCallsPerLaunch; }
+    public void setModIntelligenceMaxEnrichmentCallsPerLaunch(int v) {
+        this.modIntelligenceMaxEnrichmentCallsPerLaunch = v;
+    }
+
+    public int getModIntelligenceMaxEnrichmentFailuresPerLaunch() {
+        return modIntelligenceMaxEnrichmentFailuresPerLaunch;
+    }
+    public void setModIntelligenceMaxEnrichmentFailuresPerLaunch(int v) {
+        this.modIntelligenceMaxEnrichmentFailuresPerLaunch = v;
+    }
+
+    public int getModIntelligenceQueryTopK() { return modIntelligenceQueryTopK; }
+    public void setModIntelligenceQueryTopK(int v) { this.modIntelligenceQueryTopK = v; }
+
+    public int getModIntelligenceQueryTopKClamped() {
+        int k = modIntelligenceQueryTopK;
+        if (k < 1) return 1;
+        if (k > 50) return 50;
+        return k;
+    }
+
+    public double getModIntelligenceMinQueryConfidence() { return modIntelligenceMinQueryConfidence; }
+    public void setModIntelligenceMinQueryConfidence(double v) { this.modIntelligenceMinQueryConfidence = v; }
+
+    public boolean isModIntelligenceObserveRuntimeNbt() { return modIntelligenceObserveRuntimeNbt; }
+    public void setModIntelligenceObserveRuntimeNbt(boolean v) { this.modIntelligenceObserveRuntimeNbt = v; }
+
+    public int getModIntelligenceMaxObservedSamplesPerSubject() {
+        return modIntelligenceMaxObservedSamplesPerSubject;
+    }
+    public void setModIntelligenceMaxObservedSamplesPerSubject(int v) {
+        this.modIntelligenceMaxObservedSamplesPerSubject = v;
+    }
+
+    public boolean isBotTtsPlaybackAckEnabled() {
+        return botTtsPlaybackAckEnabled;
+    }
+
+    public void setBotTtsPlaybackAckEnabled(boolean botTtsPlaybackAckEnabled) {
+        this.botTtsPlaybackAckEnabled = botTtsPlaybackAckEnabled;
     }
 }

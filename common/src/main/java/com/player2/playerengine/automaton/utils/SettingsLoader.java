@@ -18,6 +18,7 @@
 package com.player2.playerengine.automaton.utils;
 
 import com.player2.playerengine.PlayerEngine;
+import com.player2.playerengine.PlayerEnginePaths;
 import com.player2.playerengine.automaton.api.Settings;
 import com.player2.playerengine.automaton.api.utils.SettingsUtil;
 import java.io.BufferedWriter;
@@ -30,7 +31,7 @@ import java.util.regex.Pattern;
 
 public class SettingsLoader {
    private static final Pattern SETTING_PATTERN = Pattern.compile("^(?<setting>[^ ]+) +(?<value>.+)");
-   private static final Path SETTINGS_PATH = DirUtil.getConfigDir().resolve(PlayerEngine.MOD_ID).resolve("settings.txt");
+   private static final Path SETTINGS_PATH = PlayerEnginePaths.userFile("settings.txt");
 
    public static void readAndApply(Settings settings) {
       try {
@@ -53,6 +54,7 @@ public class SettingsLoader {
          PlayerEngine.LOGGER.info("Automatone settings file not found, resetting.");
 
          try {
+            Files.createDirectories(SETTINGS_PATH.getParent());
             Files.createFile(SETTINGS_PATH);
          } catch (IOException var3) {
          }
@@ -66,6 +68,11 @@ public class SettingsLoader {
    }
 
    public static synchronized void save(Settings settings) {
+      try {
+         Files.createDirectories(SETTINGS_PATH.getParent());
+      } catch (IOException e) {
+         PlayerEngine.LOGGER.error("Could not create Automatone settings directory", e);
+      }
       try (BufferedWriter out = Files.newBufferedWriter(SETTINGS_PATH)) {
          for (Settings.Setting<?> setting : SettingsUtil.modifiedSettings(settings)) {
             out.write(SettingsUtil.settingToString(setting) + "\n");

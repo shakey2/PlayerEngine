@@ -3,6 +3,8 @@ package com.player2.playerengine.tasks.entity;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.BotBehaviour;
 import com.player2.playerengine.TaskCatalogue;
+import com.player2.playerengine.automaton.api.entity.IInventoryProvider;
+import com.player2.playerengine.automaton.api.entity.LivingEntityInventory;
 import com.player2.playerengine.tasks.movement.FollowPlayerTask;
 import com.player2.playerengine.tasks.movement.RunAwayFromPositionTask;
 import com.player2.playerengine.tasks.squashed.CataloguedResourceTask;
@@ -15,8 +17,12 @@ import com.player2.playerengine.util.slots.Slot;
 import com.player2.playerengine.util.time.TimerGame;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
@@ -76,17 +82,14 @@ public class GiveItemToPlayerTask extends Task {
                   for (int i = 0; i < this.throwTarget.size(); i++) {
                      ItemTarget target = this.throwTarget.get(i);
                      int neededToThrow = target.getTargetCount();
-                     if (target.getTargetCount() > 0) {
-                        Optional<Slot> has = mod.getItemStorage().getSlotsWithItemPlayerInventory(false, target.getMatches()).stream().findFirst();
-                        if (has.isPresent()) {
-                           Slot slot = has.get();
-                           ItemStack stack = StorageHelper.getItemStackInSlot(slot);
-                           int amountToThrow = Math.min(neededToThrow, stack.getCount());
-                           mod.getSlotHandler().forceEquipSlot(mod, slot);
-                           mod.getPlayer().spawnAtLocation(mod.getPlayer().getMainHandItem(), amountToThrow).setPickUpDelay(40);
-                           mod.getInventory().setItem(mod.getInventory().selectedSlot, ItemStack.EMPTY);
-                           this.throwTarget.set(i, new ItemTarget(target, neededToThrow - amountToThrow));
-                           return null;
+                     if (neededToThrow > 0) {
+                        Optional<Slot> slot = this.findSlotToThrow(mod, target);
+                        if (slot.isPresent()) {
+                           int thrown = this.throwFromSlot(mod, slot.get(), neededToThrow);
+                           if (thrown > 0) {
+                              this.throwTarget.set(i, new ItemTarget(target, neededToThrow - thrown));
+                              return null;
+                           }
                         }
                      }
                   }
@@ -131,6 +134,63 @@ public class GiveItemToPlayerTask extends Task {
             }
          }
       }
+   }
+
+   private Optional<Slot> findSlotToThrow(PlayerEngineController mod, ItemTarget target) {
+      LivingEntityInventory inventory = ((IInventoryProvider)mod.getEntity()).getLivingInventory();
+      List<Slot> slots = mod.getItemStorage().getSlotsWithItemPlayerInventory(true, target.getMatches());
+      slots.sort(Comparator.comparingInt(slot -> this.isEquippedArmorSlot(inventory, slot) ? 0 : 1));
+      return slots.stream().filter(slot -> !StorageHelper.getItemStackInSlot(slot).isEmpty()).findFirst();
+   }
+
+   private boolean isEquippedArmorSlot(LivingEntityInventory inventory, Slot slot) {
+      return slot.getInventory() == inventory.armor;
+   }
+
+   private int throwFromSlot(PlayerEngineController mod, Slot slot, int amount) {
+      if (amount <= 0) {
+         return 0;
+      }
+      ItemStack stack = StorageHelper.getItemStackInSlot(slot);
+      if (stack.isEmpty()) {
+         return 0;
+      }
+      int amountToThrow = Math.min(amount, stack.getCount());
+      ItemStack dropping = stack.copy();
+      dropping.setCount(amountToThrow);
+      LivingEntity entity = mod.getPlayer();
+      ItemEntity dropped = entity.spawnAtLocation(dropping, 0.5F);
+      if (dropped == null) {
+         return 0;
+      }
+      dropped.setPickUpDelay(40);
+      stack.shrink(amountToThrow);
+      LivingEntityInventory inventory = ((IInventoryProvider)mod.getEntity()).getLivingInventory();
+      if (slot.getInventory() == inventory.armor) {
+         EquipmentSlot armorSlot = equipmentSlotForArmorIndex(slot.getIndex());
+         if (armorSlot != null) {
+            entity.setItemSlot(armorSlot, stack.isEmpty() ? ItemStack.EMPTY : stack.copy());
+         } else {
+            slot.getInventory().set(slot.getIndex(), stack.isEmpty() ? ItemStack.EMPTY : stack);
+         }
+      } else if (slot.getInventory() == inventory.main) {
+         inventory.main.set(slot.getIndex(), stack.isEmpty() ? ItemStack.EMPTY : stack);
+      } else if (slot.getInventory() == inventory.offHand) {
+         inventory.offHand.set(slot.getIndex(), stack.isEmpty() ? ItemStack.EMPTY : stack);
+      }
+      mod.getSlotHandler().registerSlotAction();
+      return amountToThrow;
+   }
+
+   private static EquipmentSlot equipmentSlotForArmorIndex(int armorIndex) {
+      for (EquipmentSlot slot : new EquipmentSlot[] {
+            EquipmentSlot.FEET, EquipmentSlot.LEGS, EquipmentSlot.CHEST, EquipmentSlot.HEAD
+      }) {
+         if (slot.getIndex() == armorIndex) {
+            return slot;
+         }
+      }
+      return null;
    }
 
    @Override
