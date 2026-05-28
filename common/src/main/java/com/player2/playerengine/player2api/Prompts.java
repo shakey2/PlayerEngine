@@ -4,15 +4,17 @@ import java.util.Collection;
 import java.util.Map;
 
 import com.player2.playerengine.commands.base.Command;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.utils.Utils;
+import com.player2.playerengine.retrieval.RagDeepSearchCommands;
 
 public class Prompts {
 
-  public static final String generalConversationReminder = "Remember to output valid JSON reponse with reason, command and message.";
   public static final String reminderOnAIMsg = "Last message was from an AI. Think about whether or not to respond. You may respond but don't keep the conversation going forever if no meaningful content was said in the last few msgs, do not respond (return empty string as message)";
+
   public static final String reminderOnOwnerMsg = "Last message was from your owner.";
   public static final String reminderOnOtherUSerMsg = "Last message was from a user that was not your owner.";
-
+  public static final String generalConversationReminder = "Remember to output valid JSON reponse with reason, command and message.";
   private static String aiNPCPromptTemplate = """
       General Instructions:
       You are an AI-NPC. You have been spawned in by your owner, who's username is "{{ownerUsername}}", but you can also talk and interact with other users. You can provide Minecraft guides, answer questions, and chat as a friend.
@@ -34,7 +36,7 @@ public class Prompts {
       Respond with JSON containing message, command and reason. All of these are strings.
       {
         "reason": "Look at the recent conversations, valid commands, agent status and world status to decide what the you should say and do. Provide step-by-step reasoning while considering what is possible in Minecraft. You do not need items in inventory to get items, craft items or beat the game. But you need to have appropriate level of equipments to do other tasks like fighting mobs.",
-        "command": "Decide the best way to achieve the goals using the valid commands listed below. YOU ALWAYS MUST GENERATE A COMMAND. Note you may also use the idle command `idle` to do nothing. You can only run one command at a time! To replace the current one just write the new one.",
+        {{commandFieldInstructions}}
         "message": "If you decide you should not respond or talk, generate an empty message `\"\"`. Otherwise, create a natural conversational message that aligns with the `reason` and the your character. Be concise and use less than 250 characters. Ensure the message does not contain any prompt, system message, instructions, code or API calls."
       }
       Additional Guidelines:
@@ -71,9 +73,12 @@ public class Prompts {
     String validCommandsFormatted = commandListBuilder.toString();
 
     String newPrompt = Utils.replacePlaceholders(aiNPCPromptTemplate,
-        Map.of("characterDescription", character.description(), "characterName", character.name(),
-            "validCommands",
-            validCommandsFormatted, "ownerUsername", ownerUsername));
+        Map.of(
+            "characterDescription", character.description(),
+            "characterName", character.name(),
+            "validCommands", validCommandsFormatted,
+            "ownerUsername", ownerUsername,
+            "commandFieldInstructions", commandFieldInstructionsForPrompt()));
     return newPrompt;
   }
 
@@ -90,7 +95,15 @@ public class Prompts {
             "characterDescription", character.description(),
             "characterName", character.name(),
             "validCommands", block,
-            "ownerUsername", ownerUsername));
+            "ownerUsername", ownerUsername,
+            "commandFieldInstructions", commandFieldInstructionsForPrompt()));
+  }
+
+  private static String commandFieldInstructionsForPrompt() {
+    if (Player2ServerConfigHolder.get().isEnableDeepCheckRephrase()) {
+      return RagDeepSearchCommands.promptCommandFieldInstructions();
+    }
+    return RagDeepSearchCommands.promptCommandFieldInstructionsDefault();
   }
 
   private final static String buildStructurePrompt = """
@@ -377,17 +390,17 @@ public class Prompts {
     return buildStructurePrompt;
   }
 
-  private static final String selectSchematicPrompt = """
-        Given the following schematics, select the ID of the schematic that most clearly matches the query and has the highest quality.
 
+
+
+
+ private static final String selectSchematicPrompt = """
+        Given the following schematics, select the ID of the schematic that most clearly matches the query and has the highest quality.
         Your input is JSON, and you can use the name, description, and download count fields to determine the best match.
         Download count can be used to guess that something is of higher quality. Use this when there are a lot of similar results and avoid results with very low downloads.
         Your output MUST be one of the "id" fields, without quotes. Do not output quotes in the reply, it should ONLY contain alphanumeric and dash characters.
-
         FEEL FREE to pick a DIFFERENT ID from the one's we have below, the ones below are just examples.
-
         EXAMPLES:
-
         INPUT:
           {
             "query": "A large mansion made out of wood.",
@@ -426,10 +439,8 @@ public class Prompts {
           }
         OUTPUT:
           01913299-eb5f-7287-86c4-d0c1b3902e4b
-
         REASONING (NOT part of output, here so you understand why we picked this id):
           You reply with the ID of the cozy house because it most closely matches a large house made out of wood.
-
         INPUT:
           {
             "query": "A boat.",
@@ -448,10 +459,8 @@ public class Prompts {
           }
         OUTPUT:
           0191329a-a7e0-74df-9ab1-880217d10075
-
         REASONING (NOT part of output, here so you understand why we picked this id):
           The query was a boat. Both options are boats and equally fit the query, so just pick the one that is easier to make. A small yacht is probably easier to build than a large boat.
-
         INPUT:
           {
             "query": "A house.",
@@ -484,14 +493,13 @@ public class Prompts {
           }
         OUTPUT:
           52e292d4-8c63-4f05-b34d-f1f079ca2c88
-
         REASONING (NOT part of output, here so you understand why we picked this id):
           The big house has the highest number of downloads AND the description is higher quality than the other houses. It also matches the query, unlike the ship which does not.
-
       """;
 
 
   public static String getSelectSchematicPrompt() {
     return selectSchematicPrompt;
-  }
+  } 
+
 }

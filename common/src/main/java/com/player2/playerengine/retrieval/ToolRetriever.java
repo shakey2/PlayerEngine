@@ -129,11 +129,30 @@ public final class ToolRetriever {
      * one matching tag are included (post-filter over the RRF result set).
      */
     public List<RetrievalHit> retrieve(String goal, int topK, Set<String> categoryFilter) {
+        return retrieveWithConfidence(goal, topK, categoryFilter, RetrievalConfidenceThresholds.defaults())
+                .hits();
+    }
+
+    /**
+     * Retrieves tools with deterministic confidence signals (Phase B5).
+     */
+    public RetrievalResult retrieveWithConfidence(
+            String goal,
+            int topK,
+            Set<String> categoryFilter,
+            RetrievalConfidenceThresholds thresholds) {
         int candidateK = topK * CANDIDATE_MULTIPLIER;
         List<RetrievalHit> bm25    = lexicalIndex.query(goal, candidateK);
         List<RetrievalHit> minHash = minHashIndex.query(goal, candidateK);
         List<RetrievalHit> fused   = RrfFusion.fuse(bm25, minHash, candidateK, RRF_K);
+        List<RetrievalHit> hits    = applyCategoryFilter(fused, topK, categoryFilter);
+        RetrievalConfidence confidence =
+                RetrievalConfidenceCalculator.compute(goal, hits, registry, thresholds);
+        return new RetrievalResult(hits, confidence);
+    }
 
+    private List<RetrievalHit> applyCategoryFilter(
+            List<RetrievalHit> fused, int topK, Set<String> categoryFilter) {
         if (categoryFilter != null && !categoryFilter.isEmpty()) {
             List<RetrievalHit> filtered = new ArrayList<>();
             for (RetrievalHit hit : fused) {
@@ -145,7 +164,6 @@ public final class ToolRetriever {
             }
             return filtered;
         }
-
         return fused.size() <= topK ? fused : fused.subList(0, topK);
     }
 

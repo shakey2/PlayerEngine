@@ -19,6 +19,9 @@ public final class Player2NpcPersistencePaths {
     public static final String SERVER_USERNAME_UUID_CACHE_FILE_NAME = "server_username_uuid_cache.json";
     /** Filename for per-owner (and global) tool keyword/example overlay files. */
     public static final String TOOL_OVERRIDES_FILE_NAME = "tool_overrides.json";
+    /** Per-owner learned overlay (B5); separate from manual {@link #TOOL_OVERRIDES_FILE_NAME}. */
+    public static final String TOOL_LEARNED_OVERRIDES_FILE_NAME = "tool_learned_overrides.json";
+    public static final String LEARN_AUDIT_FILE_NAME = "learn_audit.jsonl";
 
     private Player2NpcPersistencePaths() {
     }
@@ -93,5 +96,21 @@ public final class Player2NpcPersistencePaths {
 
     public static Path toolOverridesFile(MinecraftServer server, UUID ownerUuid) {
         return toolOverridesFile(server.getWorldPath(LevelResource.ROOT), ownerUuid);
+    }
+
+    public static Path toolLearnedOverridesFile(Path worldRoot, UUID ownerUuid) {
+        return ownersRoot(worldRoot).resolve(ownerUuid.toString()).resolve(TOOL_LEARNED_OVERRIDES_FILE_NAME);
+    }
+
+    public static Path toolLearnedOverridesFile(MinecraftServer server, UUID ownerUuid) {
+        return toolLearnedOverridesFile(server.getWorldPath(LevelResource.ROOT), ownerUuid);
+    }
+
+    public static Path learnAuditFile(Path worldRoot) {
+        return persistentDataRoot(worldRoot).resolve(LEARN_AUDIT_FILE_NAME);
+    }
+
+    public static Path learnAuditFile(MinecraftServer server) {
+        return learnAuditFile(server.getWorldPath(LevelResource.ROOT));
     }
 }

@@ -53,25 +53,42 @@ public class CommandExecutor {
    }
 
    public void execute(String line, Runnable onFinish, Consumer<CommandException> getException) {
-      if (this.isClientCommand(line)) {
-         line = line.substring(this.getCommandPrefix().length());
-         String[] parts = line.split(";");
-         Command[] commands = new Command[parts.length];
+      this.execute(line, () -> {}, onFinish, getException);
+   }
 
-         try {
-            for (int i = 0; i < parts.length; i++) {
-               commands[i] = this.getCommand(parts[i]);
-            }
-         } catch (CommandException var7) {
-            getException.accept(var7);
-         }
-
-         this.executeRecursive(commands, parts, 0, onFinish, getException);
+   /**
+    * Executes a client command line. {@code onAccepted} runs after all command parts parse
+    * successfully and before the first command's {@code run(...)} starts (Phase B5 grounding).
+    */
+   public void execute(
+         String line,
+         Runnable onAccepted,
+         Runnable onFinish,
+         Consumer<CommandException> getException) {
+      if (!this.isClientCommand(line)) {
+         return;
       }
+      line = line.substring(this.getCommandPrefix().length());
+      String[] parts = line.split(";");
+      Command[] commands = new Command[parts.length];
+
+      try {
+         for (int i = 0; i < parts.length; i++) {
+            commands[i] = this.getCommand(parts[i]);
+         }
+      } catch (CommandException var7) {
+         getException.accept(var7);
+         return;
+      }
+
+      if (onAccepted != null) {
+         onAccepted.run();
+      }
+      this.executeRecursive(commands, parts, 0, onFinish, getException);
    }
 
    public void execute(String line, Consumer<CommandException> getException) {
-      this.execute(line, () -> {}, getException);
+      this.execute(line, () -> {}, () -> {}, getException);
    }
 
    public void execute(String line) {

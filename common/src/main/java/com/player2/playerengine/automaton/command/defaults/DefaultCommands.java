@@ -19,10 +19,10 @@ package com.player2.playerengine.automaton.command.defaults;
 
 import com.player2.playerengine.PlayerEngine;
 import com.player2.playerengine.PlayerEngineController;
-import com.player2.playerengine.executor.BudgetFallbackBehavior;
 import com.player2.playerengine.executor.BudgetTracker;
 import com.player2.playerengine.executor.StepExecution;
 import com.player2.playerengine.executor.StepState;
+import com.player2.playerengine.player2api.BudgetConfigCommands;
 import com.player2.playerengine.player2api.JoulesCache;
 import com.player2.playerengine.player2api.ProfileUrlResolver;
 import com.player2.playerengine.player2api.config.Player2PayerMode;
@@ -301,102 +301,54 @@ public final class DefaultCommands {
                   .then(Commands.literal("soft")
                         .then(Commands.argument("value", IntegerArgumentType.integer(0)).executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
-                           int v = IntegerArgumentType.getInteger(ctx, "value");
-                           var c = Player2ServerConfigHolder.get();
-                           c.setSoftBudgetCallsPerWindow(v);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           ctx.getSource().sendSuccess(() -> Component.literal("softBudgetCallsPerWindow=" + v + " (0=disabled; saved)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setSoft(ctx.getSource(),
+                                   IntegerArgumentType.getInteger(ctx, "value"));
                         })))
                   .then(Commands.literal("hard")
                         .then(Commands.argument("value", IntegerArgumentType.integer(0)).executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
-                           int v = IntegerArgumentType.getInteger(ctx, "value");
-                           var c = Player2ServerConfigHolder.get();
-                           c.setHardBudgetCallsPerWindow(v);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           ctx.getSource().sendSuccess(() -> Component.literal("hardBudgetCallsPerWindow=" + v + " (0=disabled; saved)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setHard(ctx.getSource(),
+                                   IntegerArgumentType.getInteger(ctx, "value"));
                         })))
                   .then(Commands.literal("window")
                         .then(Commands.argument("minutes", IntegerArgumentType.integer(1, 1440)).executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
-                           int v = IntegerArgumentType.getInteger(ctx, "minutes");
-                           var c = Player2ServerConfigHolder.get();
-                           c.setBudgetWindowMinutes(v);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           BudgetTracker.resetAll();
-                           ctx.getSource().sendSuccess(() -> Component.literal("budgetWindowMinutes=" + v + " (saved; windows reset)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setWindow(ctx.getSource(),
+                                   IntegerArgumentType.getInteger(ctx, "minutes"));
                         })))
                   .then(Commands.literal("joules_soft")
                         .then(Commands.argument("value", IntegerArgumentType.integer(0)).executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
-                           int v = IntegerArgumentType.getInteger(ctx, "value");
-                           var c = Player2ServerConfigHolder.get();
-                           c.setSoftJoulesThreshold(v);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           ctx.getSource().sendSuccess(() -> Component.literal("softJoulesThreshold=" + v + " (0=disabled; saved)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setJoulesSoft(ctx.getSource(),
+                                   IntegerArgumentType.getInteger(ctx, "value"));
                         })))
                   .then(Commands.literal("joules_hard")
                         .then(Commands.argument("value", IntegerArgumentType.integer(0)).executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
-                           int v = IntegerArgumentType.getInteger(ctx, "value");
-                           var c = Player2ServerConfigHolder.get();
-                           c.setHardJoulesThreshold(v);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           ctx.getSource().sendSuccess(() -> Component.literal("hardJoulesThreshold=" + v + " (0=disabled; saved)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setJoulesHard(ctx.getSource(),
+                                   IntegerArgumentType.getInteger(ctx, "value"));
                         })))
                   .then(Commands.literal("joules_refresh")
                         .then(Commands.argument("seconds", IntegerArgumentType.integer(60, 86400)).executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
-                           int v = IntegerArgumentType.getInteger(ctx, "seconds");
-                           var c = Player2ServerConfigHolder.get();
-                           c.setJoulesRefreshIntervalSeconds(v);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           ctx.getSource().sendSuccess(() -> Component.literal("joulesRefreshIntervalSeconds=" + v + " (saved)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setJoulesRefresh(ctx.getSource(),
+                                   IntegerArgumentType.getInteger(ctx, "seconds"));
                         })))
                   .then(Commands.literal("fallback_profile")
                         .then(Commands.argument("name", StringArgumentType.string()).executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
                            String raw = StringArgumentType.getString(ctx, "name");
                            String profileName = raw.equalsIgnoreCase("none") ? null : raw;
-                           var c = Player2ServerConfigHolder.get();
-                           c.setFallbackProfile(profileName);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           ProfileUrlResolver.invalidateCache();
-                           String display = profileName == null ? "none" : profileName;
-                           ctx.getSource().sendSuccess(() -> Component.literal("fallbackProfile=" + display + " (saved; profile cache cleared)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setFallbackProfile(ctx.getSource(), profileName);
                         })))
                   .then(Commands.literal("fallback_behavior")
                         .then(Commands.literal("switch").executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
-                           var c = Player2ServerConfigHolder.get();
-                           c.setBudgetFallbackBehavior(BudgetFallbackBehavior.SWITCH_PROFILE);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           ctx.getSource().sendSuccess(() -> Component.literal("budgetFallbackBehavior=SWITCH_PROFILE (saved)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setFallbackBehaviorSwitch(ctx.getSource());
                         }))
                         .then(Commands.literal("stop").executes(ctx -> {
                            if (!isLogicalServer(ctx.getSource())) return 0;
-                           var c = Player2ServerConfigHolder.get();
-                           c.setBudgetFallbackBehavior(BudgetFallbackBehavior.HARD_STOP);
-                           Player2ServerConfigHolder.validateAndFix(c);
-                           Player2ServerConfigHolder.save();
-                           ctx.getSource().sendSuccess(() -> Component.literal("budgetFallbackBehavior=HARD_STOP (saved)."), false);
-                           return 1;
+                           return BudgetConfigCommands.setFallbackBehaviorStop(ctx.getSource());
                         })))
                   .then(Commands.literal("reset").executes(ctx -> {
                      if (!isLogicalServer(ctx.getSource())) return 0;
@@ -408,49 +360,7 @@ public final class DefaultCommands {
                   }))
                   .then(Commands.literal("status").executes(ctx -> {
                      if (!isLogicalServer(ctx.getSource())) return 0;
-                     var config = Player2ServerConfigHolder.get();
-                     var source = ctx.getSource();
-                     source.sendSuccess(() -> Component.literal("=== Budget Status ==="), false);
-                     source.sendSuccess(() -> Component.literal(
-                             "Call limits: soft=" + config.getSoftBudgetCallsPerWindow()
-                                     + " hard=" + config.getHardBudgetCallsPerWindow()
-                                     + " window=" + config.getBudgetWindowMinutes() + "min"), false);
-                     source.sendSuccess(() -> Component.literal(
-                             "Joules thresholds: soft=" + config.getSoftJoulesThreshold()
-                                     + " hard=" + config.getHardJoulesThreshold()
-                                     + " refresh=" + config.getJoulesRefreshIntervalSeconds() + "s"), false);
-                     source.sendSuccess(() -> Component.literal(
-                             "Fallback: profile=" + config.getFallbackProfile()
-                                     + " behavior=" + config.getBudgetFallbackBehavior()), false);
-                     // Per-billing-key call windows
-                     var windows = BudgetTracker.statusSnapshot(config);
-                     if (windows.isEmpty()) {
-                        source.sendSuccess(() -> Component.literal("No active call windows."), false);
-                     } else {
-                        long now = System.currentTimeMillis();
-                        for (var entry : windows.entrySet()) {
-                           var snap = entry.getValue();
-                           long resets = Math.max(0, snap.windowEndMs() - now) / 1000L;
-                           source.sendSuccess(() -> Component.literal(
-                                   "  " + entry.getKey() + ": calls=" + snap.callCount()
-                                           + " resets_in=" + resets + "s"), false);
-                        }
-                     }
-                     // Per-billing-key Joules snapshots
-                     var joulesSnaps = JoulesCache.statusSnapshot();
-                     if (joulesSnaps.isEmpty()) {
-                        source.sendSuccess(() -> Component.literal("No cached Joules data."), false);
-                     } else {
-                        for (var entry : joulesSnaps.entrySet()) {
-                           var snap = entry.getValue();
-                           long ageS = (System.currentTimeMillis() - snap.refreshedAtMs) / 1000L;
-                           source.sendSuccess(() -> Component.literal(
-                                   "  " + entry.getKey() + ": joules=" + snap.joulesDisplay()
-                                           + " patron=" + (snap.patronTier.isEmpty() ? "none" : snap.patronTier)
-                                           + " age=" + ageS + "s"), false);
-                        }
-                     }
-                     return 1;
+                     return BudgetConfigCommands.status(ctx.getSource());
                   })))
             .then(Commands.literal("chain")
                   .then(Commands.literal("status").executes(ctx -> {

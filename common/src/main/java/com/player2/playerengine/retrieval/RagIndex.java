@@ -201,6 +201,7 @@ public final class RagIndex {
         List<ToolOverlay> overlays = new ArrayList<>();
         ToolOverlayLoader.loadGlobal().ifPresent(overlays::add);
         ToolOverlayLoader.loadPerOwner(server, ownerUuid).ifPresent(overlays::add);
+        ToolOverlayLoader.loadLearnedPerOwner(server, ownerUuid).ifPresent(overlays::add);
 
         Collection<ToolDocument> merged = ToolOverlayMerger.merge(SeedToolMetadata.all(), overlays);
         ToolMetadataRegistry registry = ToolMetadataRegistry.create(merged);

@@ -2,6 +2,7 @@ package com.player2.playerengine.retrieval;
 
 import com.player2.playerengine.commands.base.Command;
 import com.player2.playerengine.commands.base.CommandExecutor;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -27,6 +28,14 @@ public final class RagPromptBuilder {
 
     private RagPromptBuilder() {}
 
+    /**
+     * Builds the valid-commands text block: always-include ids first, then retrieval hits (deduped).
+     *
+     * @param registry           merged tool metadata for this owner/global retriever
+     * @param hits               ranked retrieval hits (may be empty)
+     * @param executor           live command registry for name/description
+     * @param alwaysIncludeIds   ids to prepend (typically {@link #ALWAYS_INCLUDE_IDS})
+     */
     public static String buildValidCommandsBlock(
             ToolMetadataRegistry registry,
             List<RetrievalHit> hits,
@@ -64,9 +73,15 @@ public final class RagPromptBuilder {
         for (String toolId : limited) {
             appendToolBlock(out, toolId, registry, executor);
         }
+        if (Player2ServerConfigHolder.get().isEnableDeepCheckRephrase()) {
+            RagDeepSearchCommands.appendPromptFooter(out);
+        }
         return out.toString();
     }
 
+    /**
+     * Stable hash of the tool id set used for a turn (always-include + hits), for prompt churn gating.
+     */
     public static int toolIdSetHash(Set<String> alwaysIncludeIds, List<RetrievalHit> hits) {
         LinkedHashSet<String> ids = new LinkedHashSet<>();
         if (alwaysIncludeIds != null) {
@@ -82,6 +97,10 @@ public final class RagPromptBuilder {
         return ids.hashCode();
     }
 
+    /**
+     * Returns true if {@code text} has at least {@code minAlphanumericChars} characters after
+     * lowercasing and stripping non-alphanumeric (matches BM25 tokenizer intent for goal gating).
+     */
     public static boolean hasSubstantiveGoalText(String text, int minAlphanumericChars) {
         if (text == null || text.isBlank()) {
             return false;
@@ -135,6 +154,7 @@ public final class RagPromptBuilder {
         }
     }
 
+    /** Clears warn-once state (tests). */
     static void clearWarnedMissingCommandsForTests() {
         synchronized (WARNED_MISSING_COMMANDS) {
             WARNED_MISSING_COMMANDS.clear();
