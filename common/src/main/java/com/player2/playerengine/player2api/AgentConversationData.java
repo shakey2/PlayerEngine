@@ -1,8 +1,11 @@
 package com.player2.playerengine.player2api;
 
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.TimeUnit;
@@ -26,8 +29,17 @@ import com.player2.playerengine.player2api.status.WorldStatus;
 import com.player2.playerengine.player2api.utils.Utils;
 import com.player2.playerengine.retrieval.RagIndex;
 import com.player2.playerengine.retrieval.RagPromptBuilder;
+import com.player2.playerengine.retrieval.RetrievalConfidenceThresholds;
 import com.player2.playerengine.retrieval.RetrievalHit;
+import com.player2.playerengine.retrieval.RetrievalResult;
 import com.player2.playerengine.retrieval.ToolRetriever;
+import com.player2.playerengine.retrieval.learning.AliasLearnSuggestion;
+import com.player2.playerengine.retrieval.learning.AliasLearningService;
+import com.player2.playerengine.retrieval.learning.DeepCheckBudgetGate;
+import com.player2.playerengine.retrieval.learning.DeepCheckRephraseService;
+import com.player2.playerengine.retrieval.RagDeepSearchCommands;
+import com.player2.playerengine.retrieval.learning.RagDeepCheckCoordinator;
+import com.player2.playerengine.retrieval.learning.RagDeepCheckPipeline;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.LivingEntity;
 
@@ -60,6 +72,17 @@ public class AgentConversationData {
     private int cachedPromptIdHash = 0;
     /** Suppress repeated warnings when the RAG index is not yet initialised for this bot. */
     private boolean ragFallbackWarnedOnce = false;
+
+    // --- Phase B5: per-turn RAG / deep-check state ---
+    private List<RetrievalHit> activeRetrievalHits = List.of();
+    private Set<String> activePromptToolIds = Set.of();
+    private String lastRagGoalText = "";
+    private Optional<AliasLearnSuggestion> pendingLearnSuggestion = Optional.empty();
+    private int deepCheckAttemptsThisTurn = 0;
+    private boolean postDecisionRetryAttempted = false;
+    private String lastRagPromptSource = "first_pass";
+    /** Audit trigger for alias learning: heuristic_weak, model_requested, post_decision_out_of_top_k. */
+    private String lastDeepCheckTriggerReason = "";
 
     /**
      * Per-bot TTS pacing: nanoTime() after which this specific bot is allowed to start a new
@@ -154,6 +177,18 @@ public class AgentConversationData {
         clearTtsCooldown();
         cachedRetrievalHits = List.of();
         cachedPromptIdHash = 0;
+        resetB5TurnState();
+    }
+
+    private void resetB5TurnState() {
+        activeRetrievalHits = List.of();
+        activePromptToolIds = Set.of();
+        lastRagGoalText = "";
+        pendingLearnSuggestion = Optional.empty();
+        deepCheckAttemptsThisTurn = 0;
+        postDecisionRetryAttempted = false;
+        lastRagPromptSource = "first_pass";
+        lastDeepCheckTriggerReason = "";
     }
 
     // get LLM response and add to conversation history
@@ -178,6 +213,7 @@ public class AgentConversationData {
 
         this.lastProcessTime = System.nanoTime();
         this.isProcessing = true;
+        resetB5TurnState();
 
         String lastUserInBatch = null;
         for (Event e : eventQueue) {
@@ -246,39 +282,10 @@ public class AgentConversationData {
         LOGGER.info("[AICommandBridge/processChatWithAPI]: Calling LLM: history={}",
                 new Object[] { historyWithWrappedStatus.toString() });
 
-        Consumer<JsonObject> onLLMResponse = jsonResp -> {
-            String llmMessage = Utils.getStringJsonSafely(jsonResp, "message");
-            String command = this.isGreetingResponse ? "bodylang greeting"
-                    : Utils.getStringJsonSafely(jsonResp, "command");
-            this.isGreetingResponse = false;
-            String previousAssistant = mod.getAIPersistantData().getLastAssistantContent().orElse("");
-            boolean redundantAfterInfo = lastEvent instanceof Event.InfoMessage
-                    && ConversationHistory.isRedundantAssistantAfterInfo(previousAssistant, llmMessage);
-            if (redundantAfterInfo) {
-                LOGGER.info(
-                        "[AICommandBridge/processCharWithAPI]: Suppressing duplicate assistant chat after Info (command feedback) round");
-                llmMessage = "";
-            }
-            if (llmMessage == null) {
-                llmMessage = "";
-            }
-            LOGGER.info("[AICommandBridge/processCharWithAPI]: Processed LLM repsonse: message={} command={}",
-                    llmMessage, command);
-            try {
-                if (!llmMessage.isEmpty() || command != null) {
-                    mod.getAIPersistantData().addAssistantMessage(llmMessage, mod.getPlayer2APIService());
-                    onCharacterEvent.accept(new Event.CharacterMessage(llmMessage, command, this, relayInitiator));
-                } else {
-                    LOGGER.warn(
-                            "[AICommandBridge/processChatWithAPI/onLLMResponse]: Generated null llm message and command");
-                }
-            } catch (Exception e) {
-                LOGGER.error("[AICommandBridge/processChatWithAPI/onLLMRepsonse: ERROR RUNNING SIDE EFFECTS, errMsg={}",
-                        e.getMessage());
-            } finally {
-                this.isProcessing = false;
-            }
-        };
+        final Event.UserMessage ragUserMsg = lastUserMsgForRag;
+        Consumer<JsonObject> onLLMResponse = jsonResp -> handleLlmResponse(
+                jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
+                historyWithWrappedStatus, ragUserMsg, false, false);
         completer.processToJson(mod.getPlayer2APIService(), historyWithWrappedStatus, onLLMResponse, onErrMsg, true, AiTaskClass.DECISION);
     }
 
@@ -370,10 +377,36 @@ public class AgentConversationData {
             return;
         }
 
-        List<RetrievalHit> hits = retriever.retrieve(goalText, config.getRagTopKClamped(), null);
+        lastRagGoalText = goalText;
+        int topK = config.getRagTopKClamped();
+        RetrievalConfidenceThresholds thresholds = RetrievalConfidenceThresholds.fromConfig(config);
+        RetrievalResult firstPass = retriever.retrieveWithConfidence(goalText, topK, null, thresholds);
+
+        Player2PayerResolution.ApiBillingContext billing = Player2PayerResolution.resolve(
+                mod, chainInitiatorUsername, mod.getPlayer2APIService().getClientId());
+        RagDeepCheckCoordinator.RetryMergeResult merged = RagDeepCheckCoordinator.maybeImproveRetrieval(
+                retriever,
+                goalText,
+                topK,
+                null,
+                thresholds,
+                firstPass,
+                mod.getPlayer2APIService(),
+                mod.getCommandExecutor(),
+                billing,
+                config.isEnableDeepCheckRephrase());
+        if (merged.deepCheckAttempted()) {
+            deepCheckAttemptsThisTurn++;
+            lastDeepCheckTriggerReason = "heuristic_weak";
+        }
+        lastRagPromptSource = merged.promptSource();
+        pendingLearnSuggestion = merged.learnSuggestion();
+        List<RetrievalHit> hits = merged.activeResult().hits();
 
         if (hits.isEmpty()) {
-            LOGGER.debug("[RAG] empty retrieval for goal=\"{}\" bot={}", goalText, getName());
+            LOGGER.debug("[RAG] empty retrieval for goal=\"{}\" bot={} source={}", goalText, getName(), lastRagPromptSource);
+            activeRetrievalHits = hits;
+            activePromptToolIds = Set.of();
             cachedRetrievalHits = hits;
             cachedPromptIdHash = 0;
             if (config.isRagFallbackToFullList()) {
@@ -384,7 +417,9 @@ public class AgentConversationData {
             return;
         }
 
-        // Skip prompt rewrite when the retrieved tool set hasn't changed since last turn.
+        activeRetrievalHits = hits;
+        activePromptToolIds = toolIdsFromHits(hits);
+
         int newHash = RagPromptBuilder.toolIdSetHash(RagPromptBuilder.ALWAYS_INCLUDE_IDS, hits);
         if (newHash == cachedPromptIdHash) {
             LOGGER.debug("[RAG] same tool set (hash={}), skipping prompt update for bot={}", newHash, getName());
@@ -396,8 +431,281 @@ public class AgentConversationData {
 
         String block = RagPromptBuilder.buildValidCommandsBlock(
                 retriever.getRegistry(), hits, mod.getCommandExecutor(), RagPromptBuilder.ALWAYS_INCLUDE_IDS);
-        LOGGER.debug("[RAG] injecting {} hits into prompt for goal=\"{}\" bot={}", hits.size(), goalText, getName());
+        LOGGER.debug("[RAG] injecting {} hits into prompt for goal=\"{}\" bot={} source={}",
+                hits.size(), goalText, getName(), lastRagPromptSource);
         mod.getAIPersistantData().updateSystemPromptWithBlock(block);
+    }
+
+    private static Set<String> toolIdsFromHits(List<RetrievalHit> hits) {
+        Set<String> ids = new HashSet<>();
+        for (RetrievalHit h : hits) {
+            ids.add(h.toolId());
+        }
+        ids.addAll(RagPromptBuilder.ALWAYS_INCLUDE_IDS);
+        return ids;
+    }
+
+    private void handleLlmResponse(
+            JsonObject jsonResp,
+            Event lastEvent,
+            String relayInitiator,
+            Consumer<Event.CharacterMessage> onCharacterEvent,
+            Consumer<String> onErrMsg,
+            LLMCompleter completer,
+            ConversationHistory historyWithWrappedStatus,
+            Event.UserMessage lastUserMsgForRag,
+            boolean isFollowUpDecision,
+            boolean isModelDeepSearchFollowUp) {
+        String llmMessage = Utils.getStringJsonSafely(jsonResp, "message");
+        String command = this.isGreetingResponse ? "bodylang greeting"
+                : Utils.getStringJsonSafely(jsonResp, "command");
+        this.isGreetingResponse = false;
+
+        String cmdId = resolveCommandId(command);
+        if (isModelDeepSearchFollowUp && RagDeepSearchCommands.isMetaCommandId(cmdId)) {
+            LOGGER.warn("[B5] model_deepsearch_loop_blocked bot={}", getName());
+            command = "idle";
+            cmdId = "idle";
+        }
+
+        if (!isFollowUpDecision && maybeModelRequestedDeepSearch(
+                command, cmdId, lastUserMsgForRag, relayInitiator, onCharacterEvent, onErrMsg, completer,
+                historyWithWrappedStatus, lastEvent)) {
+            return;
+        }
+
+        if (!isFollowUpDecision && maybePostDecisionRetry(
+                command, lastUserMsgForRag, relayInitiator, onCharacterEvent, onErrMsg, completer,
+                historyWithWrappedStatus, lastEvent)) {
+            return;
+        }
+
+        if (RagDeepSearchCommands.isMetaCommandId(cmdId)) {
+            LOGGER.debug("[B5] model_deepsearch_skipped bot={} (not handled)", getName());
+            command = "idle";
+        }
+
+        String previousAssistant = mod.getAIPersistantData().getLastAssistantContent().orElse("");
+        boolean redundantAfterInfo = lastEvent instanceof Event.InfoMessage
+                && ConversationHistory.isRedundantAssistantAfterInfo(previousAssistant, llmMessage);
+        if (redundantAfterInfo) {
+            LOGGER.info(
+                    "[AICommandBridge/processCharWithAPI]: Suppressing duplicate assistant chat after Info (command feedback) round");
+            llmMessage = "";
+        }
+        if (llmMessage == null) {
+            llmMessage = "";
+        }
+        LOGGER.info("[AICommandBridge/processCharWithAPI]: Processed LLM response: message={} command={}",
+                llmMessage, command);
+        try {
+            if (!llmMessage.isEmpty() || command != null) {
+                registerPendingLearnCandidate();
+                mod.getAIPersistantData().addAssistantMessage(llmMessage, mod.getPlayer2APIService());
+                onCharacterEvent.accept(new Event.CharacterMessage(llmMessage, command, this, relayInitiator));
+            } else {
+                LOGGER.warn(
+                        "[AICommandBridge/processChatWithAPI/onLLMResponse]: Generated null llm message and command");
+            }
+        } catch (Exception e) {
+            LOGGER.error("[AICommandBridge/processChatWithAPI/onLLMResponse]: ERROR RUNNING SIDE EFFECTS, errMsg={}",
+                    e.getMessage());
+        } finally {
+            this.isProcessing = false;
+        }
+    }
+
+    private String resolveCommandId(String command) {
+        if (command == null || command.isBlank()) {
+            return null;
+        }
+        String withPrefix = mod.getCommandExecutor().isClientCommand(command)
+                ? command
+                : mod.getCommandExecutor().getCommandPrefix() + command;
+        return AgentSideEffects.firstCommandId(withPrefix, mod.getCommandExecutor());
+    }
+
+    private boolean maybeModelRequestedDeepSearch(
+            String command,
+            String cmdId,
+            Event.UserMessage lastUserMsgForRag,
+            String relayInitiator,
+            Consumer<Event.CharacterMessage> onCharacterEvent,
+            Consumer<String> onErrMsg,
+            LLMCompleter completer,
+            ConversationHistory historyWithWrappedStatus,
+            Event lastEvent) {
+        Player2ServerRuntimeConfig config = Player2ServerConfigHolder.get();
+        if (!config.isEnableDeepCheckRephrase() || !RagDeepSearchCommands.isMetaCommandId(cmdId)) {
+            return false;
+        }
+        if (deepCheckAttemptsThisTurn >= config.getDeepCheckMaxAttemptsPerTurnClamped()) {
+            LOGGER.debug("[B5] model_deepsearch_skipped reason=attempt_cap bot={}", getName());
+            return false;
+        }
+        if (lastUserMsgForRag == null || lastRagGoalText.isBlank()) {
+            LOGGER.debug("[B5] model_deepsearch_skipped reason=no_goal bot={}", getName());
+            return false;
+        }
+
+        LOGGER.info("[B5] model_deepsearch requested bot={} goal=\"{}\"", getName(), lastRagGoalText);
+
+        Player2PayerResolution.ApiBillingContext billing = Player2PayerResolution.resolve(
+                mod, chainInitiatorUsername, mod.getPlayer2APIService().getClientId());
+        DeepCheckBudgetGate.SkipReason skip = DeepCheckBudgetGate.preflight(billing);
+        if (skip != DeepCheckBudgetGate.SkipReason.NONE) {
+            LOGGER.debug("[B5] model_deepsearch_skipped reason={} bot={}", skip.name().toLowerCase(), getName());
+            return false;
+        }
+
+        MinecraftServer server = mod.getPlayer().getServer();
+        UUID ownerUuid = mod.getOwner() != null ? mod.getOwner().getUUID() : null;
+        ToolRetriever retriever = RagIndex.getForOwner(server, ownerUuid);
+        if (retriever == null) {
+            return false;
+        }
+
+        deepCheckAttemptsThisTurn++;
+
+        if (config.isEnableDeepCheckMessage()) {
+            addEventToQueue(new InfoMessage("Let me check the command list for a better match."));
+        }
+
+        RetrievalConfidenceThresholds thresholds = RetrievalConfidenceThresholds.fromConfig(config);
+        RetrievalResult firstPass = retriever.retrieveWithConfidence(
+                lastRagGoalText, config.getRagTopKClamped(), null, thresholds);
+
+        RagDeepCheckPipeline.ApplyResult applied = RagDeepCheckPipeline.apply(
+                retriever,
+                lastRagGoalText,
+                config.getRagTopKClamped(),
+                null,
+                thresholds,
+                firstPass,
+                mod.getPlayer2APIService(),
+                mod.getCommandExecutor(),
+                billing,
+                true,
+                "model_requested");
+        if (!applied.success()) {
+            return false;
+        }
+
+        applyRetrievalToPrompt(retriever, applied);
+        lastRagPromptSource = "model_deepsearch";
+        lastDeepCheckTriggerReason = "model_requested";
+        LOGGER.info("[B5] model_deepsearch_ok source={} bot={}", applied.promptSource(), getName());
+
+        Consumer<JsonObject> followUp = jsonResp -> handleLlmResponse(
+                jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
+                historyWithWrappedStatus, lastUserMsgForRag, true, true);
+        completer.processToJson(
+                mod.getPlayer2APIService(), historyWithWrappedStatus, followUp, onErrMsg, true, AiTaskClass.DECISION);
+        return true;
+    }
+
+    private void applyRetrievalToPrompt(ToolRetriever retriever, RagDeepCheckPipeline.ApplyResult applied) {
+        activeRetrievalHits = applied.activeResult().hits();
+        activePromptToolIds = toolIdsFromHits(applied.activeResult().hits());
+        pendingLearnSuggestion = applied.learnSuggestion();
+        String block = RagPromptBuilder.buildValidCommandsBlock(
+                retriever.getRegistry(),
+                applied.activeResult().hits(),
+                mod.getCommandExecutor(),
+                RagPromptBuilder.ALWAYS_INCLUDE_IDS);
+        mod.getAIPersistantData().updateSystemPromptWithBlock(block);
+        cachedRetrievalHits = applied.activeResult().hits();
+        cachedPromptIdHash = RagPromptBuilder.toolIdSetHash(
+                RagPromptBuilder.ALWAYS_INCLUDE_IDS, applied.activeResult().hits());
+    }
+
+    private void registerPendingLearnCandidate() {
+        UUID ownerUuid = mod.getOwner() != null ? mod.getOwner().getUUID() : null;
+        if (ownerUuid == null || pendingLearnSuggestion.isEmpty()) {
+            return;
+        }
+        String triggerReason = lastDeepCheckTriggerReason.isBlank()
+                ? lastRagPromptSource
+                : lastDeepCheckTriggerReason;
+        pendingLearnSuggestion.ifPresent(s -> AliasLearningService.registerPendingFromSuggestion(
+                ownerUuid,
+                getUUID(),
+                lastRagGoalText,
+                s,
+                triggerReason));
+        pendingLearnSuggestion = Optional.empty();
+    }
+
+    private boolean maybePostDecisionRetry(
+            String command,
+            Event.UserMessage lastUserMsgForRag,
+            String relayInitiator,
+            Consumer<Event.CharacterMessage> onCharacterEvent,
+            Consumer<String> onErrMsg,
+            LLMCompleter completer,
+            ConversationHistory historyWithWrappedStatus,
+            Event lastEvent) {
+        Player2ServerRuntimeConfig config = Player2ServerConfigHolder.get();
+        if (!config.isEnableDeepCheckRephrase() || postDecisionRetryAttempted) {
+            return false;
+        }
+        String cmdId = resolveCommandId(command);
+        if (cmdId == null || cmdId.isBlank() || activePromptToolIds.contains(cmdId)) {
+            return false;
+        }
+        if (deepCheckAttemptsThisTurn >= config.getDeepCheckMaxAttemptsPerTurnClamped()) {
+            return false;
+        }
+        Player2PayerResolution.ApiBillingContext billing = Player2PayerResolution.resolve(
+                mod, chainInitiatorUsername, mod.getPlayer2APIService().getClientId());
+        if (DeepCheckBudgetGate.preflight(billing) != DeepCheckBudgetGate.SkipReason.NONE) {
+            LOGGER.debug("[B5] post_decision_retry_skipped cmd={}", cmdId);
+            return false;
+        }
+        if (lastUserMsgForRag == null || lastRagGoalText.isBlank()) {
+            return false;
+        }
+
+        postDecisionRetryAttempted = true;
+        MinecraftServer server = mod.getPlayer().getServer();
+        UUID ownerUuid = mod.getOwner() != null ? mod.getOwner().getUUID() : null;
+        ToolRetriever retriever = RagIndex.getForOwner(server, ownerUuid);
+        if (retriever == null) {
+            return false;
+        }
+
+        RetrievalConfidenceThresholds thresholds = RetrievalConfidenceThresholds.fromConfig(config);
+        RetrievalResult firstPass = retriever.retrieveWithConfidence(
+                lastRagGoalText, config.getRagTopKClamped(), null, thresholds);
+        deepCheckAttemptsThisTurn++;
+
+        String enrichedGoal = lastRagGoalText + " (model chose command: " + cmdId + ")";
+        RagDeepCheckPipeline.ApplyResult applied = RagDeepCheckPipeline.apply(
+                retriever,
+                enrichedGoal,
+                config.getRagTopKClamped(),
+                null,
+                thresholds,
+                firstPass,
+                mod.getPlayer2APIService(),
+                mod.getCommandExecutor(),
+                billing,
+                true,
+                "post_decision_out_of_top_k");
+        if (!applied.success()) {
+            return false;
+        }
+
+        applyRetrievalToPrompt(retriever, applied);
+        lastRagPromptSource = applied.promptSource();
+        lastDeepCheckTriggerReason = "post_decision_out_of_top_k";
+
+        Consumer<JsonObject> retryHandler = jsonResp -> handleLlmResponse(
+                jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
+                historyWithWrappedStatus, lastUserMsgForRag, true, false);
+        completer.processToJson(
+                mod.getPlayer2APIService(), historyWithWrappedStatus, retryHandler, onErrMsg, true, AiTaskClass.DECISION);
+        return true;
     }
 
     private void applyRagPromptFromCache(Player2ServerRuntimeConfig config) {

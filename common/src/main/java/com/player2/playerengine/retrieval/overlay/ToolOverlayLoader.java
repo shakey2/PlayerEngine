@@ -62,7 +62,18 @@ public final class ToolOverlayLoader {
      */
     public static Optional<ToolOverlay> loadPerOwner(MinecraftServer server, UUID ownerUuid) {
         Path file = Player2NpcPersistencePaths.toolOverridesFile(server, ownerUuid);
-        return loadFromFile(file, "per-owner[" + ownerUuid + "]");
+        return loadFromFile(file, "per-owner-manual[" + ownerUuid + "]");
+    }
+
+    /** Loads B5 learned per-owner overlay (never written by operators). */
+    public static Optional<ToolOverlay> loadLearnedPerOwner(MinecraftServer server, UUID ownerUuid) {
+        Path file = Player2NpcPersistencePaths.toolLearnedOverridesFile(server, ownerUuid);
+        return loadFromFile(file, "per-owner-learned[" + ownerUuid + "]");
+    }
+
+    /** Loads a learned overlay from an explicit path (validation / reset). */
+    public static Optional<ToolOverlay> loadLearnedFromFile(Path file) {
+        return loadFromFile(file, "learned");
     }
 
     // -------------------------------------------------------------------------

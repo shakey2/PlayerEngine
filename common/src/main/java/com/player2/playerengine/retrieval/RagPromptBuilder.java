@@ -2,6 +2,7 @@ package com.player2.playerengine.retrieval;
 
 import com.player2.playerengine.commands.base.Command;
 import com.player2.playerengine.commands.base.CommandExecutor;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -71,6 +72,9 @@ public final class RagPromptBuilder {
         StringBuilder out = new StringBuilder();
         for (String toolId : limited) {
             appendToolBlock(out, toolId, registry, executor);
+        }
+        if (Player2ServerConfigHolder.get().isEnableDeepCheckRephrase()) {
+            RagDeepSearchCommands.appendPromptFooter(out);
         }
         return out.toString();
     }

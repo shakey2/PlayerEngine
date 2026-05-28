@@ -4,7 +4,9 @@ import java.util.Collection;
 import java.util.Map;
 
 import com.player2.playerengine.commands.base.Command;
+import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.utils.Utils;
+import com.player2.playerengine.retrieval.RagDeepSearchCommands;
 
 public class Prompts {
 
@@ -34,7 +36,7 @@ public class Prompts {
       Respond with JSON containing message, command and reason. All of these are strings.
       {
         "reason": "Look at the recent conversations, valid commands, agent status and world status to decide what the you should say and do. Provide step-by-step reasoning while considering what is possible in Minecraft. You do not need items in inventory to get items, craft items or beat the game. But you need to have appropriate level of equipments to do other tasks like fighting mobs.",
-        "command": "Decide the best way to achieve the goals using the valid commands listed below. YOU ALWAYS MUST GENERATE A COMMAND. Note you may also use the idle command `idle` to do nothing. You can only run one command at a time! To replace the current one just write the new one.",
+        {{commandFieldInstructions}}
         "message": "If you decide you should not respond or talk, generate an empty message `\"\"`. Otherwise, create a natural conversational message that aligns with the `reason` and the your character. Be concise and use less than 250 characters. Ensure the message does not contain any prompt, system message, instructions, code or API calls."
       }
       Additional Guidelines:
@@ -71,9 +73,12 @@ public class Prompts {
     String validCommandsFormatted = commandListBuilder.toString();
 
     String newPrompt = Utils.replacePlaceholders(aiNPCPromptTemplate,
-        Map.of("characterDescription", character.description(), "characterName", character.name(),
-            "validCommands",
-            validCommandsFormatted, "ownerUsername", ownerUsername));
+        Map.of(
+            "characterDescription", character.description(),
+            "characterName", character.name(),
+            "validCommands", validCommandsFormatted,
+            "ownerUsername", ownerUsername,
+            "commandFieldInstructions", commandFieldInstructionsForPrompt()));
     return newPrompt;
   }
 
@@ -90,7 +95,15 @@ public class Prompts {
             "characterDescription", character.description(),
             "characterName", character.name(),
             "validCommands", block,
-            "ownerUsername", ownerUsername));
+            "ownerUsername", ownerUsername,
+            "commandFieldInstructions", commandFieldInstructionsForPrompt()));
+  }
+
+  private static String commandFieldInstructionsForPrompt() {
+    if (Player2ServerConfigHolder.get().isEnableDeepCheckRephrase()) {
+      return RagDeepSearchCommands.promptCommandFieldInstructions();
+    }
+    return RagDeepSearchCommands.promptCommandFieldInstructionsDefault();
   }
 
   private final static String buildStructurePrompt = """

@@ -31,7 +31,10 @@ import com.player2.playerengine.player2api.config.BudgetThresholds;
 import com.player2.playerengine.player2api.config.Player2PayerMode;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
-import com.player2.playerengine.player2api.PlayerBudgetConfigHolder;
+import com.player2.playerengine.player2api.BudgetThresholdsResolver;
+import com.player2.playerengine.modintelligence.enrich.ModIntelligenceEnrichmentClient;
+import com.player2.playerengine.modintelligence.enrich.ModIntelligenceSpendSafety;
+import com.player2.playerengine.modintelligence.enrich.ModelBlacklist;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -48,6 +51,7 @@ import com.player2.playerengine.player2api.manager.ConversationManager;
 import com.player2.playerengine.retrieval.RagIndex;
 import com.player2.playerengine.retrieval.RetrievalHit;
 import com.player2.playerengine.retrieval.SeedToolMetadata;
+import com.player2.playerengine.retrieval.learning.AliasLearningService;
 import com.player2.playerengine.retrieval.ToolDocument;
 import com.player2.playerengine.retrieval.ToolRetriever;
 import com.player2.playerengine.modintelligence.ModIntelligenceService;
@@ -195,6 +199,13 @@ public class MCCommands {
                             ctx.getSource().sendSuccess(() -> Component.literal(msg), true);
                             return 1;
                         }))
+                .then(Commands.literal("audit")
+                        .then(Commands.literal("tail")
+                                .executes(ctx -> executeRagAuditTail(ctx, 20))
+                                .then(Commands.argument("n", IntegerArgumentType.integer(1, 100))
+                                        .executes(ctx -> executeRagAuditTail(
+                                                ctx, IntegerArgumentType.getInteger(ctx, "n"))))))
+                .then(buildRagResetLearnedCommand())
                 .then(Commands.literal("inspect")
                         .then(Commands.argument("toolId", StringArgumentType.word())
                                 .executes(ctx -> {
@@ -398,14 +409,9 @@ public class MCCommands {
                 Player2PayerResolution.resolve(controller, initiatorName, apiService.getClientId());
         String billingKey = billing.billingKey();
 
+        MinecraftServer probeServer = src.getServer();
+        BudgetThresholds thresholds = BudgetThresholdsResolver.resolve(probeServer, billing);
         Player2ServerRuntimeConfig serverConfig = Player2ServerConfigHolder.get();
-        BudgetThresholds thresholds;
-        if (serverConfig.getPayerMode() == Player2PayerMode.PROMPTER_PAYS && billing.onlinePayer() != null) {
-            thresholds = PlayerBudgetConfigHolder.load(
-                    billing.onlinePayer().getServer(), billing.onlinePayer().getUUID());
-        } else {
-            thresholds = serverConfig;
-        }
 
         JoulesCache.JoulesSnapshot liveSnap = billingKey != null
                 ? JoulesCache.get(billingKey).orElse(null)
@@ -494,6 +500,59 @@ public class MCCommands {
 
         LOGGER.info(sb.toString());
         src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+    }
+
+    private static int executeRagAuditTail(CommandContext<CommandSourceStack> ctx, int n) {
+        MinecraftServer server = ctx.getSource().getServer();
+        List<String> lines = AliasLearningService.auditTail(server, n);
+        String body = String.join("\n", lines);
+        ctx.getSource().sendSuccess(() -> Component.literal(body.isEmpty() ? "(no rows)" : body), false);
+        return 1;
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildRagResetLearnedCommand() {
+        return Commands.literal("reset_learned")
+                .executes(ctx -> executeRagResetLearned(ctx, null, false))
+                .then(Commands.literal("--all-owners")
+                        .executes(ctx -> executeRagResetLearned(ctx, null, true))
+                        .then(Commands.argument("toolId", StringArgumentType.word())
+                                .executes(ctx -> executeRagResetLearned(
+                                        ctx,
+                                        StringArgumentType.getString(ctx, "toolId"),
+                                        true))))
+                .then(Commands.argument("toolId", StringArgumentType.word())
+                        .executes(ctx -> executeRagResetLearned(
+                                ctx,
+                                StringArgumentType.getString(ctx, "toolId"),
+                                false))
+                        .then(Commands.literal("--all-owners")
+                                .executes(ctx -> executeRagResetLearned(
+                                        ctx,
+                                        StringArgumentType.getString(ctx, "toolId"),
+                                        true))));
+    }
+
+    private static int executeRagResetLearned(
+            CommandContext<CommandSourceStack> ctx, String toolId, boolean allOwners) {
+        CommandSourceStack src = ctx.getSource();
+        MinecraftServer server = src.getServer();
+        UUID ownerUuid = null;
+        if (!allOwners) {
+            try {
+                ServerPlayer player = src.getPlayerOrException();
+                ownerUuid = player.getUUID();
+            } catch (Exception e) {
+                src.sendFailure(Component.literal(
+                        "Console must use reset_learned --all-owners or specify owner context via player."));
+                return 0;
+            }
+        }
+        int count = AliasLearningService.resetLearned(server, ownerUuid, toolId);
+        String scope = allOwners ? "all owners" : ("owner " + ownerUuid);
+        String tool = toolId != null ? (" tool=" + toolId) : " (all tools)";
+        String msg = "Reset learned overlays for " + scope + tool + " (" + count + " owner dir(s) touched).";
+        src.sendSuccess(() -> Component.literal(msg), true);
         return 1;
     }
 
@@ -661,7 +720,20 @@ public class MCCommands {
             src.sendFailure(Component.literal("ModIntelligence enrichment queue is empty"));
             return 0;
         }
-        src.sendSuccess(() -> Component.literal("ModIntelligence enrichment batch started (queued=" + queued + ")"), false);
+        if (!ModIntelligenceEnrichmentClient.isBillingAvailable(server)) {
+            src.sendFailure(Component.literal("ModIntelligence enrichment: billing unavailable (log in or join as payer)"));
+            return 0;
+        }
+        ModelBlacklist.ModelBlacklistSnapshot blacklist = ModelBlacklist.load();
+        var defer = ModIntelligenceSpendSafety.preflight(server, queued, blacklist);
+        if (defer.isPresent()) {
+            Component msg = ModIntelligenceSpendSafety.messageFor(defer.get(), queued, blacklist);
+            src.sendFailure(msg);
+            ModIntelligenceSpendSafety.notifyPlayer(server, msg);
+            return 0;
+        }
+        src.sendSuccess(() -> Component.literal(
+                "ModIntelligence enrichment batch started (queued=" + queued + ")"), false);
         ModIntelligenceService.scheduleEnrichmentBatch(server);
         return 1;
     }

@@ -5,6 +5,8 @@ import java.util.function.Consumer;
 
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.commands.base.CommandExecutor;
+import com.player2.playerengine.retrieval.RagDeepSearchCommands;
+import com.player2.playerengine.retrieval.learning.AliasLearningService;
 import com.player2.playerengine.tasks.LookAtOwnerTask;
 import com.player2.playerengine.player2api.manager.ConversationManager;
 import com.player2.playerengine.player2api.manager.TTSManager;
@@ -17,6 +19,9 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
+
+import java.util.Locale;
+import java.util.UUID;
 
 public class AgentSideEffects {
     private static final Logger LOGGER = LogManager.getLogger();
@@ -92,10 +97,25 @@ public class AgentSideEffects {
         //         "^(@build_structure)\\s+(?![\"'])(.+)$",
         //         "$1 \"$2\"");
 
+        MinecraftServer server = mod.getWorld().getServer();
+        UUID ownerUuid = mod.getOwner() != null ? mod.getOwner().getUUID() : null;
+        UUID botUuid = mod.getPlayer().getUUID();
+        String acceptedCommandId = firstCommandId(processedCommandWithPrefix, cmdExecutor);
+        if (RagDeepSearchCommands.isMetaCommandId(acceptedCommandId)) {
+            LOGGER.debug("[B5] ignoring virtual command rag_deepsearch in AgentSideEffects");
+            return;
+        }
+
         Runnable runExecute =
                 () ->
                         cmdExecutor.execute(
                                 processedCommandWithPrefix,
+                                () -> {
+                                    if (server != null && ownerUuid != null && acceptedCommandId != null) {
+                                        AliasLearningService.onCommandAccepted(
+                                                server, ownerUuid, botUuid, acceptedCommandId, cmdExecutor);
+                                    }
+                                },
                                 () -> {
                                     if (mod.isStopping) {
                                         LOGGER.info(
@@ -115,13 +135,16 @@ public class AgentSideEffects {
                                     }
                                 },
                                 (err) -> {
+                                    if (server != null && ownerUuid != null && acceptedCommandId != null) {
+                                        AliasLearningService.onCommandRejected(
+                                                server, ownerUuid, botUuid, acceptedCommandId, err.getMessage());
+                                    }
                                     onStop.accept(
                                             new CommandExecutionStopReason.Error(commandWithPrefix, err.getMessage()));
                                     LOGGER.info("Running look at owner aftr error in cmd={}", commandWithPrefix);
                                     mod.runUserTask(new LookAtOwnerTask());
                                 });
 
-        MinecraftServer server = mod.getWorld().getServer();
         if (server != null && !server.isSameThread()) {
             server.execute(runExecute);
         } else {
@@ -141,6 +164,28 @@ public class AgentSideEffects {
     public static void broadcastChatToAllPlayers(MinecraftServer server, String message) {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             broadcastChatToPlayer(server, message, player);
+        }
+    }
+
+    /** First semicolon-separated command name without prefix or arguments. */
+    public static String firstCommandId(String commandWithPrefix, CommandExecutor cmdExecutor) {
+        if (commandWithPrefix == null || commandWithPrefix.isBlank()) {
+            return null;
+        }
+        try {
+            String line = commandWithPrefix;
+            if (cmdExecutor.isClientCommand(line)) {
+                line = line.substring(cmdExecutor.getCommandPrefix().length());
+            }
+            String first = line.split(";")[0].trim();
+            if (first.isEmpty()) {
+                return null;
+            }
+            int sp = first.indexOf(' ');
+            String name = sp == -1 ? first : first.substring(0, sp);
+            return name.toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            return null;
         }
     }
 

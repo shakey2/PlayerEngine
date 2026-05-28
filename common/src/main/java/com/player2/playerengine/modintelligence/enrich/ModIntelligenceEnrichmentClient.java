@@ -10,10 +10,9 @@ import com.player2.playerengine.player2api.ModelTierRouter;
 import com.player2.playerengine.player2api.Player2PayerResolution;
 import com.player2.playerengine.player2api.RoutingDecision;
 import com.player2.playerengine.player2api.config.BudgetThresholds;
-import com.player2.playerengine.player2api.config.Player2PayerMode;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
-import com.player2.playerengine.player2api.PlayerBudgetConfigHolder;
+import com.player2.playerengine.player2api.BudgetThresholdsResolver;
 import com.player2.playerengine.player2api.utils.Player2HTTPUtils;
 import com.player2.playerengine.player2api.ConversationHistory;
 import net.minecraft.server.MinecraftServer;
@@ -37,7 +36,7 @@ public final class ModIntelligenceEnrichmentClient {
         if (billing == null || billing.billingKey() == null) {
             return null;
         }
-        return thresholdsFor(billing);
+        return BudgetThresholdsResolver.resolve(server, billing);
     }
 
     public static boolean noBudgetLimitsConfigured(BudgetThresholds thresholds) {
@@ -52,7 +51,7 @@ public final class ModIntelligenceEnrichmentClient {
         if (billing.billingKey() == null) {
             return true;
         }
-        BudgetThresholds thresholds = thresholdsFor(billing);
+        BudgetThresholds thresholds = BudgetThresholdsResolver.resolve(server, billing);
         BudgetTracker.BudgetCheckResult call = BudgetTracker.peek(billing.billingKey(), thresholds);
         JoulesCache.JoulesSnapshot snap = JoulesCache.get(billing.billingKey()).orElse(null);
         BudgetTracker.BudgetCheckResult joules = JoulesCache.checkJoulesThreshold(snap, thresholds);
@@ -67,7 +66,7 @@ public final class ModIntelligenceEnrichmentClient {
 
         Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
         String clientId = cfg.getHeartbeatClientId();
-        BudgetThresholds thresholds = thresholdsFor(billing);
+        BudgetThresholds thresholds = BudgetThresholdsResolver.resolve(server, billing);
 
         BudgetTracker.BudgetCheckResult callResult =
                 BudgetTracker.checkAndRecord(billing.billingKey(), thresholds);
@@ -104,7 +103,7 @@ public final class ModIntelligenceEnrichmentClient {
             response = dispatchCompletion(billing, clientId, requestBody);
         }
 
-        validateCompletionModel(response);
+        validateCompletionModel(server, response);
 
         if (response.containsKey("choices")) {
             var choices = response.get("choices").getAsJsonArray();
@@ -118,7 +117,10 @@ public final class ModIntelligenceEnrichmentClient {
         throw new IllegalStateException("invalid_response keys=" + response.keySet());
     }
 
-    private static void validateCompletionModel(Map<String, JsonElement> response) {
+    private static void validateCompletionModel(MinecraftServer server, Map<String, JsonElement> response) {
+        if (ModIntelligenceSpendSafety.isModelBlacklistBypassed(server)) {
+            return;
+        }
         JsonElement modelElement = response.get("model");
         if (modelElement != null && modelElement.isJsonPrimitive()) {
             String modelName = modelElement.getAsString();
@@ -136,15 +138,6 @@ public final class ModIntelligenceEnrichmentClient {
     private static Player2PayerResolution.ApiBillingContext resolveBilling(MinecraftServer server) {
         Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
         return Player2PayerResolution.resolveForServer(server, cfg.getHeartbeatClientId());
-    }
-
-    private static BudgetThresholds thresholdsFor(Player2PayerResolution.ApiBillingContext billing) {
-        Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
-        ServerPlayer payer = billing.onlinePayer();
-        if (cfg.getPayerMode() == Player2PayerMode.PROMPTER_PAYS && payer != null) {
-            return PlayerBudgetConfigHolder.load(payer.getServer(), payer.getUUID());
-        }
-        return cfg;
     }
 
     private static Map<String, JsonElement> dispatchCompletion(

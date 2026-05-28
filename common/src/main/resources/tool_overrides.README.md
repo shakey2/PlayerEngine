@@ -106,16 +106,26 @@ tool, with `[+]` marking overlay-added entries.
 
 ---
 
-## Deep-check and alias learning (Phase B5 — coming later)
+## Deep-check and alias learning (Phase B5 / B5.1)
 
-In Phase B5, the NPC will be able to detect when it cannot find a matching command,
-rephrase the query with the help of an LLM, and — **only after a successful command
-execution** — write the new keyword back into the per-owner overlay automatically.
+When retrieval is weak or the DECISION model cannot find a fitting command, the server may
+run an extra **rephrase** HTTP call (Default model via `RERANKING`) and merge retry queries
+into the prompt. Learned keywords are written to the per-owner overlay **only after a
+successful world command execution**.
 
-Kill switches (configurable in `playerengine/playerengine_settings.json`):
-- `enableDeepCheckRephrase` (default `false`) — allow the LLM to try rephrased queries.
-- `enableAliasLearning` (default `false`) — allow writing learned keywords to the overlay.
-- `enableDeepCheckMessage` (default `false`) — show a "let me check deeper" chat message.
+Paths (all gated by `enableDeepCheckRephrase`):
+- **Heuristic** — weak retrieval confidence before the first DECISION.
+- **Model-triggered (`rag_deepsearch`)** — virtual command in the RAG prompt footer; not
+  registered in `CommandExecutor` and never executed in-world. The patron model may emit
+  `rag_deepsearch` when no listed command fits; the server refreshes the list and issues one
+  follow-up DECISION (loop blocked if it repeats).
+- **Post-decision** — chosen command id was not in the injected top-k set.
 
-When both toggles are `false`, the system behaves exactly as in B1: one retrieval pass,
-no extra API calls, no overlay writes.
+Kill switches (`playerengine/playerengine_settings.json`):
+- `enableDeepCheckRephrase` (default `false`) — heuristic, model `rag_deepsearch`, and post-decision retries.
+- `enableAliasLearning` (default `false`) — write learned keywords to the overlay.
+- `enableDeepCheckMessage` (default `false`) — brief chat line before model-requested deep check.
+- `deepCheckMaxAttemptsPerTurn` (0–3) — shared cap across all deep-check paths per user turn.
+
+When `enableDeepCheckRephrase` is `false`, no `rag_deepsearch` footer appears and the system
+behaves as B3: one retrieval pass, no extra rephrase API calls.

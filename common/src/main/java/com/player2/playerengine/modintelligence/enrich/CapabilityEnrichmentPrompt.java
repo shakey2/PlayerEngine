@@ -65,11 +65,27 @@ public final class CapabilityEnrichmentPrompt {
     public static String systemPrompt() {
         return """
                 You classify Minecraft registry entries for a modpack assistant.
-                Respond with a single JSON object only (no markdown). Required top-level fields:
-                schemaVersion (must be 1), shortDescription, aliases, likelyUses, capabilityHints, uncertaintyNotes.
-                capabilityHints is an array of objects with id, confidence (0-1), and optional reason;
-                each id must be from allowedCapabilityIds in the user message.
+                Respond with a single JSON object only (no markdown fences). Required top-level fields:
+                schemaVersion (must be %d), shortDescription, aliases, likelyUses, capabilityHints, uncertaintyNotes.
+                Strict length limits (responses that exceed any limit are rejected):
+                - shortDescription: 1-%d characters, single line, plain text (no markdown).
+                - aliases: 0-%d strings, each 1-%d characters (short search phrases, lowercase ok).
+                - likelyUses: 0-%d strings, each 1-%d characters (brief phrases, not full sentences).
+                - uncertaintyNotes: 0-%d strings, each 1-%d characters.
+                - capabilityHints: 0-%d objects with id, confidence (0.0-1.0), optional reason;
+                  each id must be from allowedCapabilityIds in the user message.
                 Do not invent safety-sensitive capabilities without evidence in the input.
-                """;
+                """
+                .formatted(
+                        CapabilityEnrichment.SCHEMA_VERSION,
+                        CapabilityEnrichment.MAX_SHORT_DESCRIPTION_LEN,
+                        CapabilityEnrichment.MAX_ALIASES,
+                        CapabilityEnrichment.MAX_ALIAS_LEN,
+                        CapabilityEnrichment.MAX_LIKELY_USES,
+                        CapabilityEnrichment.MAX_LIKELY_USE_LEN,
+                        CapabilityEnrichment.MAX_UNCERTAINTY_NOTES,
+                        CapabilityEnrichment.MAX_UNCERTAINTY_NOTE_LEN,
+                        CapabilityEnrichment.MAX_CAPABILITY_HINTS)
+                .stripIndent();
     }
 }

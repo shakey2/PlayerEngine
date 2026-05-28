@@ -12,7 +12,6 @@ import com.player2.playerengine.modintelligence.ingest.ModIntelligenceManifest;
 import com.player2.playerengine.modintelligence.ingest.ModIntelligencePaths;
 import com.player2.playerengine.modintelligence.query.CapabilityIndex;
 import com.player2.playerengine.player2api.ConversationHistory;
-import com.player2.playerengine.player2api.config.BudgetThresholds;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
 import net.minecraft.server.MinecraftServer;
@@ -24,6 +23,7 @@ import java.io.FileWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 public final class CapabilityEnrichmentService {
     private static final Logger LOGGER = PlayerEngine.LOGGER;
@@ -51,30 +51,20 @@ public final class CapabilityEnrichmentService {
         ModelBlacklist.ModelBlacklistSnapshot blacklist = ModelBlacklist.load();
         ModelBlacklist.setBatchSnapshot(blacklist);
         try {
-            if (!blacklist.valid()) {
-                LOGGER.warn("ModIntelligence enrichment: stopping batch (model_blacklist_invalid) — {}",
-                        blacklist.error());
-                List<CapabilityMap> queue = CapabilityEnrichmentQueue.loadQueued();
-                ModIntelligenceService.recordLastEnrichmentBatch(0, 0, queue.size());
-                return;
-            }
-
             List<CapabilityMap> queue = CapabilityEnrichmentQueue.loadQueued();
             if (queue.isEmpty()) {
                 ModIntelligenceService.recordLastEnrichmentBatch(0, 0, 0);
                 return;
             }
 
-            if (queue.size() > 20) {
-                BudgetThresholds thresholds = ModIntelligenceEnrichmentClient.getBudgetThresholds(server);
-                if (thresholds == null
-                        || ModIntelligenceEnrichmentClient.noBudgetLimitsConfigured(thresholds)) {
-                    LOGGER.warn(
-                            "ModIntelligence enrichment: deferred - queue size is {} (> 20) and no budget limit has been set on spending",
-                            queue.size());
-                    ModIntelligenceService.recordLastEnrichmentBatch(0, 0, queue.size());
-                    return;
-                }
+            Optional<ModIntelligenceSpendSafety.DeferReason> defer =
+                    ModIntelligenceSpendSafety.preflight(server, queue.size(), blacklist);
+            if (defer.isPresent()) {
+                ModIntelligenceSpendSafety.notifyPlayer(
+                        server, ModIntelligenceSpendSafety.messageFor(defer.get(), queue.size(), blacklist));
+                remainingCount = queue.size();
+                ModIntelligenceService.recordLastEnrichmentBatch(0, 0, remainingCount);
+                return;
             }
 
             int maxCalls = cfg.getModIntelligenceMaxEnrichmentCallsPerLaunch();
@@ -113,7 +103,7 @@ public final class CapabilityEnrichmentService {
                     if ("model_blacklisted".equals(msg)
                             || "model_missing".equals(msg)
                             || "model_blacklist_invalid".equals(msg)) {
-                        LOGGER.warn("ModIntelligence enrichment: stopping batch ({})", msg);
+                        ModIntelligenceSpendSafety.notifyBatchAbort(server, msg, null);
                         logFailure(map, "EnrichmentAbort", msg);
                         break;
                     }

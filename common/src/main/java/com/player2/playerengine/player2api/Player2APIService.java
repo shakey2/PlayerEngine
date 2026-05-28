@@ -168,12 +168,8 @@ public class Player2APIService {
       // --- Phase A4: budget guard ---
       // Per-player thresholds (call-count + Joules limits) come from the player's own config in
       // PROMPTER_PAYS mode. Profile routing decisions always come from the server config.
-      BudgetThresholds thresholds;
-      if (config.getPayerMode() == Player2PayerMode.PROMPTER_PAYS && payerToNotify != null) {
-         thresholds = PlayerBudgetConfigHolder.load(payerToNotify.getServer(), payerToNotify.getUUID());
-      } else {
-         thresholds = config;
-      }
+      MinecraftServer budgetServer = payerToNotify != null ? payerToNotify.getServer() : null;
+      BudgetThresholds thresholds = BudgetThresholdsResolver.resolve(budgetServer, billing);
 
       BudgetTracker.BudgetCheckResult callResult = BudgetTracker.checkAndRecord(billingKey, thresholds);
       JoulesCache.maybeRefresh(this, billingKey, thresholds);
