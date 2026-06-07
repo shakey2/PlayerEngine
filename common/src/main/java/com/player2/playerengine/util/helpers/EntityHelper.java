@@ -3,6 +3,8 @@ package com.player2.playerengine.util.helpers;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.multiversion.DamageSourceWrapper;
 import com.player2.playerengine.multiversion.MethodWrapper;
+import java.util.Locale;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.damagesource.CombatRules;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.effect.MobEffects;
@@ -23,11 +25,49 @@ public class EntityHelper {
    public static final double ENTITY_GRAVITY = 0.08;
 
    public static boolean isAngryAtPlayer(PlayerEngineController mod, Entity mob) {
+      if (isZombifiedPiglinFamily(mob)) {
+         return mob instanceof Mob entity && entity.isAggressive() && entity.getTarget() == mod.getPlayer();
+      }
+
       boolean hostile = isProbablyHostileToPlayer(mod, mob);
       return !(mob instanceof Mob entity) ? hostile : hostile && entity.getTarget() == mod.getPlayer();
    }
 
+   /**
+    * Vanilla and modded zombified piglin types. Attacking them enrages nearby piglins and endangers nearby players.
+    */
+   public static boolean isZombifiedPiglinFamily(Entity entity) {
+      if (entity == null) {
+         return false;
+      }
+
+      if (entity instanceof ZombifiedPiglin) {
+         return true;
+      }
+
+      for (Class<?> type = entity.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+         if (ZombifiedPiglin.class.isAssignableFrom(type)) {
+            return true;
+         }
+      }
+
+      var key = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
+      if (key != null) {
+         String path = key.getPath().toLowerCase(Locale.ROOT);
+         return path.contains("zombified_piglin")
+            || path.contains("zombie_piglin")
+            || path.contains("zombifiedpiglin")
+            || path.contains("zombiepiglin");
+      }
+
+      return false;
+   }
+
    public static boolean isProbablyHostileToPlayer(PlayerEngineController mod, Entity entity) {
+      if (isZombifiedPiglinFamily(entity)) {
+         return false;
+      }
+
       if (entity instanceof Mob mob) {
          if (mob instanceof Slime slime) {
             return slime.getAttributeValue(Attributes.ATTACK_DAMAGE) > 0.0;
@@ -36,7 +76,7 @@ public class EntityHelper {
          } else if (mob instanceof EnderMan enderman) {
             return enderman.isCreepy();
          } else {
-            return mob instanceof ZombifiedPiglin zombifiedPiglin ? zombifiedPiglin.isAggressive() : mob.isAggressive() || mob instanceof Monster;
+            return mob.isAggressive() || mob instanceof Monster;
          }
       } else {
          return false;

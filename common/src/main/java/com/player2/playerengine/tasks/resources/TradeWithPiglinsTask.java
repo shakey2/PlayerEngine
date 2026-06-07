@@ -64,7 +64,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
          return this.goldTask;
       } else if (!mod.getEntityTracker().entityFound(Piglin.class)) {
          this.setDebugState("Wandering");
-         return new TimeoutWanderTask(false);
+         return TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
       } else {
          this.setDebugState("Trading with Piglin");
          return this.tradeTask;

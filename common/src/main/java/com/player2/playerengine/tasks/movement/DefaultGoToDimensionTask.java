@@ -13,10 +13,14 @@ import net.minecraft.world.level.block.Blocks;
 
 public class DefaultGoToDimensionTask extends Task {
    private final Dimension target;
-   private final Task cachedNetherBucketConstructionTask = new ConstructNetherPortalBucketTask();
+   private Task cachedNetherBucketConstructionTask;
 
    public DefaultGoToDimensionTask(Dimension target) {
       this.target = target;
+   }
+
+   public Dimension getTarget() {
+      return this.target;
    }
 
    @Override
@@ -108,7 +112,7 @@ public class DefaultGoToDimensionTask extends Task {
          return new EnterNetherPortalTask(Dimension.NETHER);
       } else {
          return (Task)(switch (this.controller.getModSettings().getOverworldToNetherBehaviour()) {
-            case BUILD_PORTAL_VANILLA -> this.cachedNetherBucketConstructionTask;
+            case BUILD_PORTAL_VANILLA -> this.getNetherBucketConstructionTask();
             case GO_TO_HOME_BASE -> new GetToBlockTask(this.controller.getModSettings().getHomeBasePosition());
          });
       }
@@ -117,6 +121,14 @@ public class DefaultGoToDimensionTask extends Task {
    private Task goToEndTask() {
       this.setDebugState("TODO: Get to End, Same as BeatMinecraft");
       return null;
+   }
+
+   private Task getNetherBucketConstructionTask() {
+      if (this.cachedNetherBucketConstructionTask == null) {
+         this.cachedNetherBucketConstructionTask = new ConstructNetherPortalBucketTask();
+      }
+
+      return this.cachedNetherBucketConstructionTask;
    }
 
    private boolean netherPortalIsClose(PlayerEngineController mod) {

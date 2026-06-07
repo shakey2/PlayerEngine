@@ -1,4 +1,5 @@
 package com.player2.playerengine;
+
 import com.player2.playerengine.commands.*;
 import com.player2.playerengine.commands.*;
 import com.player2.playerengine.commands.random.*;
@@ -30,10 +31,10 @@ public class PlayerEngineCommands {
                   new AttackPlayerOrMobCommand(),
                   new SetAIBridgeEnabledCommand(),
                   new FarmCommand(),
-                  new SimpleExploreCommand(),
                   new EatFoodCommand(),
-                  new SetHostileAttackCommand(),
                   new PickupDropsCommand(),
+                  new AgenticCommand(),
+                  new SetHostileAttackCommand(),
                   new FishCommand(),
                   new ReadNearbySignsCommand(),
                   new PlaceSignCommand());

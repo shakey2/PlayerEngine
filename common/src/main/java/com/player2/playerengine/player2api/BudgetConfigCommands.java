@@ -3,7 +3,6 @@ package com.player2.playerengine.player2api;
 import com.player2.playerengine.executor.BudgetFallbackBehavior;
 import com.player2.playerengine.executor.BudgetTracker;
 import com.player2.playerengine.player2api.config.BudgetThresholds;
-import com.player2.playerengine.player2api.config.Player2PayerMode;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
 import com.player2.playerengine.player2api.config.PlayerBudgetConfig;
@@ -229,9 +228,7 @@ public final class BudgetConfigCommands {
 
     private static Target resolveTarget(CommandSourceStack source) {
         MinecraftServer server = source.getServer();
-        boolean serverFile = server == null
-                || BudgetThresholdsResolver.useServerConfigForBudget(server)
-                || Player2ServerConfigHolder.get().getPayerMode() != Player2PayerMode.PROMPTER_PAYS;
+        boolean serverFile = BudgetThresholdsResolver.usesServerBudgetStore(server);
         UUID uuid = null;
         try {
             ServerPlayer player = source.getPlayerOrException();

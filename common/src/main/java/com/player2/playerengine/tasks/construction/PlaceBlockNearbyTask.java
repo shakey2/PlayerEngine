@@ -106,7 +106,7 @@ public class PlaceBlockNearbyTask extends Task {
             }
 
             this.setDebugState("Wandering until we randomly place or find a good place spot.");
-            return new TimeoutWanderTask();
+            return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // RECOVERY
          }
       }
    }

@@ -35,7 +35,7 @@ public class AgentSideEffects {
         record Cancelled(String commandName) implements CommandExecutionStopReason {
         }
 
-        record Finished(String commandName) implements CommandExecutionStopReason {
+        record Finished(String commandName, String note) implements CommandExecutionStopReason {
         }
 
         record Error(String commandName, String errMsg) implements CommandExecutionStopReason {
@@ -87,6 +87,11 @@ public class AgentSideEffects {
             mod.isStopping = false;
         }
         if (commandWithPrefix.contains("idle")) {
+            if (mod.hasActiveNonIdleUserTask()) {
+                LOGGER.info("Ignoring idle while a non-idle user task is active (step={})",
+                        mod.getActiveTrackedStep().map(e -> e.getStepKind()).orElse("unknown"));
+                return;
+            }
             mod.runUserTask(new LookAtOwnerTask());
             return;
         }
@@ -106,6 +111,29 @@ public class AgentSideEffects {
             return;
         }
 
+        // Shared finish handler for both the clean path (note == null) and the success-with-note path
+        // (note != null). Behavior is identical apart from the note carried on the Finished reason, so
+        // the clean/cancelled paths are byte-for-byte unchanged.
+        Consumer<String> onFinishWithNote =
+                (note) -> {
+                    if (mod.isStopping) {
+                        LOGGER.info(
+                                "[AgentSideEffects/AgentSideEffects]: (%s) was cancelled. Not adding finish event to queue.",
+                                processedCommandWithPrefix);
+                        onStop.accept(new CommandExecutionStopReason.Cancelled(commandWithPrefix));
+                        LOGGER.info("after cancel, not running look at owner");
+                    } else {
+                        if (!commandWithPrefix.equals("@bodylang greeting")) {
+                            LOGGER.info("Running on stop after finish cmd={}", commandWithPrefix);
+                            onStop.accept(new CommandExecutionStopReason.Finished(commandWithPrefix, note));
+                        } else {
+                            LOGGER.info("Ignore onStop for bodylang greeting");
+                        }
+                        LOGGER.info("Running look at owner task after finish cmd={}", commandWithPrefix);
+                        mod.runUserTask(new LookAtOwnerTask());
+                    }
+                };
+
         Runnable runExecute =
                 () ->
                         cmdExecutor.execute(
@@ -116,24 +144,8 @@ public class AgentSideEffects {
                                                 server, ownerUuid, botUuid, acceptedCommandId, cmdExecutor);
                                     }
                                 },
-                                () -> {
-                                    if (mod.isStopping) {
-                                        LOGGER.info(
-                                                "[AgentSideEffects/AgentSideEffects]: (%s) was cancelled. Not adding finish event to queue.",
-                                                processedCommandWithPrefix);
-                                        onStop.accept(new CommandExecutionStopReason.Cancelled(commandWithPrefix));
-                                        LOGGER.info("after cancel, not running look at owner");
-                                    } else {
-                                        if (!commandWithPrefix.equals("@bodylang greeting")) {
-                                            LOGGER.info("Running on stop after finish cmd={}", commandWithPrefix);
-                                            onStop.accept(new CommandExecutionStopReason.Finished(commandWithPrefix));
-                                        } else {
-                                            LOGGER.info("Ignore onStop for bodylang greeting");
-                                        }
-                                        LOGGER.info("Running look at owner task after finish cmd={}", commandWithPrefix);
-                                        mod.runUserTask(new LookAtOwnerTask());
-                                    }
-                                },
+                                () -> onFinishWithNote.accept(null),
+                                onFinishWithNote,
                                 (err) -> {
                                     if (server != null && ownerUuid != null && acceptedCommandId != null) {
                                         AliasLearningService.onCommandRejected(

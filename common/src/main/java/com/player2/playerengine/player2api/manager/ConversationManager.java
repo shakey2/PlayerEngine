@@ -28,6 +28,7 @@ import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.player2api.BotBlacklistPolicy;
 import com.player2.playerengine.player2api.CallByNameMentionRouter;
 import com.player2.playerengine.player2api.UserBlacklistPolicy;
+import com.player2.playerengine.player2api.utils.SttLogging;
 import com.player2.playerengine.player2api.Event.UserMessage;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.status.StatusUtils;
@@ -176,39 +177,89 @@ public class ConversationManager {
         boolean callByName = Player2ServerConfigHolder.get().isCallByNameChat();
         List<AgentConversationData> nearby = filterQueueData(d -> isCloseToPlayer(d, msg.userName()))
                 .collect(Collectors.toList());
+        if (nearby.isEmpty()) {
+            logMessageNotDelivered(msg, callByName, "no_nearby_companion", nearby, null);
+            return;
+        }
         MinecraftServer server = nearby.stream()
                 .map(d -> d.getMod().getPlayer().getServer())
                 .filter(Objects::nonNull)
                 .findFirst()
                 .orElse(null);
         if (!callByName) {
+            int queued = 0;
             for (AgentConversationData data : nearby) {
                 if (server != null && BotBlacklistPolicy.isBlocked(server, msg.userName(), data)) {
+                    logMessageBlocked(msg, data.getName(), "bot_blacklist");
                     continue;
                 }
                 if (server != null && UserBlacklistPolicy.isBlocked(server, msg.userName(), data)) {
+                    logMessageBlocked(msg, data.getName(), "user_blacklist");
                     continue;
                 }
                 data.onEvent(msg);
+                queued++;
+            }
+            if (queued == 0) {
+                logMessageNotDelivered(msg, false, "all_nearby_blocked", nearby, null);
             }
             return;
         }
 
         CallByNameMentionRouter.ResolvedTargets resolved = CallByNameMentionRouter.resolveTargets(msg, msg.userName(),
                 nearby);
-        if (resolved == null || resolved.targets() == null || resolved.targets().isEmpty() || resolved.cleanedMessage() == null) {
+        if (resolved == null || resolved.targets() == null || resolved.targets().isEmpty()) {
+            logMessageNotDelivered(msg, true, "call_by_name_no_mention", nearby, resolved);
+            return;
+        }
+        if (resolved.cleanedMessage() == null) {
+            logMessageNotDelivered(msg, true, "call_by_name_cleaned_message_null", nearby, resolved);
             return;
         }
         HashSet<UUID> userBlacklistNotifiedOwners = new HashSet<>();
+        int queued = 0;
         for (AgentConversationData data : resolved.targets()) {
             if (server != null && BotBlacklistPolicy.isBlocked(server, msg.userName(), data)) {
+                logMessageBlocked(msg, data.getName(), "bot_blacklist");
                 continue;
             }
             if (server != null && UserBlacklistPolicy.isBlocked(server, msg.userName(), data)) {
                 maybeNotifyUserBlacklistCallByName(server, msg.userName(), userBlacklistNotifiedOwners, data);
+                logMessageBlocked(msg, data.getName(), "user_blacklist");
                 continue;
             }
             data.onEvent(resolved.cleanedMessage());
+            queued++;
+        }
+        if (queued == 0) {
+            logMessageNotDelivered(msg, true, "call_by_name_all_targets_blocked", nearby, resolved);
+        }
+    }
+
+    private static void logMessageNotDelivered(UserMessage msg, boolean callByName, String reason,
+            List<AgentConversationData> nearby, CallByNameMentionRouter.ResolvedTargets resolved) {
+        String nearbyNames = nearby.stream().map(AgentConversationData::getName).collect(Collectors.joining(", "));
+        String targetNames = resolved == null || resolved.targets() == null ? ""
+                : resolved.targets().stream().map(AgentConversationData::getName).collect(Collectors.joining(", "));
+        if (msg.fromVoice()) {
+            LOGGER.warn(
+                    "STT/voice: message not delivered to companion (reason={}, callByName={}, user={}, nearby=[{}], targets=[{}], preview=\"{}\"). "
+                            + "If callByName is enabled, include the companion name (e.g. \"Lina, ...\") in speech.",
+                    reason, callByName, msg.userName(), nearbyNames, targetNames, SttLogging.messagePreview(msg.message()));
+        } else {
+            LOGGER.warn(
+                    "Chat: message not delivered to companion (reason={}, callByName={}, user={}, nearby=[{}], targets=[{}], preview=\"{}\")",
+                    reason, callByName, msg.userName(), nearbyNames, targetNames, SttLogging.messagePreview(msg.message()));
+        }
+    }
+
+    private static void logMessageBlocked(UserMessage msg, String companionName, String blockReason) {
+        if (msg.fromVoice()) {
+            LOGGER.warn("STT/voice: message blocked for companion={} (reason={}, user={}, preview=\"{}\")",
+                    companionName, blockReason, msg.userName(), SttLogging.messagePreview(msg.message()));
+        } else {
+            LOGGER.debug("Chat: message blocked for companion={} (reason={}, user={})", companionName, blockReason,
+                    msg.userName());
         }
     }
 

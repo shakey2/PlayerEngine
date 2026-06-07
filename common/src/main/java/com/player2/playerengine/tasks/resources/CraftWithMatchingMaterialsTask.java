@@ -109,8 +109,16 @@ public abstract class CraftWithMatchingMaterialsTask extends ResourceTask {
    }
 
    protected Task getAllSameResourcesTask(PlayerEngineController mod) {
-      ItemTarget infinityVersion = new ItemTarget(this.sameResourceTarget, 999999);
-      return TaskCatalogue.getItemTask(infinityVersion);
+      int have = 0;
+      for (Item sameCheck : this.sameResourceTarget.getMatches()) {
+         have += this.getExpectedTotalCountOfSameItem(mod, sameCheck);
+      }
+      int need = Math.max(0, this.sameResourceRequiredCount - have);
+      if (need <= 0) {
+         need = 1;
+      }
+      ItemTarget bounded = new ItemTarget(this.sameResourceTarget, need);
+      return TaskCatalogue.getItemTask(bounded);
    }
 
    protected int getExpectedTotalCountOfSameItem(PlayerEngineController mod, Item sameItem) {

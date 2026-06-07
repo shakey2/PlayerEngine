@@ -121,7 +121,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
       } else if (!mod.getBaritone().getPathingBehavior().isSafeToCancel()) {
          return null;
       } else {
-         this.wanderTask = new TimeoutWanderTask();
+         this.wanderTask = TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // RECOVERY
          return this.wanderTask;
       }
    }

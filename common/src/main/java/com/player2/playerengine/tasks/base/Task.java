@@ -145,6 +145,10 @@ public abstract class Task {
       return false;
    }
 
+   public boolean containsTask(Predicate<Task> pred) {
+      return this.thisOrChildSatisfies(pred);
+   }
+
    public boolean thisOrChildAreTimedOut() {
       return this.thisOrChildSatisfies(task -> task instanceof TimeoutWanderTask);
    }

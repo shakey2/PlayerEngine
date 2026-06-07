@@ -2,6 +2,7 @@ package com.player2.playerengine.commands.base;
 
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.util.Debug;
+import java.util.function.Consumer;
 
 public abstract class Command {
    protected final ArgParser parser;
@@ -9,6 +10,9 @@ public abstract class Command {
    private final String description;
    protected PlayerEngineController mod;
    private Runnable onFinish = null;
+   private Consumer<CommandException> onError = null;
+   private Consumer<String> onFinishWithNote = null;
+   private boolean ended = false;
 
    public Command(String name, String description, ArgBase... args) {
       this.name = name;
@@ -16,15 +20,98 @@ public abstract class Command {
       this.parser = new ArgParser(args);
    }
 
+   /**
+    * Legacy entry point: runs the command with only a finish callback (no error route). Commands
+    * invoked this way that call {@link #finishWithError(String)} fall back to a normal finish.
+    */
    public void run(PlayerEngineController mod, String line, Runnable onFinish) throws CommandException {
+      this.run(mod, line, onFinish, null);
+   }
+
+   /**
+    * Runs the command, wiring both the finish and the error callback. The {@code onError} consumer is
+    * the executor's existing {@code getException} route, so a command that ends via
+    * {@link #finishWithError(String)} reaches {@code CommandExecutionStopReason.Error} and the model
+    * receives the "Command feedback: &lt;cmd&gt; FAILED. The error was &lt;msg&gt;." InfoMessage.
+    */
+   public void run(PlayerEngineController mod, String line, Runnable onFinish, Consumer<CommandException> onError)
+         throws CommandException {
+      this.run(mod, line, onFinish, onError, null);
+   }
+
+   /**
+    * Runs the command, wiring the finish, error, and success-note callbacks. The {@code onFinishWithNote}
+    * consumer is the executor's success-detail route, so a command that ends via
+    * {@link #finishWithNote(String)} with a non-blank note reaches
+    * {@code CommandExecutionStopReason.Finished} carrying that note and the model receives the
+    * "Command feedback: &lt;cmd&gt; finished running, but: &lt;note&gt;. ..." InfoMessage. A blank/absent
+    * note degrades to the plain finish route, byte-identical to a clean success.
+    */
+   public void run(
+         PlayerEngineController mod,
+         String line,
+         Runnable onFinish,
+         Consumer<CommandException> onError,
+         Consumer<String> onFinishWithNote)
+         throws CommandException {
       this.onFinish = onFinish;
+      this.onError = onError;
+      this.onFinishWithNote = onFinishWithNote;
+      this.ended = false;
       this.mod = mod;
       this.parser.loadArgs(line, true);
       this.call(mod, this.parser);
    }
 
    protected void finish() {
+      if (this.ended) {
+         return;
+      }
+      this.ended = true;
       if (this.onFinish != null) {
+         this.onFinish.run();
+      }
+   }
+
+   /**
+    * Ends the command via the ERROR path so the executor reports it as a failure with {@code message}.
+    * If no error route was wired (legacy {@code run(..)} overload), it degrades to a normal finish so
+    * existing callers never hang. Idempotent with {@link #finish()}: whichever fires first wins.
+    */
+   protected void finishWithError(String message) {
+      if (this.ended) {
+         return;
+      }
+      this.ended = true;
+      if (this.onError != null) {
+         this.onError.accept(new CommandException(message));
+      } else if (this.onFinish != null) {
+         this.onFinish.run();
+      }
+   }
+
+   /**
+    * Ends the command via the SUCCESS path, optionally carrying a factual success {@code note} that the
+    * executor delivers to the model so a succeeded-but-degraded run no longer reads as a bland clean
+    * success. A {@code null}/blank note is byte-identical to {@link #finish()} (plain clean success). If
+    * a non-blank note is given but no note route was wired (legacy {@code run(..)} overload), it degrades
+    * to a normal finish so existing callers never hang. Idempotent with {@link #finish()} and
+    * {@link #finishWithError(String)}: whichever fires first wins.
+    */
+   protected void finishWithNote(String note) {
+      if (this.ended) {
+         return;
+      }
+      this.ended = true;
+      if (note == null || note.isBlank()) {
+         if (this.onFinish != null) {
+            this.onFinish.run();
+         }
+         return;
+      }
+      if (this.onFinishWithNote != null) {
+         this.onFinishWithNote.accept(note);
+      } else if (this.onFinish != null) {
          this.onFinish.run();
       }
    }

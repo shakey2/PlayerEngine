@@ -62,7 +62,15 @@ public class ConfigHelper {
       }
 
       try (FileReader reader = new FileReader(loadFrom)) {
-         result = GSON.fromJson(reader, classToLoad);
+         T loaded = GSON.fromJson(reader, classToLoad);
+         if (loaded != null) {
+            result = loaded;
+         } else {
+            Debug.logWarning("Config at " + path + " deserialized to null; using defaults.");
+            if (result instanceof IFailableConfigFile failable) {
+               failable.onFailLoad();
+            }
+         }
       } catch (JsonSyntaxException e) {
          Debug.logError(
                  "Failed to parse Config file of type "

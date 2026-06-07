@@ -51,9 +51,9 @@ public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequi
             this.wanderTimer.reset();
             Debug.logWarning("GetToBlock was finished for 10 seconds yet is still being called, wandering");
             this.finishedTicks = 0;
-            return new TimeoutWanderTask();
+            return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // RECOVERY
          } else {
-            return (Task)(!this.wanderTimer.elapsed() ? new TimeoutWanderTask() : super.onTick());
+            return (Task)(!this.wanderTimer.elapsed() ? TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L) : super.onTick()); // RECOVERY
          }
       }
    }

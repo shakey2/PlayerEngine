@@ -153,7 +153,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
                      }
 
                      mod.log("trying to wander " + this.timeoutTimer.getDuration());
-                     return new TimeoutWanderTask();
+                     return TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
                   } else {
                      this.timeoutTimer.reset();
                      if (LookHelper.getReach(this.controller, blockPos).isPresent() && mod.getBaritone().getPathingBehavior().isSafeToCancel()) {
@@ -173,7 +173,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
                return new DefaultGoToDimensionTask(Dimension.OVERWORLD);
             } else {
                this.setDebugState("Searching for liquid by wandering around aimlessly");
-               return new TimeoutWanderTask();
+               return TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
             }
          }
       }

@@ -7,7 +7,7 @@ pluginManagement {
     }
 }
 
-rootProject.name = 'playerengine'
+rootProject.name = 'PlayerEngine-1.20.1-arch-persistentdata'
 
 include 'common'
 include 'fabric'

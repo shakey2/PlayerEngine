@@ -1996,7 +1996,7 @@ public class BeatMinecraftTask extends Task {
 
                         if ((!(rodDistance < pearlDistance) || this.hasRods || this.gettingPearls) && needsEnderPearls) {
                            if (!mod.getBlockScanner().anyFound(Blocks.TWISTING_VINES, Blocks.TWISTING_VINES_PLANT, Blocks.WARPED_HYPHAE, Blocks.WARPED_NYLIUM)) {
-                              return new TimeoutWanderTask();
+                              return new TimeoutWanderTask(); // EXPLORATION
                            }
 
                            if (!this.gotToBiome
@@ -2020,7 +2020,7 @@ public class BeatMinecraftTask extends Task {
                                  this.setDebugState("biome not found, wandering");
                               }
 
-                              return new TimeoutWanderTask();
+                              return new TimeoutWanderTask(); // EXPLORATION
                            }
 
                            this.gotToBiome = true;
@@ -2033,7 +2033,7 @@ public class BeatMinecraftTask extends Task {
                            } else {
                               if (!mod.getBlockScanner().anyFound(Blocks.NETHER_BRICKS)) {
                                  this.setDebugState("Searching for fortress");
-                                 return new TimeoutWanderTask();
+                                 return new TimeoutWanderTask(); // EXPLORATION
                               }
 
                               if (WorldHelper.inRangeXZ(

@@ -62,9 +62,11 @@ import com.player2.playerengine.util.RecipeTarget;
 import com.player2.playerengine.util.SmeltTarget;
 import com.player2.playerengine.util.WoodType;
 import com.player2.playerengine.util.helpers.ItemHelper;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -97,6 +99,28 @@ public class TaskCatalogue {
    private static final HashMap<String, TaskCatalogue.CataloguedResource> nameToResourceTask = new HashMap<>();
    private static final HashMap<Item, TaskCatalogue.CataloguedResource> itemToResourceTask = new HashMap<>();
    private static final HashSet<Item> resourcesObtainable = new HashSet<>();
+
+   /**
+    * Cycle/depth guard for squashed (multi-match, non-catalogue) resolution.
+    *
+    * <p>A multi-match {@link ItemTarget} that is NOT a catalogue name (e.g. the any-plank / any-log
+    * targets {@code new ItemTarget(ItemHelper.PLANKS/LOG, n)}) cannot resolve to a single leaf task:
+    * {@link #getItemTask(ItemTarget)} sends it to {@link #getSquashedItemTask}, which builds a
+    * {@link CataloguedResourceTask}, whose constructor calls {@link #getItemTask(ItemTarget)} again on
+    * the SAME multi-match target — an unbounded self-recursion that overflows the stack and hard-crashes
+    * the server (see bugfixing-logs/2026-06-06-task-catalogue-squashed-resolution-stackoverflow.md).
+    *
+    * <p>This per-thread stack tracks the multi-match signatures currently being resolved on the
+    * dependency chain. Re-entering an item set already on the chain (a true cycle) — or exceeding the
+    * depth backstop — returns a graceful {@code null} instead of recursing forever. Callers of
+    * {@link #getItemTask} already null-check (e.g. {@link CataloguedResourceTask} ctor skips null tasks,
+    * {@code CraftMacroResourceTask} routes null to its bounded collect-fail path), so a null is a clean,
+    * non-crashing outcome that degrades visibly rather than overflowing.
+    */
+   private static final ThreadLocal<Deque<String>> squashResolutionStack = ThreadLocal.withInitial(ArrayDeque::new);
+
+   /** Hard backstop on squashed-resolution recursion depth, independent of cycle detection. */
+   private static final int MAX_SQUASH_RESOLUTION_DEPTH = 32;
 
    private static TaskCatalogue.CataloguedResource put(String name, Item[] matches, Function<Integer, ResourceTask> getTask) {
       List<Item> supportedMatches = new ArrayList<>();
@@ -155,7 +179,52 @@ public class TaskCatalogue {
    }
 
    public static CataloguedResourceTask getSquashedItemTask(ItemTarget... targets) {
-      return new CataloguedResourceTask(true, targets);
+      // Cycle/depth guard (see squashResolutionStack doc). A multi-match, non-catalogue target re-enters
+      // this method through CataloguedResourceTask's constructor with the same item set; without this guard
+      // that recursion is unbounded and overflows the stack (server crash). Key on the combined sorted item
+      // signature of all targets so an identical multi-match set already on the resolution chain is detected.
+      String signature = squashSignature(targets);
+      Deque<String> stack = squashResolutionStack.get();
+      if (stack.contains(signature) || stack.size() >= MAX_SQUASH_RESOLUTION_DEPTH) {
+         Debug.logWarning(
+            "TaskCatalogue: aborting cyclic/over-deep squashed resolution for "
+               + Arrays.toString(targets)
+               + " (depth=" + stack.size() + ", signature=" + signature
+               + "); treating as unresolvable to avoid StackOverflow."
+         );
+         return null;
+      }
+
+      stack.push(signature);
+      try {
+         return new CataloguedResourceTask(true, targets);
+      } finally {
+         stack.pop();
+         if (stack.isEmpty()) {
+            squashResolutionStack.remove();
+         }
+      }
+   }
+
+   /** Stable signature for a (multi-match) target list: sorted item description ids, so the same item set keys equal. */
+   private static String squashSignature(ItemTarget... targets) {
+      List<String> ids = new ArrayList<>();
+      if (targets != null) {
+         for (ItemTarget target : targets) {
+            if (target == null) {
+               continue;
+            }
+            if (target.isCatalogueItem()) {
+               ids.add("@" + target.getCatalogueName());
+            } else {
+               for (Item match : target.getMatches()) {
+                  ids.add(match == null ? "null" : match.getDescriptionId());
+               }
+            }
+         }
+      }
+      java.util.Collections.sort(ids);
+      return String.join(",", ids);
    }
 
    public static ResourceTask getItemTask(String name, int count) {
@@ -459,7 +528,7 @@ public class TaskCatalogue {
       simple("amethyst_block", Items.AMETHYST_BLOCK, CollectAmethystBlockTask::new).dontMineIfPresent();
       simple("dripstone_block", Items.DRIPSTONE_BLOCK, CollectDripstoneBlockTask::new).dontMineIfPresent();
       simple("flint", Items.FLINT, CollectFlintTask::new);
-      simple("obsidian", Items.OBSIDIAN, CollectObsidianTask::new).dontMineIfPresent();
+      simple("obsidian", Items.OBSIDIAN, CollectObsidianTask::new).dontMineIfPresent().anyDimension();
       simple("wool", ItemHelper.WOOL, CollectWoolTask::new);
       simple("egg", Items.EGG, CollectEggsTask::new);
       mob("bone", Items.BONE, Skeleton.class);
@@ -772,16 +841,16 @@ public class TaskCatalogue {
       shapedRecipe3x3("bow", Items.BOW, 1, "string", s, o, "string", o, s, "string", s, o);
       shapedRecipe3x3("arrow", Items.ARROW, 4, "flint", o, o, s, o, o, "feather", o, o);
       String str7 = "iron_ingot";
-      shapedRecipe3x3("bucket", Items.BUCKET, 1, str7, o, str7, o, str7, o, o, o, o);
-      shapedRecipe2x2("flint_and_steel", Items.FLINT_AND_STEEL, 1, str7, o, o, "flint");
+      shapedRecipe3x3("bucket", Items.BUCKET, 1, str7, o, str7, o, str7, o, o, o, o).anyDimension();
+      shapedRecipe2x2("flint_and_steel", Items.FLINT_AND_STEEL, 1, str7, o, o, "flint").anyDimension();
       shapedRecipe2x2("shears", Items.SHEARS, 1, str7, o, o, str7);
       shapedRecipe2x2("iron_nugget", Items.IRON_NUGGET, 9, str7, o, o, o);
       shapedRecipe3x3("compass", Items.COMPASS, 1, o, str7, o, str7, "redstone", str7, o, str7, o);
       shapedRecipe3x3("shield", Items.SHIELD, 1, p, str7, p, p, p, p, o, p, o);
       String str12 = "gold_ingot";
       shapedRecipe3x3("clock", Items.CLOCK, 1, o, str12, o, str12, "redstone", str12, o, str12, o);
-      simple("water_bucket", Items.WATER_BUCKET, CollectBucketLiquidTask.CollectWaterBucketTask::new);
-      simple("lava_bucket", Items.LAVA_BUCKET, CollectBucketLiquidTask.CollectLavaBucketTask::new);
+      simple("water_bucket", Items.WATER_BUCKET, CollectBucketLiquidTask.CollectWaterBucketTask::new).anyDimension();
+      simple("lava_bucket", Items.LAVA_BUCKET, CollectBucketLiquidTask.CollectLavaBucketTask::new).anyDimension();
       String a = "paper";
       shapedRecipe3x3("map", Items.MAP, 1, a, a, a, a, "compass", a, a, a, a);
       shapedRecipe3x3("fishing_rod", Items.FISHING_ROD, 1, o, o, s, o, s, "string", s, o, "string");

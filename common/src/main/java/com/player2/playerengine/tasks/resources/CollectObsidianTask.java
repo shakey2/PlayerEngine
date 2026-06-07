@@ -103,7 +103,7 @@ public class CollectObsidianTask extends ResourceTask {
                BlockPos goodPos = getGoodObsidianPosition(mod);
                if (goodPos == null) {
                   this.setDebugState("Walking until we find a spot to place obsidian");
-                  return new TimeoutWanderTask();
+                  return TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
                }
 
                this.placeObsidianTask = new PlaceObsidianBucketTask(goodPos);

@@ -1,10 +1,12 @@
 package com.player2.playerengine.tasks.movement;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.PlayerEngineSettings;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.tasks.entity.KillEntitiesTask;
 import com.player2.playerengine.tasks.base.ITaskRequiresGrounded;
 import com.player2.playerengine.tasks.base.Task;
+import com.player2.playerengine.util.helpers.EntityHelper;
 import com.player2.playerengine.util.helpers.ItemHelper;
 import com.player2.playerengine.util.helpers.StorageHelper;
 import com.player2.playerengine.util.helpers.WorldHelper;
@@ -26,6 +28,7 @@ import net.minecraft.world.level.block.FenceBlock;
 import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.FlowerBlock;
 import net.minecraft.world.phys.Vec3;
+import org.jetbrains.annotations.Nullable;
 
 public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
    private final MovementProgressChecker stuckCheck = new MovementProgressChecker();
@@ -55,10 +58,56 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
    private int failCounter;
    private double wanderDistanceExtension;
 
+   // --- Bounded-wander state (WS4). All opt-in; null deadline == legacy infinite semantics. ---
+   /**
+    * Time budget in milliseconds measured from {@link #onStart()}. When non-null, {@link #isFinished()}
+    * additionally returns true once this many ms have elapsed since the wander started. Null preserves
+    * the legacy infinite/distance-only behaviour of the existing ctors.
+    */
+   @Nullable
+   private final Long deadlineMs;
+   /**
+    * No-improvement give-up window in seconds. When bounded, the wander gives up if the player has made
+    * no net distance progress away from {@link #origin} for this many seconds. Initialised to
+    * {@link #DEFAULT_NO_IMPROVEMENT_SECONDS} and, for bounded wanders, refreshed in {@link #onStart()}
+    * from the configured knob {@code PlayerEngineSettings.getWanderNoImprovementSeconds()} (WS5). A
+    * configured value of 0 disables the no-improvement check (see {@link #boundExpired()}); the default
+    * is used only when settings are unavailable.
+    */
+   private double noImprovementGiveUpSeconds = DEFAULT_NO_IMPROVEMENT_SECONDS;
+   /** Default no-improvement give-up window (seconds); plan WS4/WS5 default = 30. */
+   private static final double DEFAULT_NO_IMPROVEMENT_SECONDS = 30.0;
+   /** Wall-clock start time captured in {@link #onStart()} for the deadline / telemetry checks. */
+   private long startTimeMs;
+   /** Best (largest) squared distance from origin observed so far, for the no-improvement check. */
+   private double bestProgressSq;
+   /** Wall-clock time (ms) at which bestProgressSq last improved meaningfully. */
+   private long lastImprovementMs;
+   /** Debug: elapsed ms of the current bounded wander, updated each tick (silent-hang detection). */
+   private long debugElapsedMs;
+   /** One-shot guard so the over-threshold telemetry log fires once per wander. */
+   private boolean overThresholdLogged;
+   /** Telemetry threshold: log when a bounded wander has run this long without finishing. */
+   private static final long BOUNDED_OVER_THRESHOLD_MS = 60_000L;
+   /** Minimum squared-distance gain to count as "progress" for the no-improvement check. */
+   private static final double NO_IMPROVEMENT_EPSILON_SQ = 4.0;
+
    public TimeoutWanderTask(float distanceToWander, boolean increaseRange) {
+      this(distanceToWander, increaseRange, null);
+   }
+
+   /**
+    * Backward-compatible bounded ctor (WS4). With {@code deadlineMs == null} this behaves exactly like
+    * {@link #TimeoutWanderTask(float, boolean)} (legacy distance-only / infinite semantics). With a
+    * non-null {@code deadlineMs} the wander is additionally bounded by a wall-clock budget (measured
+    * from {@link #onStart()}) and a no-improvement give-up, regardless of {@code distanceToWander}
+    * (so {@code Float.POSITIVE_INFINITY} distance + a deadline yields a deadline-bounded wander).
+    */
+   public TimeoutWanderTask(float distanceToWander, boolean increaseRange, @Nullable Long deadlineMs) {
       this.distanceToWander = distanceToWander;
       this.increaseRange = increaseRange;
       this.forceExplore = false;
+      this.deadlineMs = deadlineMs;
    }
 
    public TimeoutWanderTask(float distanceToWander) {
@@ -72,6 +121,18 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
    public TimeoutWanderTask(boolean forceExplore) {
       this();
       this.forceExplore = forceExplore;
+   }
+
+   /**
+    * Convenience factory (WS4): an infinite-distance wander bounded only by a wall-clock deadline
+    * (measured from {@link #onStart()}) and a no-improvement give-up. Use this for the discrete
+    * resource / agentic / recovery callers that must not wander forever; legitimately-unbounded
+    * exploration callers keep using the existing infinite ctors.
+    *
+    * @param deadlineMs time budget in milliseconds from wander start before the task self-terminates.
+    */
+   public static TimeoutWanderTask bounded(long deadlineMs) {
+      return new TimeoutWanderTask(Float.POSITIVE_INFINITY, false, deadlineMs);
    }
 
    private static BlockPos[] generateSides(BlockPos pos) {
@@ -147,6 +208,22 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
       this.progressChecker.reset();
       this.stuckCheck.reset();
       this.failCounter = 0;
+      // Bounded-wander bookkeeping (WS4): only consulted when deadlineMs != null.
+      // WS5 wiring: source the no-improvement give-up window from the configured knob
+      // (wanderNoImprovementSeconds) now that the task has its controller. 0 = off (handled in
+      // boundExpired). Fall back to the default only when settings are unavailable, never overriding an
+      // explicit configured value (including an explicit 0). Only relevant for bounded wanders.
+      if (this.deadlineMs != null) {
+         PlayerEngineSettings settings = mod.getModSettings();
+         if (settings != null) {
+            this.noImprovementGiveUpSeconds = settings.getWanderNoImprovementSeconds();
+         }
+      }
+      this.startTimeMs = System.currentTimeMillis();
+      this.lastImprovementMs = this.startTimeMs;
+      this.bestProgressSq = 0.0;
+      this.debugElapsedMs = 0L;
+      this.overThresholdLogged = false;
       ItemStack cursorStack = StorageHelper.getItemStackInCursorSlot(this.controller);
       if (!cursorStack.isEmpty()) {
          Optional<Slot> moveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursorStack, false);
@@ -164,6 +241,7 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
    @Override
    protected Task onTick() {
       PlayerEngineController mod = this.controller;
+      this.updateBoundedProgress(mod);
       if (mod.getBaritone().getPathingBehavior().isPathing()) {
          this.progressChecker.reset();
       }
@@ -194,7 +272,10 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
       } else {
          if (!this.progressChecker.check(mod) || !this.stuckCheck.check(mod)) {
             for (Entity CloseEntities : mod.getEntityTracker().getCloseEntities()) {
-               if (CloseEntities instanceof Mob && CloseEntities.position().closerThan(mod.getPlayer().position(), 1.0) && CloseEntities != mod.getEntity()) {
+               if (CloseEntities instanceof Mob
+                  && !EntityHelper.isZombifiedPiglinFamily(CloseEntities)
+                  && CloseEntities.position().closerThan(mod.getPlayer().position(), 1.0)
+                  && CloseEntities != mod.getEntity()) {
                   this.setDebugState("Killing annoying entity.");
                   return new KillEntitiesTask(CloseEntities.getClass());
                }
@@ -254,9 +335,67 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
       }
    }
 
+   /**
+    * Per-tick bounded-wander bookkeeping (WS4). Tracks elapsed wall-clock time and the best net
+    * distance away from {@link #origin}, and emits a one-shot telemetry log when a bounded wander runs
+    * past {@link #BOUNDED_OVER_THRESHOLD_MS} without finishing (silent-hang detection). No-ops entirely
+    * when the wander is unbounded ({@code deadlineMs == null}).
+    */
+   private void updateBoundedProgress(PlayerEngineController mod) {
+      if (this.deadlineMs == null) {
+         return;
+      }
+
+      long now = System.currentTimeMillis();
+      this.debugElapsedMs = now - this.startTimeMs;
+
+      LivingEntity player = mod.getPlayer();
+      if (player != null && player.position() != null && this.origin != null) {
+         double sqDist = player.position().distanceToSqr(this.origin);
+         if (sqDist > this.bestProgressSq + NO_IMPROVEMENT_EPSILON_SQ) {
+            this.bestProgressSq = sqDist;
+            this.lastImprovementMs = now;
+         }
+      }
+
+      if (!this.overThresholdLogged && this.debugElapsedMs >= BOUNDED_OVER_THRESHOLD_MS) {
+         this.overThresholdLogged = true;
+         Debug.logMessage(
+            "Bounded wander running long: elapsed="
+               + this.debugElapsedMs
+               + "ms (deadline="
+               + this.deadlineMs
+               + "ms, noImprovement="
+               + this.noImprovementGiveUpSeconds
+               + "s)"
+         );
+      }
+   }
+
+   /**
+    * Bounded give-up check (WS4). Returns true when a non-null {@link #deadlineMs} has elapsed since
+    * {@link #onStart()}, OR no net distance progress from {@link #origin} has occurred for
+    * {@link #noImprovementGiveUpSeconds}. Always false when the wander is unbounded.
+    */
+   private boolean boundExpired() {
+      if (this.deadlineMs == null) {
+         return false;
+      }
+      long now = System.currentTimeMillis();
+      if (now - this.startTimeMs >= this.deadlineMs) {
+         return true;
+      }
+      double noImprovementMs = this.noImprovementGiveUpSeconds * 1000.0;
+      return noImprovementMs > 0.0 && (now - this.lastImprovementMs) >= noImprovementMs;
+   }
+
    @Override
    public boolean isFinished() {
-      if (Float.isInfinite(this.distanceToWander)) {
+      // WS4: an opt-in deadline / no-improvement give-up bounds even the infinite-distance wander.
+      // Unbounded callers (deadlineMs == null) keep their exact legacy behaviour below.
+      if (this.boundExpired()) {
+         return true;
+      } else if (Float.isInfinite(this.distanceToWander)) {
          return false;
       } else if (this.failCounter > 10) {
          return true;

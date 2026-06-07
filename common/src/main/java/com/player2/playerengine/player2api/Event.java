@@ -8,12 +8,19 @@ public sealed interface Event // tagged union basically of the below events
 
     public String getConversationHistoryString();
 
-    public record UserMessage(String message, String userName) implements Event {
+    public record UserMessage(String message, String userName, boolean fromVoice) implements Event {
+        public UserMessage(String message, String userName) {
+            this(message, userName, false);
+        }
+
         public String getConversationHistoryString() {
             return String.format("User Message: [%s]: %s", userName, message);
         }
 
         public String toString() {
+            if (fromVoice) {
+                return String.format("UserMessage(userName='%s', message='%s', fromVoice=true)", userName, message);
+            }
             return String.format("UserMessage(userName='%s', message='%s')", userName, message);
         }
     }

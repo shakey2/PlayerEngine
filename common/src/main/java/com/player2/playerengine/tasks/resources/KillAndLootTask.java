@@ -42,7 +42,7 @@ public class KillAndLootTask extends ResourceTask {
             return this.getToCorrectDimensionTask(mod);
          } else {
             this.setDebugState("Searching for mob...");
-            return new TimeoutWanderTask();
+            return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
          }
       } else {
          return this.killTask;

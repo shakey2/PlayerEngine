@@ -23,16 +23,39 @@ import java.util.function.Predicate;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ArmorItem;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.BowItem;
+import net.minecraft.world.item.CrossbowItem;
+import net.minecraft.world.item.DiggerItem;
+import net.minecraft.world.item.FishingRodItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ShieldItem;
+import net.minecraft.world.item.TieredItem;
+import net.minecraft.world.item.TridentItem;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 
 public class StorageHelper {
    public static ItemStack getItemStackInSlot(Slot slot) {
       return slot != null && !slot.equals(Slot.UNDEFINED) ? slot.getStack() : ItemStack.EMPTY;
+   }
+
+   /**
+    * Shared "is this gear we keep on the bot during a deposit-all" classification: tools, armor, and
+    * weapons. Single source of truth for both the direct {@code deposit} command and the C3
+    * {@code DepositItemsTask} so the two paths can never drift.
+    */
+   public static boolean isEssentialItem(Item item) {
+      return item instanceof TieredItem
+         || item instanceof DiggerItem
+         || item instanceof ArmorItem
+         || item instanceof ShieldItem
+         || item instanceof BowItem
+         || item instanceof CrossbowItem
+         || item instanceof TridentItem
+         || item instanceof FishingRodItem;
    }
 
    public static ItemStack getItemStackInCursorSlot(PlayerEngineController controller) {
@@ -175,6 +198,18 @@ public class StorageHelper {
    public static boolean itemTargetsMetInventory(PlayerEngineController controller, ItemTarget... targetsToMeet) {
       return Arrays.stream(targetsToMeet)
          .allMatch(target -> controller.getItemStorage().getItemCountInventoryOnly(target.getMatches()) >= target.getTargetCount());
+   }
+
+   /**
+    * Sufficiency-axis "are we done?" gate (plan WS1/WS3): inventory + reachable nearby ground drops,
+    * type-aware by exact item identity. Mineable blocks and the EllieGPS term are NEVER counted here
+    * (decision 4). Delegates to {@link MaterialAvailability#targetsMetSufficiency}. Use only on the
+    * scoped mine/collect + craft-macro flows; the 44 generic {@code ResourceTask} subclasses stay on
+    * the strict {@link #itemTargetsMet} / {@link #itemTargetsMetInventory} gates (decision 10).
+    */
+   public static boolean itemTargetsMetSufficiency(PlayerEngineController controller, Vec3 origin,
+                                                   double dropRadius, ItemTarget... targetsToMeet) {
+      return MaterialAvailability.targetsMetSufficiency(controller, origin, dropRadius, targetsToMeet);
    }
 
    public static boolean hasRecipeMaterialsOrTarget(PlayerEngineController controller, RecipeTarget... targets) {

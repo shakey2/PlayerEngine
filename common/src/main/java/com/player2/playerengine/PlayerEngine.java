@@ -141,23 +141,29 @@ public final class PlayerEngine {
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
             new ResourceLocation("playerengine", "user_message"),
             (buf, context) -> {
-               LOGGER.info("Server: Recieved user_message packet");
                String username = context.getPlayer().getName().getString();
                String message = buf.readUtf();
-               ConversationManager.onUserChatMessage(new Event.UserMessage(message, username));
+               LOGGER.info("Server: received user_message packet (voice/STT) from {} len={} preview=\"{}\"",
+                     username, message.length(), com.player2.playerengine.player2api.utils.SttLogging.messagePreview(message));
+               ConversationManager.onUserChatMessage(new Event.UserMessage(message, username, true));
                AgentSideEffects.broadcastChatToAllPlayers(context.getPlayer().getServer(),
                      String.format("<%s> %s", context.getPlayer().getName().getString(), message));
             });
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
             new ResourceLocation("playerengine", "request_stt"),
             (buf, context) -> {
-               LOGGER.info("Server: Recieved request_stt packet");
                String clientId = buf.readUtf();
                String username = context.getPlayer().getName().getString();
+               LOGGER.info("Server: received request_stt packet from {} clientId={}", username, clientId);
                String storedToken = TokenStorage.getToken(username, clientId);
+               if (storedToken == null || storedToken.isBlank()) {
+                  LOGGER.warn("Server: no stored STT token for user={} clientId={} (Player2 login may be required)",
+                        username, clientId);
+               }
                FriendlyByteBuf buf2 = new FriendlyByteBuf(Unpooled.buffer());
-               buf2.writeUtf(storedToken);
-               LOGGER.info("Server: Sending response_stt packet w/ token {}", storedToken);
+               buf2.writeUtf(storedToken == null ? "" : storedToken);
+               LOGGER.info("Server: sending response_stt packet to {} (tokenPresent={})",
+                     username, storedToken != null && !storedToken.isBlank());
                ((ServerPlayer) context.getPlayer()).connection.send(NetworkManager.toPacket(
                      NetworkManager.Side.S2C,
                      new ResourceLocation("playerengine", "response_stt"), buf2));

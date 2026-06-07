@@ -56,7 +56,7 @@ public class KillEndermanTask extends ResourceTask {
                }
             } else {
                this.setDebugState("Warped forest biome not found");
-               return new TimeoutWanderTask();
+               return TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
             }
          }
       } else {

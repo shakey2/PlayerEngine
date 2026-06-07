@@ -118,4 +118,9 @@ public class UserTaskChain extends SingleTaskChain {
    public void signalNextTaskToBeIdleTask() {
       this.nextTaskIdleFlag = true;
    }
+
+   /** True when a non-idle user task is active (Part C0 idle guard). */
+   public boolean hasActiveNonIdleUserTask() {
+      return this.isActive() && !this.runningIdleTask && this.mainTask != null;
+   }
 }
