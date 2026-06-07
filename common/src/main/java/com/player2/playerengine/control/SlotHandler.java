@@ -285,17 +285,41 @@ public class SlotHandler {
    }
 
    private static int findMainSlotForDisplacedArmor(LivingEntityInventory inventory, int sourceSlot, int selectedSlot) {
-      for (int i = 0; i < LivingEntityInventory.MAIN_SIZE; i++) {
-         if (i != sourceSlot && i != selectedSlot && inventory.main.get(i).isEmpty()) {
+      int dest = findEmptyDisplacedSlot(inventory, sourceSlot, selectedSlot, true);
+      if (dest >= 0) {
+         return dest;
+      }
+      dest = findEmptyDisplacedSlot(inventory, sourceSlot, selectedSlot, false);
+      if (dest >= 0) {
+         return dest;
+      }
+      return findEmptyDisplacedSlot(inventory, sourceSlot, -1, false);
+   }
+
+   private static int findEmptyDisplacedSlot(
+         LivingEntityInventory inventory, int sourceSlot, int selectedSlot, boolean excludeSelected) {
+      for (int i = LivingEntityInventory.getHotbarSize(); i < LivingEntityInventory.MAIN_SIZE; i++) {
+         if (isDisplacedArmorDestination(inventory, i, sourceSlot, selectedSlot, excludeSelected)) {
             return i;
          }
       }
-      for (int i = 0; i < LivingEntityInventory.MAIN_SIZE; i++) {
-         if (i != sourceSlot && inventory.main.get(i).isEmpty()) {
+      for (int i = 0; i < LivingEntityInventory.getHotbarSize(); i++) {
+         if (isDisplacedArmorDestination(inventory, i, sourceSlot, selectedSlot, excludeSelected)) {
             return i;
          }
       }
       return -1;
+   }
+
+   private static boolean isDisplacedArmorDestination(
+         LivingEntityInventory inventory, int slot, int sourceSlot, int selectedSlot, boolean excludeSelected) {
+      if (slot == sourceSlot) {
+         return false;
+      }
+      if (excludeSelected && slot == selectedSlot) {
+         return false;
+      }
+      return inventory.main.get(slot).isEmpty();
    }
 
    public boolean equipWeaponToMainHand(PlayerEngineController controller, int mainSlot) {
@@ -318,14 +342,22 @@ public class SlotHandler {
       }
       if (LivingEntityInventory.isValidHotbarIndex(mainSlot)) {
          inventory.selectedSlot = mainSlot;
-         controller.getEntity().setItemSlot(EquipmentSlot.MAINHAND, inventory.getMainHandStack());
+         ItemStack toEquip = inventory.getMainHandStack();
+         if (toEquip.isEmpty()) {
+            return false;
+         }
+         controller.getEntity().setItemSlot(EquipmentSlot.MAINHAND, toEquip.copy());
          this.registerSlotAction();
          return true;
       }
       ItemStack handStack = inventory.getMainHandStack();
       inventory.main.set(inventory.selectedSlot, inventory.main.get(mainSlot));
       inventory.main.set(mainSlot, handStack);
-      controller.getEntity().setItemSlot(EquipmentSlot.MAINHAND, inventory.getMainHandStack());
+      ItemStack swappedMain = inventory.getMainHandStack();
+      if (swappedMain.isEmpty()) {
+         return false;
+      }
+      controller.getEntity().setItemSlot(EquipmentSlot.MAINHAND, swappedMain.copy());
       this.registerSlotAction();
       return true;
    }

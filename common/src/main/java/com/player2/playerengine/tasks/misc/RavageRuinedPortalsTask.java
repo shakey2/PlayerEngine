@@ -61,7 +61,7 @@ public class RavageRuinedPortalsTask extends Task {
             this.lootTask = new LootContainerTask(closest.get(), List.of(this.LOOT));
             return this.lootTask;
          } else {
-            return new TimeoutWanderTask();
+            return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
          }
       }
    }

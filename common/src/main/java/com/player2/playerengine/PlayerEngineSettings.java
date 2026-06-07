@@ -53,6 +53,34 @@ public class PlayerEngineSettings implements IFailableConfigFile {
    private int netherFastTravelWalkingRange = 600;
    private String idleCommand = "idle";
    private String deathCommand = "";
+   private boolean fastCraftMacrosEnabled = true;
+   private float craftDelaySeconds = 0.5F;
+   private float craftTableLookHoldSeconds = 0.25F;
+   private boolean preferLocalCraftingTable = true;
+   private boolean enableAgenticPlanner = false;
+   private int agenticPlannerRagTopK = 8;
+   private int agenticPlannerMaxSteps = 4;
+   private boolean agenticPlannerFallbackGather = true;
+   private float gatherLooseItemsRadius = 16.0F;
+   private int gatherLooseItemsMaxItems = 64;
+   private float gatherLooseItemsTimeoutSeconds = 60.0F;
+   private float gatherLooseItemsSettleSeconds = 3.0F;
+   private float agenticStorageSearchRadius = 20.0F;
+   private float agenticStoragePlacementRadius = 8.0F;
+   private boolean agenticStorageAllowPlacement = true;
+   private boolean agenticStoragePreferExisting = true;
+   private boolean agenticStorageAvoidLootChests = true;
+   private float agenticStorageResolveTimeoutSeconds = 180.0F;
+   private float agenticDepositTimeoutSeconds = 120.0F;
+   private boolean agenticDepositKeepTools = true;
+   private boolean agenticEnableLabelChest = true;
+   private float agenticLabelTimeoutSeconds = 60.0F;
+   private boolean agenticLabelUseModelText = false;
+   private float aggregateCountDropRadius = 16.0F;
+   private float aggregateLocalSourceBlockRadius = 32.0F;
+   private float mineCollectSettleSeconds = 1.0F;
+   private int wanderBoundDefaultSeconds = 90;
+   private int wanderNoImprovementSeconds = 30;
 
    private List<Item> throwawayItems = Arrays.asList(
       Items.DRIPSTONE_BLOCK,
@@ -307,6 +335,126 @@ public class PlayerEngineSettings implements IFailableConfigFile {
 
    public BlockPos getHomeBasePosition() {
       return this.homeBasePosition;
+   }
+
+   public boolean isFastCraftMacrosEnabled() {
+      return this.fastCraftMacrosEnabled;
+   }
+
+   public double getCraftDelaySeconds() {
+      return clamp(this.craftDelaySeconds, 0.0F, 5.0F);
+   }
+
+   public double getCraftTableLookHoldSeconds() {
+      return clamp(this.craftTableLookHoldSeconds, 0.0F, 3.0F);
+   }
+
+   public boolean isPreferLocalCraftingTable() {
+      return this.preferLocalCraftingTable;
+   }
+
+   public boolean isEnableAgenticPlanner() {
+      return this.enableAgenticPlanner;
+   }
+
+   public int getAgenticPlannerRagTopK() {
+      return (int) clamp(this.agenticPlannerRagTopK, 1, 20);
+   }
+
+   public int getAgenticPlannerMaxSteps() {
+      return (int) clamp(this.agenticPlannerMaxSteps, 1, 4);
+   }
+
+   public boolean isAgenticPlannerFallbackGather() {
+      return this.agenticPlannerFallbackGather;
+   }
+
+   public double getGatherLooseItemsRadius() {
+      return clamp(this.gatherLooseItemsRadius, 2.0F, 64.0F);
+   }
+
+   public int getGatherLooseItemsMaxItems() {
+      return (int) clamp(this.gatherLooseItemsMaxItems, 1, 1024);
+   }
+
+   public double getGatherLooseItemsTimeoutSeconds() {
+      return clamp(this.gatherLooseItemsTimeoutSeconds, 5.0F, 300.0F);
+   }
+
+   public double getGatherLooseItemsSettleSeconds() {
+      return clamp(this.gatherLooseItemsSettleSeconds, 0.5F, 20.0F);
+   }
+
+   public double getAgenticStorageSearchRadius() {
+      return clamp(this.agenticStorageSearchRadius, 4.0F, 64.0F);
+   }
+
+   public double getAgenticStoragePlacementRadius() {
+      return clamp(this.agenticStoragePlacementRadius, 2.0F, 16.0F);
+   }
+
+   public boolean isAgenticStorageAllowPlacement() {
+      return this.agenticStorageAllowPlacement;
+   }
+
+   public boolean isAgenticStoragePreferExisting() {
+      return this.agenticStoragePreferExisting;
+   }
+
+   public boolean isAgenticStorageAvoidLootChests() {
+      return this.agenticStorageAvoidLootChests;
+   }
+
+   public double getAgenticStorageResolveTimeoutSeconds() {
+      return clamp(this.agenticStorageResolveTimeoutSeconds, 10.0F, 300.0F);
+   }
+
+   public double getAgenticDepositTimeoutSeconds() {
+      return clamp(this.agenticDepositTimeoutSeconds, 10.0F, 300.0F);
+   }
+
+   public boolean isAgenticDepositKeepTools() {
+      return this.agenticDepositKeepTools;
+   }
+
+   public boolean isAgenticEnableLabelChest() {
+      return this.agenticEnableLabelChest;
+   }
+
+   public double getAgenticLabelTimeoutSeconds() {
+      return clamp(this.agenticLabelTimeoutSeconds, 10.0F, 180.0F);
+   }
+
+   public boolean isAgenticLabelUseModelText() {
+      return this.agenticLabelUseModelText;
+   }
+
+   public double getAggregateCountDropRadius() {
+      return clamp(this.aggregateCountDropRadius, 0.0F, 64.0F);
+   }
+
+   public double getAggregateLocalSourceBlockRadius() {
+      return clamp(this.aggregateLocalSourceBlockRadius, 0.0F, 128.0F);
+   }
+
+   public double getMineCollectSettleSeconds() {
+      return clamp(this.mineCollectSettleSeconds, 0.0F, 5.0F);
+   }
+
+   public int getWanderBoundDefaultSeconds() {
+      return (int) clamp(this.wanderBoundDefaultSeconds, 0, 600);
+   }
+
+   public int getWanderNoImprovementSeconds() {
+      return (int) clamp(this.wanderNoImprovementSeconds, 0, 300);
+   }
+
+   private static double clamp(float value, float min, float max) {
+      return Math.max(min, Math.min(max, value));
+   }
+
+   private static double clamp(int value, int min, int max) {
+      return Math.max(min, Math.min(max, value));
    }
 
    @Override

@@ -146,7 +146,7 @@ public class CollectFoodTask extends Task {
                   return this.currentResourceTask;
                } else {
                   this.setDebugState("Searching for food source...");
-                  return new TimeoutWanderTask();
+                  return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
                }
             }
          }

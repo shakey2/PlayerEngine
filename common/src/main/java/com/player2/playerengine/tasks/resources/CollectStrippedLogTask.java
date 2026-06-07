@@ -68,7 +68,7 @@ public class CollectStrippedLogTask extends ResourceTask {
             return new InteractWithBlockTask(new ItemTarget(axes), strippableLogBlockPos.get());
          } else {
             this.setDebugState("Searching log");
-            return new TimeoutWanderTask();
+            return TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
          }
       }
    }

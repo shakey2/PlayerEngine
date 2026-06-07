@@ -52,6 +52,7 @@ import net.minecraft.world.entity.monster.Vindicator;
 import net.minecraft.world.entity.monster.Witch;
 import net.minecraft.world.entity.monster.WitherSkeleton;
 import net.minecraft.world.entity.monster.Zoglin;
+import net.minecraft.world.entity.monster.ZombifiedPiglin;
 import net.minecraft.world.entity.monster.hoglin.Hoglin;
 import net.minecraft.world.entity.monster.piglin.Piglin;
 import net.minecraft.world.entity.monster.piglin.PiglinBrute;
@@ -87,7 +88,8 @@ public class MobDefenseChain extends SingleTaskChain {
       Zoglin.class,
       PiglinBrute.class,
       Vindicator.class,
-      MagmaCube.class
+      MagmaCube.class,
+      ZombifiedPiglin.class
    );
    private static boolean shielding = false;
    private final DragonBreathTracker dragonBreathTracker = new DragonBreathTracker();
@@ -483,7 +485,9 @@ public class MobDefenseChain extends SingleTaskChain {
                boolean shouldForce = false;
                if (!mod.getBehaviour().shouldExcludeFromForcefield(entity)) {
                   if (entity instanceof Mob) {
-                     if (EntityHelper.isProbablyHostileToPlayer(mod, entity) && LookHelper.seesPlayer(entity, mod.getPlayer(), 10.0)) {
+                     if (!EntityHelper.isZombifiedPiglinFamily(entity)
+                        && EntityHelper.isProbablyHostileToPlayer(mod, entity)
+                        && LookHelper.seesPlayer(entity, mod.getPlayer(), 10.0)) {
                         shouldForce = true;
                      }
                   } else if (entity instanceof LargeFireball) {

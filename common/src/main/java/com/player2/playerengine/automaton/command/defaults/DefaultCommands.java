@@ -366,15 +366,57 @@ public final class DefaultCommands {
                   .then(Commands.literal("status").executes(ctx -> {
                      if (!isLogicalServer(ctx.getSource())) return 0;
                      var source = ctx.getSource();
+                     int pruned = PlayerEngineController.pruneStaleControllers(source.getServer());
                      var controllers = PlayerEngineController.staticControllers;
                      if (controllers.isEmpty()) {
-                        source.sendSuccess(() -> Component.literal("No active PlayerEngine bots."), false);
+                        source.sendSuccess(() -> Component.literal(
+                              pruned > 0
+                                    ? "No active PlayerEngine bots (pruned " + pruned + " stale entries)."
+                                    : "No active PlayerEngine bots."), false);
                         return 1;
+                     }
+                     if (pruned > 0) {
+                        source.sendSuccess(() -> Component.literal(
+                              "Pruned " + pruned + " stale controller(s) from registry."), false);
                      }
                      for (var entry : controllers.entrySet()) {
                         PlayerEngineController bot = entry.getValue();
-                        String botName = bot.getEntity().getName().getString();
+                        if (bot.getEntity() == null || bot.getEntity().isRemoved()) {
+                           continue;
+                        }
+                        String botName = bot.getChainStatusDisplayName();
                         source.sendSuccess(() -> Component.literal("=== Chain Status: " + botName + " ==="), false);
+                        com.player2.playerengine.agentic.AgenticRunRegistry
+                              .snapshot(bot.getEntity().getUUID())
+                              .ifPresent(run -> {
+                                 source.sendSuccess(() -> Component.literal(
+                                       "Agentic run: " + run.runId() + " [" + run.state() + "] "
+                                             + run.goalSummary()), false);
+                                 source.sendSuccess(() -> Component.literal(
+                                       "  planning: " + run.planningSource()
+                                             + " step[" + run.activeStepIndex() + "]="
+                                             + run.activeStepKind()), false);
+                                 if (run.lastMessage() != null && !run.lastMessage().isBlank()) {
+                                    source.sendSuccess(() -> Component.literal(
+                                          "  progress: " + run.lastMessage()), false);
+                                 }
+                                 if (run.storageTargetSummary() != null && !run.storageTargetSummary().isBlank()) {
+                                    source.sendSuccess(() -> Component.literal(
+                                          "  storage target: " + run.storageTargetSummary()), false);
+                                 }
+                                 if (run.storageProgress() != null && !run.storageProgress().isBlank()) {
+                                    source.sendSuccess(() -> Component.literal(
+                                          "  storage phase: " + run.storageProgress()), false);
+                                 }
+                                 if (run.depositProgress() != null && !run.depositProgress().isBlank()) {
+                                    source.sendSuccess(() -> Component.literal(
+                                          "  deposit phase: " + run.depositProgress()), false);
+                                 }
+                                 if (run.labelProgress() != null && !run.labelProgress().isBlank()) {
+                                    source.sendSuccess(() -> Component.literal(
+                                          "  label phase: " + run.labelProgress()), false);
+                                 }
+                              });
                         var execOpt = bot.getStepExecutorAdapter().getActiveExecution();
                         if (execOpt.isEmpty()) {
                            source.sendSuccess(() -> Component.literal("No step has run yet."), false);
@@ -384,12 +426,23 @@ public final class DefaultCommands {
                         if (exec.getState() == StepState.RUNNING) {
                            long secs = exec.getElapsedMs() / 1000L;
                            source.sendSuccess(() -> Component.literal(
-                                   "Active step:    " + exec.getStepKind() + " [RUNNING] (" + secs + "s)"), false);
+                                   "Active step:    " + exec.getStepId() + " / " + exec.getStepKind() + " [RUNNING] (" + secs + "s)"), false);
                            String last = exec.getLastLogEntry();
                            source.sendSuccess(() -> Component.literal("Last log entry: " + last), false);
                         } else {
                            source.sendSuccess(() -> Component.literal(
-                                   "Last step: " + exec.getStepKind() + " [" + exec.getState() + "]"), false);
+                                   "Last step: " + exec.getStepId() + " / " + exec.getStepKind() + " [" + exec.getState() + "]"), false);
+                        }
+                        com.player2.playerengine.tasks.base.Task userTask = bot.getUserTaskChain().getCurrentTask();
+                        if (userTask != null) {
+                           source.sendSuccess(() -> Component.literal("User task: " + userTask), false);
+                           if (userTask instanceof com.player2.playerengine.tasks.crafting.DescribesProgress progress) {
+                              source.sendSuccess(() -> Component.literal("Progress: " + progress.describeProgress()), false);
+                           }
+                           String tree = userTask.getTaskTree();
+                           if (tree != null && !tree.isBlank()) {
+                              source.sendSuccess(() -> Component.literal("Task tree: " + tree), false);
+                           }
                         }
                         source.sendSuccess(() -> Component.literal("--- Full log ---"), false);
                         for (String logEntry : exec.getLog()) {

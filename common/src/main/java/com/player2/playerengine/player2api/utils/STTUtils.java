@@ -45,27 +45,33 @@ public class STTUtils {
         STTUtils.clientId = clientId;
         if (v) {
             if (!ChatclefConfigPersistantState.canUseStt()) {
+                LOGGER.warn("STT: push-to-talk ignored (consent not granted or STT disabled in settings)");
                 return;
             }
             if (pushToTalkActive) {
+                LOGGER.debug("STT: push-to-talk start ignored (session already active)");
                 return;
             }
             pushToTalkActive = true;
             isListening = true;
             stopPendingAfterStart = false;
+            LOGGER.info("STT: push-to-talk pressed (clientId={})", clientId);
             sttThread.execute(STTUtils::startSession);
         } else {
             if (!pushToTalkActive) {
+                LOGGER.debug("STT: push-to-talk release ignored (no active session)");
                 return;
             }
             pushToTalkActive = false;
             isListening = false;
+            LOGGER.info("STT: push-to-talk released");
             sttThread.execute(STTUtils::stopSession);
         }
     }
 
     /** Force-stop an active session and clear state (consent revoke / disable). */
     public static void abortSession() {
+        LOGGER.info("STT: abortSession requested");
         pushToTalkActive = false;
         isListening = false;
         stopPendingAfterStart = false;
@@ -85,12 +91,14 @@ public class STTUtils {
 
     private static void startSession() {
         if (!ChatclefConfigPersistantState.canUseStt()) {
+            LOGGER.warn("STT: cannot start session (consent revoked or STT disabled before start completed)");
             resetPushToTalkState();
             return;
         }
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || clientId == null || clientId.isEmpty()) {
-            LOGGER.warn("STT: cannot start session (player or clientId missing)");
+            LOGGER.warn("STT: cannot start session (player={}, clientId={})",
+                    mc.player != null, clientId == null ? "<null>" : (clientId.isEmpty() ? "<empty>" : clientId));
             resetPushToTalkState();
             return;
         }
@@ -99,13 +107,14 @@ public class STTUtils {
             requestBody.addProperty("timeout", STT_TIMEOUT_SECONDS);
             Player2HTTPUtils.sendRequest(mc.player, clientId, "/v1/stt/start", true, requestBody);
             sessionStarted = true;
-            LOGGER.info("STT: session started via /v1/stt/start");
+            LOGGER.info("STT: session started via /v1/stt/start (clientId={})", clientId);
             if (stopPendingAfterStart) {
+                LOGGER.info("STT: stop was queued while start was in flight; stopping now");
                 stopPendingAfterStart = false;
                 stopSessionInternal(true);
             }
         } catch (Exception e) {
-            LOGGER.error("STT: failed to start session", e);
+            LOGGER.error("STT: failed to start session via /v1/stt/start", e);
             sessionStarted = false;
             resetPushToTalkState();
         }
@@ -114,6 +123,7 @@ public class STTUtils {
     private static void stopSession() {
         if (!sessionStarted) {
             stopPendingAfterStart = true;
+            LOGGER.info("STT: stop requested before session started; will stop after /v1/stt/start completes");
             return;
         }
         stopSessionInternal(true);
@@ -124,29 +134,67 @@ public class STTUtils {
         stopPendingAfterStart = false;
 
         if (!ChatclefConfigPersistantState.canUseStt()) {
+            LOGGER.warn("STT: stop skipped (consent revoked or STT disabled, deliverTranscript={})", deliverTranscript);
             return;
         }
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || clientId == null || clientId.isEmpty()) {
-            LOGGER.warn("STT: cannot stop session (player or clientId missing)");
+            LOGGER.warn("STT: cannot stop session (player={}, clientId={}, deliverTranscript={})",
+                    mc.player != null, clientId != null && !clientId.isEmpty(), deliverTranscript);
             return;
         }
         try {
             Map<String, JsonElement> responseMap = Player2HTTPUtils.sendRequest(mc.player, clientId, "/v1/stt/stop", true, null);
             if (!deliverTranscript) {
+                LOGGER.info("STT: /v1/stt/stop completed (transcript not delivered, keys={})",
+                        SttLogging.jsonResponseKeys(responseMap));
                 return;
             }
-            if (responseMap.containsKey("text")) {
-                String text = responseMap.get("text").getAsString();
-                if (text != null && !text.isBlank()) {
-                    onSTTMessageGenerated(text);
-                }
-            } else {
-                LOGGER.warn("STT: /v1/stt/stop response missing 'text' key");
-            }
+            deliverTranscriptFromStopResponse(responseMap);
         } catch (Exception e) {
-            LOGGER.error("STT: failed to stop session", e);
+            LOGGER.error("STT: failed to stop session via /v1/stt/stop", e);
         }
+    }
+
+    private static void deliverTranscriptFromStopResponse(Map<String, JsonElement> responseMap) {
+        String text = extractTranscriptText(responseMap);
+        if (text == null) {
+            LOGGER.warn("STT: /v1/stt/stop response has no usable transcript (keys={})",
+                    SttLogging.jsonResponseKeys(responseMap));
+            return;
+        }
+        if (text.isBlank()) {
+            LOGGER.warn("STT: /v1/stt/stop returned empty transcript (keys={})",
+                    SttLogging.jsonResponseKeys(responseMap));
+            return;
+        }
+        LOGGER.info("STT: transcript received (len={}, preview=\"{}\")", text.length(), SttLogging.messagePreview(text));
+        onSTTMessageGenerated(text);
+    }
+
+    /**
+     * Accepts {@code text} or legacy {@code transcript} keys from the stop response.
+     */
+    private static String extractTranscriptText(Map<String, JsonElement> responseMap) {
+        if (responseMap == null || responseMap.isEmpty()) {
+            return null;
+        }
+        if (responseMap.containsKey("text")) {
+            JsonElement el = responseMap.get("text");
+            if (el != null && el.isJsonPrimitive()) {
+                return el.getAsString();
+            }
+            LOGGER.warn("STT: 'text' field is not a string (type={})", el == null ? "null" : el.getClass().getSimpleName());
+        }
+        if (responseMap.containsKey("transcript")) {
+            JsonElement el = responseMap.get("transcript");
+            if (el != null && el.isJsonPrimitive()) {
+                LOGGER.info("STT: using legacy 'transcript' key from stop response");
+                return el.getAsString();
+            }
+            LOGGER.warn("STT: 'transcript' field is not a string (type={})", el == null ? "null" : el.getClass().getSimpleName());
+        }
+        return null;
     }
 
     private static void resetPushToTalkState() {
@@ -156,7 +204,14 @@ public class STTUtils {
 
     private static void onSTTMessageGenerated(String message) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null || mc.getConnection() == null) {
+        if (mc.player == null) {
+            LOGGER.error("STT: cannot send user_message packet (local player is null); transcript lost: \"{}\"",
+                    SttLogging.messagePreview(message));
+            return;
+        }
+        if (mc.getConnection() == null) {
+            LOGGER.error("STT: cannot send user_message packet (not connected to server); transcript lost: \"{}\"",
+                    SttLogging.messagePreview(message));
             return;
         }
         RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(), mc.player.registryAccess());
@@ -166,5 +221,7 @@ public class STTUtils {
                         NetworkManager.Side.C2S,
                         ResourceLocation.fromNamespaceAndPath("playerengine", "user_message"),
                         buf));
+        LOGGER.info("STT: sent user_message packet to server (len={}, preview=\"{}\")",
+                message.length(), SttLogging.messagePreview(message));
     }
 }

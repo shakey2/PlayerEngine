@@ -33,6 +33,7 @@ public class PlayerEngineCommands {
                   new FarmCommand(),
                   new EatFoodCommand(),
                   new PickupDropsCommand(),
+                  new AgenticCommand(),
                   new SetHostileAttackCommand(),
                   new FishCommand(),
                   new ReadNearbySignsCommand(),

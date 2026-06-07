@@ -30,11 +30,15 @@ public class DepositCommand extends Command {
    public DepositCommand() throws CommandException {
       super(
          "deposit",
-         "Deposit our items to a nearby chest, making a chest if one doesn't exist. Pass no arguments to depisot ALL items. Examples: `deposit` deposits ALL items, `deposit diamond 2` deposits 2 diamonds.",
+         "Deposit our items to a nearby chest, making a chest if one doesn't exist. Pass no arguments to deposit all non-tool/armor/weapon items (tools, armor, and weapons are kept). Examples: `deposit` deposits all non-gear items, `deposit diamond 2` deposits 2 diamonds.",
          new Arg<>(ItemList.class, "items (empty for ALL non gear items)", null, 0, false)
       );
    }
 
+   /**
+    * Shared selection used by {@code stash} (and any legacy caller): excludes only {@link TieredItem}
+    * tools and the armor inventory. Unchanged so {@code StashCommand}'s behavior is preserved.
+    */
    public static ItemTarget[] getAllNonEquippedOrToolItemsAsTarget(PlayerEngineController mod) {
       return StorageHelper.getAllInventoryItemsAsTargets(mod, slot -> {
          if (slot.getInventory().size() == 4) {
@@ -48,6 +52,23 @@ public class DepositCommand extends Command {
                return false;
             }
          }
+      });
+   }
+
+   /**
+    * Deposit-all selection: keeps tools, armor, and weapons in inventory (the shared
+    * {@link StorageHelper#isEssentialItem} set) and offloads everything else.
+    */
+   public static ItemTarget[] getDepositAllItemsAsTarget(PlayerEngineController mod) {
+      return StorageHelper.getAllInventoryItemsAsTargets(mod, slot -> {
+         if (slot.getInventory().size() == 4) {
+            return false;
+         }
+         ItemStack stack = StorageHelper.getItemStackInSlot(slot);
+         if (stack.isEmpty()) {
+            return false;
+         }
+         return !StorageHelper.isEssentialItem(stack.getItem());
       });
    }
 
@@ -79,18 +100,42 @@ public class DepositCommand extends Command {
          if (countsLeftover.size() != 0) {
             String leftover = String.join(",", countsLeftover.entrySet().stream().map(e -> e.getKey() + " x " + e.getValue().toString()).toList());
             mod.log("Insuffucient items in inventory to deposit. We still need: " + leftover + ".");
-            this.finish();
+            this.finishWithError("insufficient_items: still need " + leftover);
             return;
          }
       }
 
       ItemTarget[] items;
       if (itemList == null) {
-         items = getAllNonEquippedOrToolItemsAsTarget(mod);
+         items = getDepositAllItemsAsTarget(mod);
       } else {
          items = itemList.items;
       }
 
-      mod.runUserTask(new StoreInAnyContainerTask(false, items), () -> this.finish());
+      // Genuine nothing-to-deposit finishes normally (no error escalation).
+      if (items.length == 0) {
+         mod.log("Nothing to deposit.");
+         this.finish();
+         return;
+      }
+
+      // The task is bounded on both axes and exposes a terminal outcome. On success / nothing-left we
+      // finish normally; on a could-not-complete we end via the Error path so the model gets the
+      // "deposit FAILED" feedback and can escalate to `agentic`.
+      StoreInAnyContainerTask task = new StoreInAnyContainerTask(false, items);
+      mod.runUserTask(task, () -> {
+         if (task.succeeded()) {
+            this.finish();
+         } else {
+            this.finishWithError(escalationMessage(task.reason()));
+         }
+      });
+   }
+
+   /** Builds the FAILED feedback string naming the reason and recommending the agentic escalation. */
+   private static String escalationMessage(String reason) {
+      String r = (reason == null || reason.isBlank()) ? "could_not_complete" : reason;
+      return "Couldn't finish depositing (" + r + "). Try `agentic store <items>` — it can gather "
+         + "materials, craft or place a chest, search farther, and plan a multi-step storage solution.";
    }
 }

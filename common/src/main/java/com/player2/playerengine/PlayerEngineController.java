@@ -21,9 +21,11 @@ import com.player2.playerengine.equip.PickupArmorEvalQueue;
 import com.player2.playerengine.equip.PickupWeaponEvalQueue;
 
 import com.player2.playerengine.player2api.manager.ConversationManager;
+import com.player2.playerengine.player2api.AgentSideEffects;
 import com.player2.playerengine.player2api.AIPersistantData;
 import com.player2.playerengine.player2api.Player2APIService;
 
+import com.player2.playerengine.agentic.AgenticRunRegistry;
 import com.player2.playerengine.player2api.Character;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.tasks.base.TaskRunner;
@@ -38,7 +40,9 @@ import com.player2.playerengine.automaton.api.utils.IInteractionController;
 import com.player2.playerengine.trackers.CacheTracker;
 
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.HashMap;
@@ -54,6 +58,7 @@ import com.player2.playerengine.util.Playground;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
@@ -100,6 +105,18 @@ public class PlayerEngineController {
    public static final ConcurrentHashMap<UUID, PlayerEngineController> staticControllers = new ConcurrentHashMap<>();
    private boolean shouldDefendFromHostiles = false;
 
+   /**
+    * Throttle floor (ms) for non-milestone agentic progress lines. Identical across branches so a
+    * given run produces the same broadcast cadence everywhere. Milestone/failure lines bypass this
+    * interval (see {@link #reportAgenticProgress(String, boolean)}). Constant-only for C4; a runtime
+    * config knob (agenticProgressMinIntervalMs) is deferred to a follow-up.
+    */
+   private static final long MIN_REPORT_INTERVAL_MS = 1500L;
+   /** Last wall-clock time an agentic progress line was broadcast to a player for this bot. */
+   private long lastAgenticReportMs = 0L;
+   /** Last agentic progress message broadcast for this bot, for consecutive-duplicate suppression. */
+   private String lastAgenticReportMessage = "";
+
    public PlayerEngineController(IBaritone baritone, Character character, String player2GameId) {
       this.baritone = baritone;
       this.ctx = baritone.getEntityContext();
@@ -137,8 +154,7 @@ public class PlayerEngineController {
       this.initializeCommands();
       PlayerEngineSettings.load(
             newSettings -> {
-               if(newSettings==null) return; 
-               this.settings = newSettings;
+               this.settings = newSettings != null ? newSettings : new PlayerEngineSettings();
                List<Item> baritoneCanPlace = Arrays.stream(this.settings.getThrowawayItems(this, true)).toList();
                this.getBaritoneSettings().acceptableThrowawayItems.get().addAll(baritoneCanPlace);
                if ((!this.getUserTaskChain().isActive() || this.getUserTaskChain().isRunningIdleTask())
@@ -179,6 +195,88 @@ public class PlayerEngineController {
    public static void staticServerTick(MinecraftServer server) {
       com.player2.playerengine.util.time.TimerGame.incrementServerTick();
       ConversationManager.injectOnTick(server);
+      if (server != null && server.getTickCount() % 200 == 0) {
+         pruneStaleControllers(server);
+      }
+   }
+
+   /**
+    * Removes this controller from global registries (admin commands, API routing, agentic snapshots).
+    * Call when the companion entity is removed or discarded — not on {@link #stop()} alone.
+    */
+   public void unregisterFromGlobalRegistry() {
+      unregisterFromGlobalRegistry(this.getEntity().getUUID());
+   }
+
+   public static void unregisterFromGlobalRegistry(UUID entityUuid) {
+      if (entityUuid == null) {
+         return;
+      }
+      staticControllers.remove(entityUuid);
+      staticAPIServices.remove(entityUuid);
+      AgenticRunRegistry.clear(entityUuid);
+   }
+
+   /**
+    * Drops registry entries whose entity no longer exists on the server (despawn, world unload, death).
+    *
+    * @return number of stale entries removed
+    */
+   public static int pruneStaleControllers(MinecraftServer server) {
+      if (server == null || staticControllers.isEmpty()) {
+         return 0;
+      }
+      int removed = 0;
+      for (Iterator<Map.Entry<UUID, PlayerEngineController>> it = staticControllers.entrySet().iterator();
+           it.hasNext(); ) {
+         Map.Entry<UUID, PlayerEngineController> entry = it.next();
+         UUID uuid = entry.getKey();
+         PlayerEngineController controller = entry.getValue();
+         if (!isControllerEntityActive(server, controller, uuid)) {
+            it.remove();
+            staticAPIServices.remove(uuid);
+            AgenticRunRegistry.clear(uuid);
+            removed++;
+         }
+      }
+      return removed;
+   }
+
+   private static boolean isControllerEntityActive(MinecraftServer server,
+                                                   PlayerEngineController controller,
+                                                   UUID entityUuid) {
+      if (controller == null) {
+         return false;
+      }
+      try {
+         LivingEntity entity = controller.getEntity();
+         if (entity == null || entity.isRemoved()) {
+            return false;
+         }
+         if (!entity.isAlive()) {
+            return false;
+         }
+         if (entity.level() instanceof ServerLevel serverLevel && serverLevel.getEntity(entityUuid) == entity) {
+            return true;
+         }
+         for (ServerLevel level : server.getAllLevels()) {
+            if (level.getEntity(entityUuid) == entity) {
+               return true;
+            }
+         }
+         // Chunk unloaded: keep registry entry until the entity is actually removed.
+         return true;
+      } catch (RuntimeException ignored) {
+         return false;
+      }
+   }
+
+   /** Label for {@code chain status}: character display name + short entity id. */
+   public String getChainStatusDisplayName() {
+      Character character = this.getAIPersistantData() != null ? this.getAIPersistantData().getCharacter() : null;
+      String name = character != null ? character.shortName() : this.getEntity().getName().getString();
+      String shortId = this.getEntity().getUUID().toString().substring(0, 8);
+      return name + " (" + shortId + ")";
    }
 
    /**
@@ -310,6 +408,14 @@ public class PlayerEngineController {
       return this.userTaskChain;
    }
 
+   public boolean hasActiveNonIdleUserTask() {
+      return this.userTaskChain.hasActiveNonIdleUserTask();
+   }
+
+   public java.util.Optional<com.player2.playerengine.executor.StepExecution> getActiveTrackedStep() {
+      return this.stepExecutorAdapter.getActiveExecution();
+   }
+
    public BotBehaviour getBehaviour() {
       return this.botBehaviour;
    }
@@ -355,6 +461,9 @@ public class PlayerEngineController {
    }
 
    public PlayerEngineSettings getModSettings() {
+      if (this.settings == null) {
+         this.settings = new PlayerEngineSettings();
+      }
       return this.settings;
    }
 
@@ -472,6 +581,80 @@ public class PlayerEngineController {
          float bdist = b.distanceTo(this.getEntity());
          return Float.compare(adist, bdist);
       }).findFirst();
+   }
+
+   /**
+    * Player-facing agentic progress broadcast (non-milestone). Convenience overload that applies the
+    * {@link #MIN_REPORT_INTERVAL_MS} throttle. See {@link #reportAgenticProgress(String, boolean)}.
+    */
+   public void reportAgenticProgress(String message) {
+      reportAgenticProgress(message, false);
+   }
+
+   /**
+    * Deterministic, throttled/deduplicated agentic progress reporting to the OWNING player. Reuses
+    * the existing chat channel ({@link AgentSideEffects#broadcastChatToPlayer}); it adds NO Player2
+    * API call and consumes no model budget — the {@code message} is a pre-built deterministic string
+    * (a step's {@code describeProgress()} output or a fixed milestone/failure note).
+    *
+    * <p>Audience is OWNER-SCOPED: it targets {@link #getOwner()} when that owner is an online
+    * {@link ServerPlayer}, else the nearest player, else no-ops. This INTENTIONALLY differs from
+    * {@link AgentSideEffects#onEntityMessage} which broadcasts AI dialogue to ALL players (its
+    * owner-filter is commented out). Progress is a private status feed for the owner, not dialogue —
+    * do not "fix" this to all-players.
+    *
+    * <p>Throttle/dedup: non-milestone lines are skipped when fired within {@link #MIN_REPORT_INTERVAL_MS}
+    * of the last broadcast. Milestone/failure lines ({@code milestone == true}) BYPASS the interval so a
+    * failure is never swallowed by the rate limit, but ALL lines still dedup against the last broadcast
+    * message for this bot. No-ops on null/blank message, missing server, or no resolvable player.
+    *
+    * @param message   pre-built deterministic progress/failure text (no model call)
+    * @param milestone when true, bypass the interval throttle (still deduplicated)
+    */
+   public void reportAgenticProgress(String message, boolean milestone) {
+      // 1. blank guard.
+      if (message == null || message.isBlank()) {
+         return;
+      }
+      // 2. resolve server — there is no getServer() on the controller; use getPlayer().getServer().
+      MinecraftServer server = (getPlayer() != null) ? getPlayer().getServer() : null;
+      if (server == null) {
+         return;
+      }
+      // 3. resolve target ServerPlayer. getOwner() returns Player (NOT ServerPlayer), so the
+      //    instanceof-cast is required; fall back to the nearest player; else no-op.
+      ServerPlayer target;
+      if (getOwner() instanceof ServerPlayer sp) {
+         target = sp;
+      } else {
+         target = getClosestPlayer().orElse(null);
+      }
+      if (target == null) {
+         return;
+      }
+      long now = System.currentTimeMillis();
+      // 4. throttle (non-milestone only): skip if too soon after the last broadcast.
+      if (!milestone && (now - lastAgenticReportMs) < MIN_REPORT_INTERVAL_MS) {
+         return;
+      }
+      // 5. dedup: skip identical consecutive messages (applies to milestones too).
+      if (message.equals(lastAgenticReportMessage)) {
+         return;
+      }
+      // 6. broadcast via the single existing player-chat path, prefixed with the bot name.
+      AgentSideEffects.broadcastChatToPlayer(server, "[" + agenticReportBotName() + "] " + message, target);
+      // 7. update throttle/dedup state.
+      lastAgenticReportMs = now;
+      lastAgenticReportMessage = message;
+   }
+
+   /** Short bot name used as the {@code [<botName>] } prefix on agentic progress/failure lines. */
+   private String agenticReportBotName() {
+      Character character = this.getAIPersistantData() != null ? this.getAIPersistantData().getCharacter() : null;
+      if (character != null && character.shortName() != null && !character.shortName().isBlank()) {
+         return character.shortName();
+      }
+      return this.getEntity().getName().getString();
    }
 
    public boolean getShouldDefendFromHostiles(){

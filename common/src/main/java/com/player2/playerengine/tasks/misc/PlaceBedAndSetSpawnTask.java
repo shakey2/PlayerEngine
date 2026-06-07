@@ -145,7 +145,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
       if (WorldHelper.isInNetherPortal(this.controller)) {
          this.setDebugState("We are in nether portal. Wandering");
          this.currentBedRegion = null;
-         return new TimeoutWanderTask();
+         return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // RECOVERY
       } else if (WorldHelper.getCurrentDimension(this.controller) != Dimension.OVERWORLD) {
          this.setDebugState("Going to the overworld first.");
          return new DefaultGoToDimensionTask(Dimension.OVERWORLD);
@@ -203,7 +203,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
       } else if (mod.getPlayer().isInWater() && mod.getItemStorage().hasItem(ItemHelper.BED)) {
          this.setDebugState("We are in water. Wandering");
          this.currentBedRegion = null;
-         return new TimeoutWanderTask();
+         return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // RECOVERY
       } else {
          if (this.currentBedRegion != null) {
             for (Vec3i BedPlacePos : this.BED_PLACE_POS_OFFSET) {
@@ -227,7 +227,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
             if (this.currentBedRegion == null) {
                this.setDebugState("Searching for spot to place bed, wandering...");
-               return new TimeoutWanderTask();
+               return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
             } else {
                for (Vec3i baseOffs : this.BED_BOTTOM_PLATFORM) {
                   BlockPos blockPos = this.currentBedRegion.offset(baseOffs);

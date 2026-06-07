@@ -1,9 +1,16 @@
 package com.player2.playerengine.player2api.status;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.agentic.AgenticRunRegistry;
+import com.player2.playerengine.agentic.AgenticRunSnapshot;
+import com.player2.playerengine.executor.StepExecution;
+import com.player2.playerengine.executor.StepState;
 import com.player2.playerengine.player2api.manager.ConversationManager;
 import com.player2.playerengine.tasks.base.Task;
+import com.player2.playerengine.tasks.crafting.CraftMacroResourceTask;
+import com.player2.playerengine.tasks.crafting.DescribesProgress;
 import com.player2.playerengine.util.helpers.ItemHelper;
+import java.util.Optional;
 import com.player2.playerengine.automaton.api.entity.IAutomatone;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -64,8 +71,36 @@ public class StatusUtils {
 
    public static String getTaskStatusString(PlayerEngineController mod) {
       String noTask = "No tasks currently running.";
+      Optional<AgenticRunSnapshot> agentic = AgenticRunRegistry.snapshot(mod.getEntity().getUUID());
+      if (agentic.isPresent()) {
+         AgenticRunSnapshot run = agentic.get();
+         if (!"succeeded".equals(run.state()) && !"failed".equals(run.state())) {
+            String storage = run.storageTargetSummary() != null && !run.storageTargetSummary().isBlank()
+                  ? " target=" + run.storageTargetSummary()
+                  : "";
+            return "AGENTIC[" + run.runId() + "] " + run.goalSummary()
+                  + " step=" + run.activeStepKind() + " (" + run.state() + ") "
+                  + run.lastMessage() + storage;
+         }
+      }
+      Optional<StepExecution> tracked = mod.getActiveTrackedStep();
+      if (tracked.isPresent() && tracked.get().getState() == StepState.RUNNING) {
+         StepExecution exec = tracked.get();
+         long secs = exec.getElapsedMs() / 1000L;
+         StringBuilder sb = new StringBuilder();
+         sb.append("<").append(exec.getStepKind()).append(" [RUNNING] ").append(secs).append("s>");
+         Task root = mod.getUserTaskChain().getCurrentTask();
+         if (root != null && !root.toString().contains("LookAtOwner")) {
+            sb.append(" ").append(root.toString());
+            if (root instanceof DescribesProgress progress) {
+               sb.append(" {").append(progress.describeProgress()).append("}");
+            } else if (root instanceof CraftMacroResourceTask macro) {
+               sb.append(" {").append(macro.describeProgress()).append("}");
+            }
+         }
+         return sb.toString();
+      }
       List<Task> tasks = mod.getUserTaskChain().getTasks();
-      // ignore lookATOwner task
       return tasks.isEmpty() ? noTask
             : tasks.get(0).toString().contains("LookAtOwner") ? noTask : tasks.get(0).toString();
    }

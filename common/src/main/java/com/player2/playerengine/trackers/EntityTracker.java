@@ -248,6 +248,27 @@ public class EntityTracker extends Tracker {
       });
    }
 
+   /** Item drops within {@code radius} blocks of {@code origin} passing {@code acceptPredicate}. */
+   public List<ItemEntity> getItemDropsWithin(Vec3 origin, double radius, Predicate<ItemEntity> acceptPredicate) {
+      this.ensureUpdated();
+      double radiusSq = radius * radius;
+      List<ItemEntity> result = new ArrayList<>();
+      for (List<ItemEntity> drops : this.itemDropLocations.values()) {
+         for (ItemEntity entity : drops) {
+            if (entity.isRemoved()) {
+               continue;
+            }
+            if (!acceptPredicate.test(entity)) {
+               continue;
+            }
+            if (entity.distanceToSqr(origin) <= radiusSq) {
+               result.add(entity);
+            }
+         }
+      }
+      return result;
+   }
+
    public boolean entityFound(Predicate<Entity> shouldAccept, Class... types) {
       this.ensureUpdated();
       types = this.parsePossiblyNullEntityTypes(types);

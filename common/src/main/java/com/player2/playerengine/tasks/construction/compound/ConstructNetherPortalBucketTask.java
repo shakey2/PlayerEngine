@@ -68,12 +68,20 @@ public class ConstructNetherPortalBucketTask extends Task {
    private final TimerGame lavaSearchTimer = new TimerGame(5.0);
    private final MovementProgressChecker progressChecker = new MovementProgressChecker();
    private final TimeoutWanderTask wanderTask = new TimeoutWanderTask(5.0F);
-   private final Task collectLavaTask = TaskCatalogue.getItemTask(Items.LAVA_BUCKET, 1);
+   private Task collectLavaTask;
    private final TimerGame refreshTimer = new TimerGame(11.0);
    private BlockPos portalOrigin = null;
    private Task getToLakeTask = null;
    private BlockPos currentDestroyTarget = null;
    private boolean firstSearch = false;
+
+   private Task getCollectLavaTask() {
+      if (this.collectLavaTask == null) {
+         this.collectLavaTask = TaskCatalogue.getItemTask(Items.LAVA_BUCKET, 1);
+      }
+
+      return this.collectLavaTask;
+   }
 
    @Override
    protected void onStart() {
@@ -198,7 +206,7 @@ public class ConstructNetherPortalBucketTask extends Task {
 
                      if (!foundSpot) {
                         this.setDebugState("(timeout: Looking for lava lake)");
-                        return new TimeoutWanderTask();
+                        return new TimeoutWanderTask(); // EXPLORATION
                      }
                   }
 
@@ -212,7 +220,7 @@ public class ConstructNetherPortalBucketTask extends Task {
                            if (!mod.getItemStorage().hasItem(Items.LAVA_BUCKET) && frameBlock != Blocks.LAVA) {
                               this.setDebugState("Collecting lava");
                               this.progressChecker.reset();
-                              return this.collectLavaTask;
+                              return this.getCollectLavaTask();
                            }
 
                            if (mod.getBlockScanner().isUnreachable(framePos)) {

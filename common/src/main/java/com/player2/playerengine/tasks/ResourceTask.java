@@ -159,6 +159,10 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
          }
 
          if (this.isInWrongDimension(this.controller)) {
+            if (this.isUnderDimensionTravelTo(this.controller, this.targetDimension)) {
+               return this.onResourceTick(this.controller);
+            }
+
             this.setDebugState("Traveling to correct dimension");
             return this.getToCorrectDimensionTask(this.controller);
          } else {
@@ -205,6 +209,12 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
 
    protected Task getToCorrectDimensionTask(PlayerEngineController controller) {
       return new DefaultGoToDimensionTask(this.targetDimension);
+   }
+
+   private boolean isUnderDimensionTravelTo(PlayerEngineController controller, Dimension dimension) {
+      Task root = controller.getUserTaskChain().getCurrentTask();
+      return root != null
+         && root.containsTask(task -> task instanceof DefaultGoToDimensionTask goTo && goTo.getTarget() == dimension);
    }
 
    public ResourceTask forceDimension(Dimension dimension) {

@@ -30,7 +30,7 @@ public class ExampleTask2 extends Task {
       if (this.target != null) {
          return new GetToBlockTask(this.target);
       } else if (!mod.getBlockScanner().anyFound(Blocks.OAK_LOG)) {
-         return new TimeoutWanderTask();
+         return TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
       } else {
          Optional<BlockPos> nearest = mod.getBlockScanner().getNearestBlock(Blocks.OAK_LOG);
          if (nearest.isPresent()) {

@@ -74,7 +74,7 @@ public abstract class SearchChunksExploreTask extends Task {
    }
 
    protected Task getWanderTask() {
-      return new TimeoutWanderTask(true);
+      return new TimeoutWanderTask(true); // EXPLORATION
    }
 
    public boolean failedSearch() {

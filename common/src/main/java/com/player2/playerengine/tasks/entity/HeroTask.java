@@ -7,6 +7,7 @@ import com.player2.playerengine.tasks.movement.TimeoutWanderTask;
 import com.player2.playerengine.tasks.resources.KillAndLootTask;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.util.ItemTarget;
+import com.player2.playerengine.util.helpers.EntityHelper;
 import com.player2.playerengine.util.helpers.ItemHelper;
 import java.util.Optional;
 import net.minecraft.world.entity.Entity;
@@ -36,7 +37,7 @@ public class HeroTask extends Task {
             Iterable<Entity> hostiles = this.controller.getWorld().getAllEntities();
             if (hostiles != null) {
                for (Entity hostile : hostiles) {
-                  if (hostile instanceof Monster || hostile instanceof Slime) {
+                  if ((hostile instanceof Monster || hostile instanceof Slime) && !EntityHelper.isZombifiedPiglinFamily(hostile)) {
                      Optional<Entity> closestHostile = mod.getEntityTracker().getClosestEntity(hostile.getClass());
                      if (closestHostile.isPresent()) {
                         this.setDebugState("Killing hostiles or picking hostile drops.");
@@ -51,7 +52,7 @@ public class HeroTask extends Task {
                return new PickupDroppedItemTask(new ItemTarget(ItemHelper.HOSTILE_MOB_DROPS), true);
             } else {
                this.setDebugState("Searching for hostile mobs.");
-               return new TimeoutWanderTask();
+               return TimeoutWanderTask.bounded(mod.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
             }
          }
       }

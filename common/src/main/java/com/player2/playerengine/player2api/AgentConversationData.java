@@ -85,6 +85,12 @@ public class AgentConversationData {
     private String lastDeepCheckTriggerReason = "";
 
     /**
+     * Command name (normalized, no {@code @}) for which a "finished running" InfoMessage is already
+     * queued or awaiting an LLM response. Prevents the same completion from re-triggering API rounds.
+     */
+    private String commandAwaitingFinishAck = null;
+
+    /**
      * Per-bot TTS pacing: nanoTime() after which this specific bot is allowed to start a new
      * LLM/conversation round. Replaces the previous server-wide TTS lock so other bots can be
      * processed while this one is still "speaking" client-side.
@@ -178,6 +184,7 @@ public class AgentConversationData {
         cachedRetrievalHits = List.of();
         cachedPromptIdHash = 0;
         resetB5TurnState();
+        commandAwaitingFinishAck = null;
     }
 
     private void resetB5TurnState() {
@@ -292,7 +299,12 @@ public class AgentConversationData {
     private boolean isEventDuplicateOfLastMessage(Event evt) {
         boolean isDuplicate = eventQueue.peekLast() != null && eventQueue.peekLast().equals(evt);
         if (isDuplicate) {
-            LOGGER.warn("[EventQueueData]: evt={} was added twice!", evt.getConversationHistoryString());
+            if (evt instanceof Event.UserMessage um && um.fromVoice()) {
+                LOGGER.warn("STT/voice: duplicate user message dropped for companion={} preview=\"{}\"",
+                        getName(), com.player2.playerengine.player2api.utils.SttLogging.messagePreview(um.message()));
+            } else {
+                LOGGER.warn("[EventQueueData]: evt={} was added twice!", evt.getConversationHistoryString());
+            }
             return true;
         }
         return false;
@@ -511,6 +523,7 @@ public class AgentConversationData {
             LOGGER.error("[AICommandBridge/processChatWithAPI/onLLMResponse]: ERROR RUNNING SIDE EFFECTS, errMsg={}",
                     e.getMessage());
         } finally {
+            acknowledgeCommandFinishRoundIfComplete(lastEvent, command);
             this.isProcessing = false;
         }
     }
@@ -738,6 +751,9 @@ public class AgentConversationData {
     // --- end B3 ---
 
     public void onEvent(Event event) {
+        if (event instanceof Event.UserMessage) {
+            commandAwaitingFinishAck = null;
+        }
         addEventToQueue(event);
     }
 
@@ -756,6 +772,92 @@ public class AgentConversationData {
         addEventToQueue(mod.getAIPersistantData().getGreetingEvent());
     }
 
+    private static boolean isCommandFinishPromptMessage(String message) {
+        return message != null
+                && message.startsWith("Command feedback:")
+                && message.contains("finished running");
+    }
+
+    private static String normalizeCommandNameForFinishAck(String commandName) {
+        if (commandName == null) {
+            return "";
+        }
+        String s = commandName.trim().toLowerCase(Locale.ROOT);
+        if (s.startsWith("@")) {
+            s = s.substring(1);
+        }
+        int space = s.indexOf(' ');
+        return space > 0 ? s.substring(0, space) : s;
+    }
+
+    private static boolean isNonTaskCommandForFinishPrompt(String commandName) {
+        String base = normalizeCommandNameForFinishAck(commandName);
+        return base.contains("bodylang")
+                || "idle".equals(base)
+                || "place_sign".equals(base)
+                || "read_signs".equals(base);
+    }
+
+    private boolean shouldEnqueueCommandFinishPrompt(String commandName) {
+        if (isNonTaskCommandForFinishPrompt(commandName)) {
+            LOGGER.info("Skipping command finish prompt for non-task cmd={}", commandName);
+            return false;
+        }
+        String normalized = normalizeCommandNameForFinishAck(commandName);
+        if (commandAwaitingFinishAck != null && commandAwaitingFinishAck.equals(normalized)) {
+            LOGGER.info("Skipping duplicate command finish prompt for cmd={}", commandName);
+            return false;
+        }
+        return true;
+    }
+
+    private void enqueueCommandFinishPrompt(String commandName) {
+        enqueueCommandFinishPrompt(commandName, null);
+    }
+
+    private void enqueueCommandFinishPrompt(String commandName, String note) {
+        if (note == null || note.isBlank()) {
+            // Clean success: byte-identical to the original single-InfoMessage prompt.
+            addEventToQueue(new InfoMessage(String.format(
+                    "Command feedback: %s finished running. What shall we do next? If no new action is needed to finish user's request, generate empty command `\"\"`.",
+                    commandName)));
+        } else {
+            // Succeeded-but-degraded: same single InfoMessage, with a factual clause so the model can
+            // truthfully report the degradation instead of claiming a clean success.
+            addEventToQueue(new InfoMessage(String.format(
+                    "Command feedback: %s finished running, but: %s. What shall we do next? If no new action is needed to finish user's request, generate empty command `\"\"`.",
+                    commandName,
+                    note)));
+        }
+        commandAwaitingFinishAck = normalizeCommandNameForFinishAck(commandName);
+    }
+
+    private void acknowledgeCommandFinishRoundIfComplete(Event lastEvent, String command) {
+        if (!(lastEvent instanceof InfoMessage info) || !isCommandFinishPromptMessage(info.message())) {
+            return;
+        }
+        if (isTerminalLlmCommand(command)) {
+            LOGGER.info("Command-finish round complete (terminal LLM command); clearing finish-ack for cmd={}",
+                    commandAwaitingFinishAck);
+            commandAwaitingFinishAck = null;
+        }
+    }
+
+    private static boolean isTerminalLlmCommand(String command) {
+        if (command == null || command.isBlank()) {
+            return true;
+        }
+        String trimmed = command.trim();
+        if ("\"\"".equals(trimmed)) {
+            return true;
+        }
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("@")) {
+            lower = lower.substring(1);
+        }
+        return lower.equals("idle") || lower.startsWith("idle ");
+    }
+
     public void onCommandFinish(AgentSideEffects.CommandExecutionStopReason stopReason) {
         LOGGER.info("on command finish for cmd={}", stopReason.commandName());
         if (stopReason instanceof CommandExecutionStopReason.Finished) {
@@ -768,14 +870,13 @@ public class AgentConversationData {
             } else {
                 shouldIgnoreGreetingDance = false;
             }
-            if (eventQueue.isEmpty()) {
-
-                LOGGER.info("adding cmd={} to queue because it finished and queue not empty", stopReason.commandName());
-                addEventToQueue(new InfoMessage(String.format(
-                        "Command feedback: %s finished running. What shall we do next? If no new action is needed to finish user's request, generate empty command `\"\"`.",
-                        stopReason.commandName())));
-            } else {
-                LOGGER.info("Skipping command stop for cmd={} because queue not empty", stopReason.commandName());
+            if (!eventQueue.isEmpty()) {
+                LOGGER.info("Skipping command finish prompt for cmd={} because event queue is not empty",
+                        stopReason.commandName());
+            } else if (shouldEnqueueCommandFinishPrompt(stopReason.commandName())) {
+                LOGGER.info("Enqueueing command finish prompt for cmd={}", stopReason.commandName());
+                String note = ((CommandExecutionStopReason.Finished) stopReason).note();
+                enqueueCommandFinishPrompt(stopReason.commandName(), note);
             }
         } else if (stopReason instanceof CommandExecutionStopReason.Error) {
             LOGGER.info("adding cmd={} to queue because it errored", stopReason.commandName());

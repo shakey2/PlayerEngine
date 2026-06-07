@@ -130,7 +130,7 @@ public class ConstructNetherPortalObsidianTask extends Task {
             }
 
             this.setDebugState("Looking for portalable area...");
-            return new TimeoutWanderTask();
+            return new TimeoutWanderTask(); // EXPLORATION
          } else if (!mod.getItemStorage().hasItem(Items.FLINT_AND_STEEL)) {
             this.setDebugState("Getting flint and steel");
             return TaskCatalogue.getItemTask(Items.FLINT_AND_STEEL, 1);

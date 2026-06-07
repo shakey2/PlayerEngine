@@ -87,7 +87,7 @@ public class CollectMeatTask extends Task {
                return this.currentResourceTask;
             } else {
                this.setDebugState("Searching for animals...");
-               return new TimeoutWanderTask();
+               return TimeoutWanderTask.bounded(this.controller.getModSettings().getWanderBoundDefaultSeconds() * 1000L); // DISCRETE_RESOURCE
             }
          }
       }
