@@ -62,11 +62,22 @@ public class Player2HTTPUtils {
 
     public static Map<String, JsonElement> sendRequest(Player player, String clientId, String endpoint,
             String method, JsonObject requestBody) throws Exception {
+        return sendRequest(player, clientId, endpoint, method, requestBody, HTTPUtils.DEFAULT_READ_TIMEOUT_MS);
+    }
+
+    /**
+     * Like {@link #sendRequest(Player, String, String, String, JsonObject)} but with an explicit read
+     * timeout. Use only for calls that require a non-default ceiling — specifically background
+     * mod-intelligence ingestion (see {@link HTTPUtils#INGESTION_READ_TIMEOUT_MS}).
+     * All other callers must use the no-timeout-param overload.
+     */
+    public static Map<String, JsonElement> sendRequest(Player player, String clientId, String endpoint,
+            String method, JsonObject requestBody, int readTimeoutMs) throws Exception {
         String token = awaitToken(player, clientId);
         Map<String, String> headers = getHeaders(clientId, token);
 
         try {
-            return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers);
+            return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers, readTimeoutMs);
         } catch (HttpApiException e) {
             AuthKey authKey = new AuthKey(player.getUUID(), clientId);
 
@@ -90,7 +101,7 @@ public class Player2HTTPUtils {
                 if (!oldToken.equals(newToken)) {
                     LOGGER.info("Token changed after reauth for {}, retrying request.", authKey);
                     Map<String, String> newHeaders = getHeaders(clientId, newToken);
-                    return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, newHeaders);
+                    return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, newHeaders, readTimeoutMs);
                 }
 
                 // Same token = same account, Joules exhausted — show error and invalidate Joules cache
@@ -124,12 +135,22 @@ public class Player2HTTPUtils {
      */
     public static Map<String, JsonElement> sendRequestWithStoredToken(String username, String clientId, String endpoint,
             String method, JsonObject requestBody) throws Exception {
+        return sendRequestWithStoredToken(username, clientId, endpoint, method, requestBody, HTTPUtils.DEFAULT_READ_TIMEOUT_MS);
+    }
+
+    /**
+     * Like {@link #sendRequestWithStoredToken(String, String, String, String, JsonObject)} but with an
+     * explicit read timeout. Use only for background ingestion calls against slow local models
+     * (see {@link HTTPUtils#INGESTION_READ_TIMEOUT_MS}). All other callers use the no-timeout overload.
+     */
+    public static Map<String, JsonElement> sendRequestWithStoredToken(String username, String clientId, String endpoint,
+            String method, JsonObject requestBody, int readTimeoutMs) throws Exception {
         String token = TokenStorage.getToken(username, clientId);
         if (token == null || token.isEmpty()) {
             throw new IllegalStateException("No stored Player2 token for user " + username);
         }
         Map<String, String> headers = getHeaders(clientId, token);
-        return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers);
+        return HTTPUtils.sendRequest(getApiUrl(), endpoint, method, requestBody, headers, readTimeoutMs);
     }
 
     /**

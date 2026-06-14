@@ -23,7 +23,10 @@ public class PlayerEngineCommands {
                   new MeatCommand(),
                   new ReloadSettingsCommand(),
                   new ResetMemoryCommand(),
-                  new GamerCommand(),
+                  // DISABLED for release: "beat the game" (gamer) is broken. Registration cut so it
+                  // cannot be activated; GamerCommand/BeatMinecraftTask code left intact. Re-enable
+                  // here AND in SeedToolMetadata (doc("gamer", ...)) once fixed.
+                  // new GamerCommand(),
                   new FollowCommand(),
                   new LeaveBoatCommand(),
                   new GiveCommand(),
@@ -37,6 +40,17 @@ public class PlayerEngineCommands {
                   new SetHostileAttackCommand(),
                   new FishCommand(),
                   new ReadNearbySignsCommand(),
-                  new PlaceSignCommand());
+                  new PlaceSignCommand(),
+                  new ScanStorageCommand(),
+                  new WithdrawFromStorageCommand(),
+                  new DepositToStorageCommand(),
+                  new WithdrawStorageSlotCommand(),
+                  new DepositStorageSlotCommand(),
+                  new LocateStorageCommand(),
+                  new CreateWaypointCommand(),
+                  new DeleteWaypointCommand(),
+                  new AuditWaypointCommand(),
+                  new CompareWaypointCommand(),
+                  new LocateWaypointsCommand());
    }
 }

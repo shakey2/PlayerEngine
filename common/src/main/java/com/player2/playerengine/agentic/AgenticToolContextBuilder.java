@@ -114,7 +114,7 @@ public final class AgenticToolContextBuilder {
                 - deposit_items: move items from the bot inventory into the chest resolved by resolve_storage_chest.
                   args: itemIds (comma/space separated, e.g. "minecraft:cobblestone"), depositAll, keepTools, timeoutSeconds
                   Requires a preceding resolve_storage_chest in the same plan.
-                - label_chest: optional, best-effort. Place and write a sign on or near the labeled chest.
+                - label_chest: optional, best-effort. Place and write a sign on or near the labeled chest; crafts a sign first when none is held (if wood is obtainable).
                   args: lines (comma separated) OR line0..line3, autoLabel, signItemId, timeoutSeconds
                   Must be the LAST step and only directly after deposit_items. Never fails the run.
                 Allowed sequences only:
@@ -126,7 +126,7 @@ public final class AgenticToolContextBuilder {
                   resolve_storage_chest then deposit_items then label_chest
                   gather_loose_items then resolve_storage_chest then deposit_items then label_chest
                 Plans may have at most four steps. label_chest is optional and may be omitted.
-                Do not output register_waypoint or elliegps steps (waypoint/EllieGPS support is not available yet).
+                Waypoints are managed automatically after deposits and via the create/delete/audit/compare/locate waypoint bot commands — never output waypoint plan steps (no register_waypoint or elliegps step kinds).
                 """;
     }
 

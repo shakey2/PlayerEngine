@@ -92,7 +92,13 @@ public class AgentSideEffects {
                         mod.getActiveTrackedStep().map(e -> e.getStepKind()).orElse("unknown"));
                 return;
             }
-            mod.runUserTask(new LookAtOwnerTask());
+            // ISSUE 1 (temporary, user request): only set LookAtOwner when explicitly enabled. When gated
+            // off, @idle leaves the bot with NO user task (idles) — StatusUtils already reports LookAtOwner
+            // as "no task", so idle-as-no-task is consistent. Still early-return so @idle never falls
+            // through into command execution.
+            if (mod.getModSettings().isEnableLookAtOwnerIdle()) {
+                mod.runUserTask(new LookAtOwnerTask());
+            }
             return;
         }
 
@@ -129,8 +135,14 @@ public class AgentSideEffects {
                         } else {
                             LOGGER.info("Ignore onStop for bodylang greeting");
                         }
-                        LOGGER.info("Running look at owner task after finish cmd={}", commandWithPrefix);
-                        mod.runUserTask(new LookAtOwnerTask());
+                        // ISSUE 1: gate LookAtOwner scheduling. onStop.accept(Finished) above already ran;
+                        // skipping this leaves the bot idle (no user task), the desired behavior. The
+                        // runUserTask call is the LAST statement in this block, so the finish flow
+                        // (queue events, AliasLearning) is unaffected.
+                        if (mod.getModSettings().isEnableLookAtOwnerIdle()) {
+                            LOGGER.info("Running look at owner task after finish cmd={}", commandWithPrefix);
+                            mod.runUserTask(new LookAtOwnerTask());
+                        }
                     }
                 };
 
@@ -153,8 +165,13 @@ public class AgentSideEffects {
                                     }
                                     onStop.accept(
                                             new CommandExecutionStopReason.Error(commandWithPrefix, err.getMessage()));
-                                    LOGGER.info("Running look at owner aftr error in cmd={}", commandWithPrefix);
-                                    mod.runUserTask(new LookAtOwnerTask());
+                                    // ISSUE 1: gate LookAtOwner scheduling. onStop.accept(Error) above
+                                    // already ran; skipping this leaves the bot idle (no user task). Last
+                                    // statement in the error callback, so the error flow is unaffected.
+                                    if (mod.getModSettings().isEnableLookAtOwnerIdle()) {
+                                        LOGGER.info("Running look at owner aftr error in cmd={}", commandWithPrefix);
+                                        mod.runUserTask(new LookAtOwnerTask());
+                                    }
                                 });
 
         if (server != null && !server.isSameThread()) {

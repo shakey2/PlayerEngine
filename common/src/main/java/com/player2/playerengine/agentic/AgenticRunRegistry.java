@@ -67,6 +67,8 @@ public final class AgenticRunRegistry {
         private String depositDegradationReason = "";
         private DegradationLevel labelDegradation = DegradationLevel.CLEAN;
         private String labelDegradationReason = "";
+        private DegradationLevel waypointDegradation = DegradationLevel.CLEAN;
+        private String waypointDegradationReason = "";
 
         public AgenticRunState(String runId, String goalSummary, String planningSource) {
             this.runId = runId;
@@ -120,12 +122,24 @@ public final class AgenticRunRegistry {
             this.labelDegradationReason = reason != null ? reason : "";
         }
 
+        /**
+         * Records a waypoint-registration degradation (SKIPPED or PARTIAL) in the run state.
+         * Called by {@code WaypointAutoRegistrar} when auto-registration is skipped or fails.
+         * Never called on clean auto-registration success (the milestone player line is sufficient).
+         */
+        public void setWaypointDegraded(DegradationLevel level, String reason) {
+            this.waypointDegradation = level != null ? level : DegradationLevel.CLEAN;
+            this.waypointDegradationReason = reason != null ? reason : "";
+        }
+
         public DegradationLevel getGatherDegradation() { return gatherDegradation; }
         public String getGatherDegradationReason() { return gatherDegradationReason; }
         public DegradationLevel getDepositDegradation() { return depositDegradation; }
         public String getDepositDegradationReason() { return depositDegradationReason; }
         public DegradationLevel getLabelDegradation() { return labelDegradation; }
         public String getLabelDegradationReason() { return labelDegradationReason; }
+        public DegradationLevel getWaypointDegradation() { return waypointDegradation; }
+        public String getWaypointDegradationReason() { return waypointDegradationReason; }
 
         /**
          * Returns the most relevant per-step progress note for the given step kind, used to surface

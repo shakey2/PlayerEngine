@@ -477,7 +477,7 @@ public class TaskCatalogue {
       String p = "planks";
       String s = "stick";
       String o = null;
-      mine("log", MiningRequirement.HAND, ItemHelper.LOG, ItemHelper.LOG).anyDimension();
+      mine("log", MiningRequirement.HAND, ItemHelper.NATURAL_LOG, ItemHelper.NATURAL_LOG).anyDimension();
       woodTasks(
          "log", wood -> wood.log, (wood, count) -> new MineAndCollectTask(wood.log, count, new Block[]{Block.byItem(wood.log)}, MiningRequirement.HAND), true
       );

@@ -37,6 +37,11 @@ public final class Player2ServerConfigHolder {
                 cached.isRagLiveEnabled(), cached.getRagTopKClamped(), cached.isRagFallbackToFullList(),
                 cached.getRagMinGoalCharsClamped());
         LOGGER.info("Player2 TTS pacing config: botTtsPlaybackAckEnabled={}", cached.isBotTtsPlaybackAckEnabled());
+        LOGGER.info("Player2 ModIntelligence config: enabled={} enrichmentEnabled={} maxEnrichmentCallsPerLaunch={} maxEnrichmentFailuresPerLaunch={}",
+                cached.isModIntelligenceEnabled(), cached.isModIntelligenceEnrichmentEnabled(),
+                cached.getModIntelligenceMaxEnrichmentCallsPerLaunch() <= 0
+                        ? "unlimited" : cached.getModIntelligenceMaxEnrichmentCallsPerLaunch(),
+                cached.getModIntelligenceMaxEnrichmentFailuresPerLaunch());
     }
 
     public static void save() {
@@ -108,8 +113,8 @@ public final class Player2ServerConfigHolder {
             c.setModIntelligenceMaxInspectEntriesPerLaunch(5000);
         }
         int enrichCalls = c.getModIntelligenceMaxEnrichmentCallsPerLaunch();
-        if (enrichCalls < 0 || enrichCalls > 1000) {
-            LOGGER.warn("Player2 config: modIntelligenceMaxEnrichmentCallsPerLaunch out of range 0–1000 (got {}); using 50.", enrichCalls);
+        if (enrichCalls < 0) {
+            LOGGER.warn("Player2 config: modIntelligenceMaxEnrichmentCallsPerLaunch is negative (got {}); using 50. Use 0 for unlimited.", enrichCalls);
             c.setModIntelligenceMaxEnrichmentCallsPerLaunch(50);
         }
         int enrichFails = c.getModIntelligenceMaxEnrichmentFailuresPerLaunch();

@@ -4,12 +4,15 @@ import com.player2.playerengine.TaskCatalogue;
 import com.player2.playerengine.agentic.AgenticExecutionContext;
 import com.player2.playerengine.agentic.AgenticStorageTarget;
 import com.player2.playerengine.agentic.StorageTargetSource;
+import com.player2.playerengine.agentic.elliegps.WaypointOriginClassifier;
+import com.player2.playerengine.agentic.elliegps.WaypointOriginEvidence;
 import com.player2.playerengine.agentic.steps.ResolveStorageChestParams;
 import com.player2.playerengine.agentic.storage.ChestPlacementCandidate;
 import com.player2.playerengine.agentic.storage.ChestPlacementSelector;
 import com.player2.playerengine.agentic.storage.StorageChestCandidate;
 import com.player2.playerengine.agentic.storage.StorageChestScanner;
 import com.player2.playerengine.agentic.storage.StorageChestValidation;
+import com.player2.playerengine.containeraccess.ContainerResolver;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.tasks.construction.PlaceItemBlockAtPosTask;
 import com.player2.playerengine.tasks.crafting.CraftMacroResourceTask;
@@ -23,6 +26,7 @@ import com.player2.playerengine.util.helpers.WorldHelper;
 import java.util.Locale;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.Vec3;
@@ -46,6 +50,22 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
     private Phase phase = Phase.SCANNING_EXISTING;
     private boolean finished;
     private long startMs;
+    // ISSUE 1 (from-scratch chest-craft timeout): the absolute params.timeoutSeconds() clock starts at
+    // onStart and includes the scan/overhead phase, so a legitimate from-scratch chest craft (gather 3
+    // logs from the surface in a void world + craft table + craft chest + place) could exhaust the budget
+    // while the underlying CraftMacro was still validly progressing -- aborting the whole agentic chain
+    // (and with it the lost label step). Fix: a PROGRESS-REFRESHED deadline. lastProgressMs is reset to
+    // "now" whenever the obtain CraftMacro advances a phase OR its still-needed external held count rises;
+    // the timeout only fires when no such progress has occurred for params.timeoutSeconds(). A genuine
+    // stall is still bounded -- the CraftMacro's own collectNoGain (~60s) / collect-stall (~15s) /
+    // table-approach (~15s) / attempt-cap terminations fire first in practice, and MAX_OBTAIN_ATTEMPTS
+    // caps the obtain loop -- so this never introduces an infinite hang; it only stops a PROGRESSING
+    // craft from being killed by the absolute wall clock. Outside ENSURING_CHEST_ITEM (scan/move/place)
+    // the original absolute clock is unchanged. lastObservedMacroPhase / lastObservedHeld are the
+    // change-detection trackers.
+    private long lastProgressMs;
+    private CraftMacroPhase lastObservedMacroPhase;
+    private int lastObservedHeld = -1;
     private Task child;
     private StorageChestCandidate existingCandidate;
     private ChestPlacementCandidate placementCandidate;
@@ -74,6 +94,13 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
     // total-elapsed clock.
     private static final double OBTAIN_STUCK_GIVE_UP_SECONDS = 25.0;
     private long obtainWanderStartMs = -1;
+    // ISSUE 2 (DESIGN.md §3 truthfulness): the most-specific real reason from a chest-obtain CraftMacro
+    // child that stopped WITHOUT producing a chest (e.g. "Failed to collect required materials for craft
+    // macro (materials unreachable)"). Captured BEFORE the child is nulled, and surfaced by terminateFailed
+    // to BOTH the player chat line and the model command-completion feedback instead of the generic
+    // "no_chest_item" / "could not obtain a chest". Keep the LAST/most-specific reason across the up-to-4
+    // obtain attempts; only read when the obtain ultimately fails (irrelevant if a later attempt succeeds).
+    private String lastObtainFailureReason = null;
 
     public ResolveStorageChestTask(ResolveStorageChestParams params, AgenticExecutionContext context) {
         this.params = params;
@@ -97,6 +124,7 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
     @Override
     protected void onStart() {
         this.startMs = System.currentTimeMillis();
+        this.lastProgressMs = this.startMs;
         updateProgress("scanning for nearby chest");
         report("scanning for a nearby chest", false);
     }
@@ -111,9 +139,25 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
         }
         // Enforce the overall deadline before (potentially) returning an active child, so the
         // resolve step always terminates finitely even while a child task is running.
-        if (elapsedSec() >= params.timeoutSeconds()) {
-            terminateFailed("timeout");
-            return null;
+        //
+        // ISSUE 1: the deadline is PROGRESS-REFRESHED while an obtain CraftMacro is genuinely advancing,
+        // so a legitimate from-scratch chest craft (slow surface gather + table + chest + place) is not
+        // killed by the absolute wall clock. detectAndRefreshMacroProgress resets lastProgressMs on each
+        // CraftMacro phase advance or external held-count gain. The timeout fires only when no such
+        // progress has occurred for params.timeoutSeconds(); a genuine stall stays bounded by the macro's
+        // own collectNoGain/collect-stall/table-approach/attempt-cap terminations (which fire first) and
+        // by MAX_OBTAIN_ATTEMPTS. Outside ENSURING_CHEST_ITEM the timer is never refreshed, so the
+        // scan/move/place phases keep the original absolute behavior.
+        boolean macroMakingProgress = phase == Phase.ENSURING_CHEST_ITEM
+                && child instanceof CraftMacroResourceTask macro
+                && macro.getPhase() != CraftMacroPhase.DONE
+                && detectAndRefreshMacroProgress(macro);
+        if (!macroMakingProgress) {
+            double idleSec = (System.currentTimeMillis() - lastProgressMs) / 1000.0;
+            if (idleSec >= params.timeoutSeconds()) {
+                terminateFailed("timeout");
+                return null;
+            }
         }
         if (child != null) {
             if (child.isActive() && !child.stopped()) {
@@ -142,6 +186,11 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
                     return child;
                 }
             }
+            // ISSUE 2: before discarding the obtain child, if it was a CraftMacro that stopped WITHOUT
+            // producing a chest, capture its REAL failure reason so terminateFailed can report the true
+            // cause (e.g. "materials unreachable") rather than the generic "no_chest_item". Keep the
+            // last/most-specific non-blank reason across obtain attempts.
+            captureObtainFailureReason();
             child = null;
         }
 
@@ -171,7 +220,8 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
             return null;
         }
         StorageChestScanner.ScanResult scan = StorageChestScanner.scan(this.controller, params);
-        if (scan.best().isPresent()) {
+        if (scan.best().isPresent()
+                && !beyondTravelCap(scan.best().get().pos())) {
             existingCandidate = scan.best().get();
             targetPos = existingCandidate.pos();
             targetSource = existingCandidate.source();
@@ -236,6 +286,23 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
         updateProgress("obtaining chest item (catalogue)");
         child = TaskCatalogue.getItemTask(Items.CHEST, 1);
         return child;
+    }
+
+    /**
+     * ISSUE 2: when the current obtain child is a CraftMacro that has stopped/finished WITHOUT producing a
+     * chest, record its specific {@link CraftMacroResourceTask#getFailureReason()} into
+     * {@link #lastObtainFailureReason} so the eventual {@link #terminateFailed} can surface the true cause
+     * to both the player and the model. No-op when a chest WAS produced (the obtain succeeded) or the
+     * macro recorded no reason (fall back to the generic vocabulary). Keeps the last non-blank reason.
+     */
+    private void captureObtainFailureReason() {
+        if (child instanceof CraftMacroResourceTask macro
+                && !this.controller.getItemStorage().hasItem(Items.CHEST)) {
+            String reason = macro.getFailureReason();
+            if (reason != null && !reason.isBlank()) {
+                this.lastObtainFailureReason = reason;
+            }
+        }
     }
 
     /** Craft-macro children must actually produce a chest, not merely satisfy {@link com.player2.playerengine.tasks.ResourceTask#isFinished()}. */
@@ -308,20 +375,65 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
         if (targetPos == null || context == null) {
             return;
         }
+        ServerLevel level = this.controller.getWorld();
         String blockId = ItemHelper.stripItemName(
-                this.controller.getWorld().getBlockState(targetPos).getBlock().asItem());
+                level.getBlockState(targetPos).getBlock().asItem());
+        long gameTime = level.getGameTime();
+        boolean botPlaced = targetSource == StorageTargetSource.PLACED_BY_BOT;
         AgenticStorageTarget target = new AgenticStorageTarget(
                 targetPos,
-                this.controller.getWorld().dimension().location().toString(),
+                level.dimension().location().toString(),
                 blockId,
                 targetSource,
-                targetSource == StorageTargetSource.PLACED_BY_BOT,
-                this.controller.getWorld().getGameTime());
+                botPlaced,
+                gameTime);
         context.memory().setStorageTarget(target);
         if (context.runState() != null) {
             context.runState().setStorageTargetSummary(
                     formatPos(targetPos) + " " + targetSource.name().toLowerCase(Locale.ROOT));
         }
+
+        // C5 WS3: capture placement-origin evidence BEFORE any deposit opens the container.
+        // This preserves the Tier 2 worldgen loot-table marker (Decision 4 / scan-order invariant).
+        // The evidence is read by WaypointAutoRegistrar.afterDeposit (WS6) to decide whether to
+        // auto-register this chest as an EllieGPS waypoint.
+        WaypointOriginEvidence evidence;
+        if (botPlaced) {
+            // Tier 1 (certain positive): the bot just placed this chest; no worldgen question.
+            evidence = WaypointOriginEvidence.botPlaced(gameTime);
+        } else {
+            // Tier 2 + Tier 3: resolve canonical/secondary positions for double-chest awareness,
+            // then run the classifier. ContainerResolver.resolve() does not call getItem() and
+            // therefore does not trigger unpackLootTable() — the Tier 2 marker is preserved.
+            //
+            // IMPORTANT (Decision 4): the classifier must receive the RESOLUTION's canonical
+            // position, not the raw targetPos. When targetPos is the non-canonical half of a
+            // double chest, canonicalPos is the OTHER half — passing targetPos as "canonical"
+            // would check the same half twice and leave the real canonical half's loot-table
+            // field un-checked, letting a worldgen double loot chest slip through.
+            BlockPos canonical = null;
+            BlockPos secondary = null;
+            try {
+                ContainerResolver.Resolution res = ContainerResolver.resolve(level, targetPos);
+                if (res.ok() && res.resolved() != null) {
+                    canonical = res.resolved().canonicalPos();
+                    secondary = res.resolved().secondaryPos();
+                }
+            } catch (Exception e) {
+                // Resolve failed; canonical stays null and we fall through to the
+                // conservative UNKNOWN evidence below (Decision 4 conservative default).
+            }
+            if (canonical == null) {
+                // Could not resolve the container: Tier 2 cannot be evaluated reliably, so
+                // capture UNKNOWN evidence directly (do-not-register conservative default)
+                // rather than classifying the unresolved raw position.
+                evidence = new WaypointOriginEvidence(
+                        false, WaypointOriginEvidence.Verdict.UNKNOWN, "origin_unverified", gameTime);
+            } else {
+                evidence = WaypointOriginClassifier.buildEvidence(level, canonical, secondary, gameTime);
+            }
+        }
+        context.memory().setWaypointOriginEvidence(evidence);
     }
 
     private void succeed(String message) {
@@ -341,12 +453,27 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
         if (child != null && !child.stopped()) {
             child.stop(this);
         }
+        // ISSUE 2: catch a macro that just stopped without a chest but whose reason was not yet captured
+        // (e.g. terminateFailed invoked directly off the MAX_OBTAIN_ATTEMPTS / selecting paths).
+        captureObtainFailureReason();
         child = null;
-        updateProgress(reason);
+        // ISSUE 2 (DESIGN.md §3): when the obtain failed and we captured the CraftMacro's real reason,
+        // surface THAT to both audiences instead of the generic code. The player line is humanized; the
+        // model feedback is the SAME string the executor reads back via runState.progressForKind (set by
+        // updateProgress below), so both player and model receive the accurate cause. Fall back to the
+        // generic vocabulary when no specific macro reason was captured (no regression to empty messages).
+        boolean obtainFailure = "no_chest_item".equals(reason)
+                || "could_not_obtain_chest_materials".equals(reason);
+        String humanReason = (obtainFailure && lastObtainFailureReason != null
+                && !lastObtainFailureReason.isBlank())
+                ? humanizeObtainReason(lastObtainFailureReason)
+                : describeResolveFailure(reason);
+        updateProgress(humanReason);
         // Mid-step actionable note (milestone -> bypasses throttle). Emitted here, before the executor's
         // terminal("failed", ...) runs, so the run-state terminal guard does not suppress it.
-        report("could not resolve chest: " + describeResolveFailure(reason), true);
-        this.controller.log("[Agentic] resolve_storage_chest failed: " + reason);
+        report("could not resolve chest: " + humanReason, true);
+        this.controller.log("[Agentic] resolve_storage_chest failed: " + reason
+                + (lastObtainFailureReason != null ? " (obtain: " + lastObtainFailureReason + ")" : ""));
         // Self-stop so SingleTaskChain takes the forced-stop path (stopped()==true while
         // isFinished()==false) and reaches onTaskFinish; the adapter then records FAILED and
         // AgenticPlanExecutor surfaces terminal("failed", ...). phase is FAILED above so the
@@ -355,6 +482,31 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
         if (!this.stopped()) {
             this.stop(this);
         }
+    }
+
+    /**
+     * ISSUE 2: turn the CraftMacro's raw failure reason into a chest-obtain-specific, player-readable line
+     * that is also informative to the model. The macro's canonical "materials unreachable" string maps to
+     * the wood-specific message the user asked for; any other captured reason is passed through prefixed so
+     * the true cause still reaches both audiences (DESIGN.md §3) rather than the generic "could not obtain
+     * a chest". Static + side-effect-free so it is trivially port-identical to 1.21.1.
+     */
+    private static String humanizeObtainReason(String macroReason) {
+        // Demand-driven provisioning reasons are already enumerated, human-readable, and truthful (they
+        // name the output and the owed externals WITH counts). Pass them through BEFORE the legacy broad
+        // contains() keys below — those would otherwise shadow the enumerated reason back into the
+        // untruthful generic "couldn't get enough wood" line (the 2026-06-09 evening playtest claimed
+        // exactly that while the bot held 28 plank-equivalents). Ordering is load-bearing.
+        if (macroReason.startsWith("Cannot finish crafting")
+                || macroReason.startsWith("Cannot obtain materials for")) {
+            return macroReason;
+        }
+        String r = macroReason.toLowerCase(Locale.ROOT);
+        if (r.contains("materials unreachable") || r.contains("collect required materials")
+                || r.contains("collect materials")) {
+            return "couldn't get enough wood to craft a chest";
+        }
+        return "couldn't craft a chest: " + macroReason;
     }
 
     /** Maps a resolve failure-vocabulary code to a concise player-readable cause. Reuses, never redefines. */
@@ -398,8 +550,84 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
         return (System.currentTimeMillis() - startMs) / 1000.0;
     }
 
+    /**
+     * ISSUE 1: refresh the progress-deadline clock whenever the obtain {@link CraftMacroResourceTask} is
+     * demonstrably advancing, and report whether progress is recent enough that the timeout must NOT fire.
+     *
+     * <p>Two progress signals, both read without reaching into macro internals (no new public macro API):
+     * <ul>
+     *   <li>a CraftMacro <b>phase advance</b> ({@code COLLECT -> CRAFT -> FIND/MOVE/LOOK -> CRAFT_3X3 -> DONE});</li>
+     *   <li>a rise in the bot's held count of chest-craft materials (logs + planks + crafting tables +
+     *       chests) — this covers a long single-phase {@code COLLECT} where the bot is slowly gathering
+     *       logs from the surface (the live failure: held flat at 0 for ~151s while pathing up from y=-58
+     *       and the absolute clock fired). As each log/plank/table/chest enters inventory the count rises
+     *       and the clock resets.</li>
+     * </ul>
+     *
+     * <p>On either signal {@code lastProgressMs} is set to now. Returns true when the most recent progress
+     * was within {@code params.timeoutSeconds()} (so the macro is "making progress" and the timeout is
+     * suppressed this tick). A genuinely stalled macro (no phase advance, no material gain) stops resetting
+     * the clock, so the idle-deadline in {@link #onTick} fires bounded — and in practice the macro's own
+     * collectNoGain (~60s) / collect-stall (~15s) / table-approach (~15s) / craft-fail caps terminate the
+     * child first, then {@link #MAX_OBTAIN_ATTEMPTS} bounds the obtain loop. No infinite hang is introduced.
+     */
+    private boolean detectAndRefreshMacroProgress(CraftMacroResourceTask macro) {
+        long now = System.currentTimeMillis();
+        boolean advanced = false;
+        CraftMacroPhase macroPhase = macro.getPhase();
+        if (macroPhase != lastObservedMacroPhase) {
+            lastObservedMacroPhase = macroPhase;
+            advanced = true;
+        }
+        int held = chestCraftMaterialHeld();
+        if (held > lastObservedHeld) {
+            advanced = true;
+        }
+        if (held != lastObservedHeld) {
+            lastObservedHeld = held;
+        }
+        if (advanced) {
+            this.lastProgressMs = now;
+        }
+        return (now - lastProgressMs) / 1000.0 < params.timeoutSeconds();
+    }
+
+    /**
+     * ISSUE 1 helper: total held count of the materials a from-scratch chest craft passes through
+     * (logs -> planks -> crafting table; output chest). A rise here is real craft progress regardless of
+     * which CraftMacro phase reports it. Read-only; no model call, no world scan.
+     */
+    private int chestCraftMaterialHeld() {
+        var storage = this.controller.getItemStorage();
+        return storage.getItemCount(ItemHelper.LOG)
+                + storage.getItemCount(ItemHelper.PLANKS)
+                + storage.getItemCount(Items.CRAFTING_TABLE)
+                + storage.getItemCount(Items.CHEST);
+    }
+
     private static String formatPos(BlockPos pos) {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
+
+    /**
+     * Issue B (immersion): true when {@code target} is farther than the configured agentic travel cap
+     * (default 96 blocks / 6 chunks) from the bot. An auto-discovered existing chest beyond the cap is
+     * rejected so the bot does not path to a chest a player could not see/reach. The storage searchRadius
+     * (default 20) already bounds the scan well under this cap; this guard makes the intent explicit and
+     * holds even if searchRadius is widened. EllieGPS marked-chest recall (planned) will bypass this cap
+     * for chests the player explicitly marked.
+     */
+    private boolean beyondTravelCap(BlockPos target) {
+        double cap = this.controller.getModSettings().getAgenticMaxTravelRadius();
+        double capSq = cap * cap;
+        Vec3 origin = this.controller.getPlayer().position();
+        boolean beyond = origin.distanceToSqr(
+                target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5) > capSq;
+        if (beyond) {
+            this.controller.log("[Agentic] resolve_storage_chest: ignoring existing chest at "
+                    + formatPos(target) + " beyond travel cap " + (int) cap + " blocks");
+        }
+        return beyond;
     }
 
     @Override

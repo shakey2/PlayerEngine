@@ -10,7 +10,12 @@ import com.player2.playerengine.player2api.ConversationHistory;
 import com.player2.playerengine.player2api.Player2APIService;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.tasks.construction.PlaceSignTask;
+import com.player2.playerengine.tasks.crafting.CraftMacroPhase;
+import com.player2.playerengine.tasks.crafting.CraftMacroResourceTask;
+import com.player2.playerengine.tasks.crafting.CraftMacroTasks;
 import com.player2.playerengine.tasks.crafting.DescribesProgress;
+import com.player2.playerengine.util.ItemTarget;
+import com.player2.playerengine.util.helpers.ItemHelper;
 import com.player2.playerengine.util.helpers.WorldHelper;
 import com.player2.playerengine.util.sign.SignScanSupport;
 import java.util.List;
@@ -30,17 +35,21 @@ import net.minecraft.world.level.block.state.BlockState;
  * Best-effort optional {@code label_chest} step (Part C3, Workstream 3).
  *
  * <p>After a successful deposit, this places and writes a sign on or near the C2-resolved chest.
+ * When no sign is held it first attempts to CRAFT one via the same craft-macro path {@code get sign}
+ * uses (species fundability pick at macro creation; see {@code CraftMacroSupport}), with a
+ * progress-refreshed craft deadline borrowed from {@code ResolveStorageChestTask} ISSUE 1.
  * It follows the {@link GatherLooseItemsTask} PARTIAL/best-effort pattern, NOT the
  * {@code ResolveStorageChestTask} self-stop-on-failure pattern: <b>every</b> terminal path ends
- * {@code finished=true} (SUCCEEDED) with a degradation note in run state. It must never
- * {@code this.stop(this)} to FAILED, and it must never block or revert the deposit. The executor's
- * halt-on-first-failure semantics are honored by always reporting SUCCEEDED here.
+ * {@code finished=true} (SUCCEEDED) with a degradation note in run state — including every craft
+ * outcome. It must never {@code this.stop(this)} to FAILED, and it must never block or revert the
+ * deposit. The executor's halt-on-first-failure semantics are honored by always reporting SUCCEEDED here.
  */
 public final class LabelChestTask extends Task implements DescribesProgress {
 
     private enum Phase {
         READING_TARGET,
         CHECK_SIGN_ITEM,
+        CRAFTING_SIGN,
         SELECT_ANCHOR,
         PLACING,
         DONE
@@ -62,6 +71,22 @@ public final class LabelChestTask extends Task implements DescribesProgress {
     private BlockPos anchor;
     private Direction faceTowardAir;
     private PlaceSignTask placeChild;
+    // Sign-craft child (CRAFTING_SIGN phase): the SAME craft-macro path "get sign 1" uses, so the
+    // species fundability pick and funding-aware recipes run at macro creation with fresh
+    // post-chest/table inventory + vicinity state. Single bounded attempt; any failure degrades to
+    // a skip (best-effort umbrella preserved).
+    private Task craftChild;
+    // Progress-refreshed craft deadline, mirroring ResolveStorageChestTask ISSUE 1: an absolute
+    // params.timeoutSeconds() clock (planner default 60s) would kill any legitimate from-scratch
+    // sign craft (mine 2 logs, possibly craft+place a table, planks, sticks, sign). While the craft
+    // macro child is demonstrably advancing (phase advance OR held material gain) lastProgressMs is
+    // reset to now; the timeout only fires after timeoutSeconds with NO such progress. A genuine
+    // stall stays bounded by the macro's own collectNoGain/collect-stall/table-approach/attempt-cap
+    // terminations, which fire first in practice. Outside CRAFTING_SIGN the clock is never
+    // refreshed, so the other phases keep effectively-absolute behavior.
+    private long lastProgressMs;
+    private CraftMacroPhase lastObservedMacroPhase;
+    private int lastObservedHeld = -1;
     private boolean placeOutcomeRecorded;
     private String lastMessage = "";
 
@@ -90,6 +115,7 @@ public final class LabelChestTask extends Task implements DescribesProgress {
     @Override
     protected void onStart() {
         this.startMs = System.currentTimeMillis();
+        this.lastProgressMs = this.startMs;
         this.phase = Phase.READING_TARGET;
         // Respect the feature toggle: if labeling is disabled, no-op SUCCEEDED immediately.
         if (!context.settings().isAgenticEnableLabelChest()) {
@@ -105,15 +131,29 @@ public final class LabelChestTask extends Task implements DescribesProgress {
         if (finished) {
             return null;
         }
-        // Timeout enforced FIRST, even while the place child is active. Always SUCCEEDED.
-        if (elapsedSec() >= params.timeoutSeconds()) {
-            finishWithWarning("label_timeout");
-            return null;
+        // Timeout enforced FIRST, even while a child is active. Always SUCCEEDED. The deadline is
+        // PROGRESS-REFRESHED while the sign-craft macro is genuinely advancing (ResolveStorageChestTask
+        // ISSUE 1 pattern — see the field comment on lastProgressMs); outside CRAFTING_SIGN it behaves
+        // like the original absolute clock. A craft-phase expiry reports a craft-specific reason so
+        // both audiences know a craft was attempted (DESIGN.md §3), never plain "label_timeout".
+        boolean macroMakingProgress = phase == Phase.CRAFTING_SIGN
+                && craftChild instanceof CraftMacroResourceTask macro
+                && macro.getPhase() != CraftMacroPhase.DONE
+                && detectAndRefreshMacroProgress(macro);
+        if (!macroMakingProgress) {
+            double idleSec = (System.currentTimeMillis() - lastProgressMs) / 1000.0;
+            if (idleSec >= params.timeoutSeconds()) {
+                finishWithWarning(phase == Phase.CRAFTING_SIGN
+                        ? "sign_craft_failed: no craft progress, timed out"
+                        : "label_timeout");
+                return null;
+            }
         }
 
         return switch (phase) {
             case READING_TARGET -> tickReadingTarget();
             case CHECK_SIGN_ITEM -> tickCheckSignItem();
+            case CRAFTING_SIGN -> tickCraftingSign();
             case SELECT_ANCHOR -> tickSelectAnchor();
             case PLACING -> tickPlacing();
             case DONE -> null;
@@ -147,15 +187,117 @@ public final class LabelChestTask extends Task implements DescribesProgress {
         } else {
             resolved = findFirstSignItemInInventory(this.controller);
         }
-        // Do NOT craft a sign: the best-effort step must never block the run.
+        // No sign held: do NOT give up — craft one via the SAME macro path "get sign 1" uses
+        // (CraftMacroTasks.tryCreateMacroTask), so the species fundability pick runs at macro
+        // creation with fresh post-chest/table inventory + vicinity state. Still best-effort: any
+        // craft failure degrades to a skip in tickCraftingSign, never a FAILED run.
         if (resolved == Items.AIR || !(resolved instanceof SignItem)) {
-            finishWithWarning("no_sign_item");
+            this.phase = Phase.CRAFTING_SIGN;
+            updateProgress();
             return null;
         }
         this.signItem = resolved;
         this.phase = Phase.SELECT_ANCHOR;
         updateProgress();
         return null;
+    }
+
+    /**
+     * Obtain a sign via the existing craft pipeline (the same {@link CraftMacroTasks} path the chat
+     * command {@code get sign 1} uses), following the {@code ResolveStorageChestTask}
+     * ENSURING_CHEST_ITEM precedent for "agentic step drives a craft macro as child task". One
+     * bounded attempt; every exit stays inside the best-effort umbrella: a sign in inventory
+     * advances to SELECT_ANCHOR, anything else degrades to a skip with a truthful
+     * {@code sign_craft_failed: <underlying reason>} note for BOTH audiences (DESIGN.md §3) —
+     * never plain "no_sign_item", which would hide that a craft was attempted.
+     */
+    private Task tickCraftingSign() {
+        // A sign can appear mid-craft (or via pickup); take it the moment it exists.
+        Item held = findFirstSignItemInInventory(this.controller);
+        if (held instanceof SignItem) {
+            this.signItem = held;
+            stopCraftChild();
+            this.phase = Phase.SELECT_ANCHOR;
+            updateProgress();
+            return null;
+        }
+        if (craftChild != null) {
+            if (craftChild.isActive() && !craftChild.stopped() && !isSignCraftChildComplete()) {
+                return craftChild;
+            }
+            // Craft child terminal WITHOUT a sign: the macro's bounded UNOBTAINABLE terminate
+            // (no fundable species), a craft failure, or a self-stop. Surface its REAL recorded
+            // reason, falling back to a generic-but-truthful note when none was recorded.
+            String reason = craftChild instanceof CraftMacroResourceTask macro
+                    && macro.getFailureReason() != null && !macro.getFailureReason().isBlank()
+                    ? macro.getFailureReason()
+                    : "craft did not produce a sign";
+            finishWithWarning("sign_craft_failed: " + reason);
+            return null;
+        }
+        // Generic "sign" request: CraftMacroSupport.pickSignSpecies resolves the species
+        // deterministically from what is fundable RIGHT NOW. A null macro means fast-craft macros
+        // are disabled in settings — a non-craft skip with its own truthful code.
+        Task macro = CraftMacroTasks.tryCreateMacroTask(this.controller, new ItemTarget("sign", 1));
+        if (macro == null) {
+            finishWithWarning("sign_craft_unavailable");
+            return null;
+        }
+        craftChild = macro;
+        updateProgress();
+        report("crafting a sign to label the chest", false);
+        return craftChild;
+    }
+
+    /** Craft-macro children are terminal at phase DONE (sign-in-hand success is caught earlier in the tick). */
+    private boolean isSignCraftChildComplete() {
+        if (craftChild instanceof CraftMacroResourceTask macro) {
+            return macro.getPhase() == CraftMacroPhase.DONE;
+        }
+        return craftChild.isFinished();
+    }
+
+    /**
+     * Mirror of {@code ResolveStorageChestTask.detectAndRefreshMacroProgress} (ISSUE 1): refresh the
+     * progress-deadline clock whenever the sign-craft {@link CraftMacroResourceTask} is demonstrably
+     * advancing — a macro phase advance, or a rise in held sign-craft materials (logs/planks/sticks/
+     * tables/signs entering inventory during a long single-phase COLLECT). Returns true when the most
+     * recent progress was within {@code params.timeoutSeconds()}, suppressing the timeout this tick.
+     * A genuinely stalled macro stops resetting the clock, so the deadline stays bounded.
+     */
+    private boolean detectAndRefreshMacroProgress(CraftMacroResourceTask macro) {
+        long now = System.currentTimeMillis();
+        boolean advanced = false;
+        CraftMacroPhase macroPhase = macro.getPhase();
+        if (macroPhase != lastObservedMacroPhase) {
+            lastObservedMacroPhase = macroPhase;
+            advanced = true;
+        }
+        int held = signCraftMaterialHeld();
+        if (held > lastObservedHeld) {
+            advanced = true;
+        }
+        if (held != lastObservedHeld) {
+            lastObservedHeld = held;
+        }
+        if (advanced) {
+            this.lastProgressMs = now;
+        }
+        return (now - lastProgressMs) / 1000.0 < params.timeoutSeconds();
+    }
+
+    /**
+     * Total held count of the materials a from-scratch sign craft passes through (logs -> planks ->
+     * sticks / crafting table; output sign). A rise here is real craft progress regardless of which
+     * CraftMacro phase reports it. Read-only; no model call, no world scan.
+     */
+    private int signCraftMaterialHeld() {
+        var storage = this.controller.getItemStorage();
+        return storage.getItemCount(ItemHelper.LOG)
+                + storage.getItemCount(ItemHelper.PLANKS)
+                + storage.getItemCount(Items.STICK)
+                + storage.getItemCount(Items.CRAFTING_TABLE)
+                + storage.getItemCount(ItemHelper.WOOD_SIGN);
     }
 
     private Task tickSelectAnchor() {
@@ -377,10 +519,17 @@ public final class LabelChestTask extends Task implements DescribesProgress {
 
     /** Maps a label degradation code to a concise player-readable cause. Reuses, never redefines. */
     private static String describeLabelDegradation(String reason) {
+        // sign_craft_failed carries a dynamic underlying reason -> match by prefix, keep the cause.
+        if (reason.startsWith("sign_craft_failed: ")) {
+            return "tried to craft a sign but couldn't ("
+                    + reason.substring("sign_craft_failed: ".length()) + ")";
+        }
         return switch (reason) {
             case "label_disabled" -> "labeling disabled";
             case "label_timeout" -> "timed out";
+            // Legacy/defensive: the no-sign path now crafts (see sign_craft_* codes).
             case "no_sign_item" -> "no sign item";
+            case "sign_craft_unavailable" -> "no sign item and sign crafting is disabled";
             case "no_label_anchor" -> "no spot for a sign";
             case "no_storage_target_for_label" -> "no chest to label";
             case "interrupted" -> "interrupted";
@@ -393,6 +542,14 @@ public final class LabelChestTask extends Task implements DescribesProgress {
             placeChild.stop(this);
         }
         placeChild = null;
+        stopCraftChild();
+    }
+
+    private void stopCraftChild() {
+        if (craftChild != null && !craftChild.stopped()) {
+            craftChild.stop(this);
+        }
+        craftChild = null;
     }
 
     private void updateProgress() {
@@ -415,10 +572,6 @@ public final class LabelChestTask extends Task implements DescribesProgress {
             return;
         }
         context.controller().reportAgenticProgress(message, milestone);
-    }
-
-    private double elapsedSec() {
-        return (System.currentTimeMillis() - startMs) / 1000.0;
     }
 
     private static String formatPos(BlockPos pos) {
@@ -473,6 +626,11 @@ public final class LabelChestTask extends Task implements DescribesProgress {
                 placeChild.stop(interruptTask);
             }
             placeChild = null;
+            // The sign-craft child gets the same clean best-effort stop as the place child.
+            if (craftChild != null && !craftChild.stopped()) {
+                craftChild.stop(interruptTask);
+            }
+            craftChild = null;
             updateProgress();
         }
     }

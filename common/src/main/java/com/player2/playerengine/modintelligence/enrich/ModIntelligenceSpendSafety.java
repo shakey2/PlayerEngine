@@ -46,6 +46,17 @@ public final class ModIntelligenceSpendSafety {
 
     public static Optional<DeferReason> preflight(
             MinecraftServer server, int queueSize, ModelBlacklistSnapshot blacklist) {
+        return preflight(server, queueSize, blacklist, false);
+    }
+
+    /**
+     * @param explicitLimitOverride true when this batch was started by an explicit
+     *        {@code /playerengine capability enrich <limit>} invocation — informed consent that
+     *        skips the large-queue budget gate (the blacklist check still applies).
+     */
+    public static Optional<DeferReason> preflight(
+            MinecraftServer server, int queueSize, ModelBlacklistSnapshot blacklist,
+            boolean explicitLimitOverride) {
 
         if (!blacklist.valid() && !isModelBlacklistBypassed(server)) {
             LOGGER.warn("ModIntelligence enrichment: stopping batch (model_blacklist_invalid) — {}",
@@ -57,10 +68,16 @@ public final class ModIntelligenceSpendSafety {
             BudgetThresholds thresholds = ModIntelligenceEnrichmentClient.getBudgetThresholds(server);
             if (thresholds == null
                     || ModIntelligenceEnrichmentClient.noBudgetLimitsConfigured(thresholds)) {
-                LOGGER.warn(
-                        "ModIntelligence enrichment: deferred - queue size is {} (> 20) and no budget limit has been set on spending",
-                        queueSize);
-                return Optional.of(DeferReason.LARGE_QUEUE_NO_BUDGET);
+                if (explicitLimitOverride) {
+                    LOGGER.info(
+                            "ModIntelligence enrichment: large-queue budget gate skipped — explicit command limit given (queue={})",
+                            queueSize);
+                } else {
+                    LOGGER.warn(
+                            "ModIntelligence enrichment: deferred - queue size is {} (> 20) and no budget limit has been set on spending",
+                            queueSize);
+                    return Optional.of(DeferReason.LARGE_QUEUE_NO_BUDGET);
+                }
             }
         }
 

@@ -299,6 +299,25 @@ public class ItemHelper {
                   Items.STRIPPED_CHERRY_LOG,
                   Items.STRIPPED_CHERRY_WOOD
       };
+      // Natural-generating trunk blocks ONLY: the items a wild tree/fungus actually yields in the world
+      // (the 8 overworld *_log + 2 nether *_stem). Deliberately EXCLUDES *_wood/bark, all stripped_*
+      // variants, and *_hyphae -- those are NOT natural-generating, so mining them almost always means
+      // tearing up a player-built structure or generated build. Use this for MINE/SCAN acquisition targets
+      // (the "log" catalogue entry, generic CollectPlanksTask mine target) so the bot only goes out to
+      // gather real trees/fungi. Held-stock / plank-input counting must keep using the broader LOG array
+      // (the bot may still USE wood/stripped it already holds; it just must never seek them out).
+      public static final Item[] NATURAL_LOG = new Item[] {
+                  Items.OAK_LOG,
+                  Items.SPRUCE_LOG,
+                  Items.BIRCH_LOG,
+                  Items.JUNGLE_LOG,
+                  Items.ACACIA_LOG,
+                  Items.DARK_OAK_LOG,
+                  Items.MANGROVE_LOG,
+                  Items.CHERRY_LOG,
+                  Items.CRIMSON_STEM,
+                  Items.WARPED_STEM
+      };
       public static final Item[] STRIPPED_LOGS = new Item[] {
                   Items.STRIPPED_ACACIA_LOG,
                   Items.STRIPPED_BIRCH_LOG,

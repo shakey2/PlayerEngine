@@ -20,6 +20,7 @@
     "PersistentProjectileEntityAccessor",
     "PlayerCollidesWithEntityMixin",
     "PlayerDamageMixin",
+    "RandomizableContainerAccessor",
     "WorldBlockModifiedMixin",
     "baritone.MixinBucketItem",
     "baritone.MixinEntity",

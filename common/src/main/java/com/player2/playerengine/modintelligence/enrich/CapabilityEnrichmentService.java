@@ -31,6 +31,23 @@ public final class CapabilityEnrichmentService {
     private CapabilityEnrichmentService() {}
 
     public static void runBatch(MinecraftServer server) {
+        runBatch(server, null, false);
+    }
+
+    public static void runBatch(MinecraftServer server, Integer limitOverride) {
+        runBatch(server, limitOverride, limitOverride != null);
+    }
+
+    /**
+     * @param limitOverride per-batch call cap from an explicit {@code /playerengine capability enrich
+     *        <limit>} invocation — overrides the config cap for this batch (0 = unlimited) and skips
+     *        the B4.5 large-queue budget gate (informed consent); {@code null} = config governs.
+     *        The joules budget hard/soft limits always remain enforced.
+     * @param explicit {@code true} when this batch came from an explicit operator command (even with a
+     *        {@code null} limit); explicit batches that lose the single-batch lock race are stashed in
+     *        the pending-override slot instead of being dropped.
+     */
+    public static void runBatch(MinecraftServer server, Integer limitOverride, boolean explicit) {
         Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
         if (!cfg.isModIntelligenceEnabled() || !cfg.isModIntelligenceEnrichmentEnabled()) {
             return;
@@ -44,7 +61,19 @@ public final class CapabilityEnrichmentService {
             return;
         }
 
-        ModIntelligenceService.setEnriching(true);
+        if (!ModIntelligenceService.tryBeginEnrichment()) {
+            // Lost the lock race to a batch scheduled in the same window. An explicit batch must not
+            // vanish: park it in the pending slot; the running batch's finishEnrichment() starts it
+            // (parkExplicit re-checks the lock so a winner finishing in this window can't strand it).
+            if (explicit) {
+                ModIntelligenceService.parkExplicit(server, limitOverride);
+                LOGGER.info("ModIntelligence enrichment: another batch already running — "
+                        + "explicit batch parked as pending follow-up");
+            } else {
+                LOGGER.debug("ModIntelligence enrichment: another batch already running — auto batch skipped");
+            }
+            return;
+        }
         int calls = 0;
         int failures = 0;
         int remainingCount = 0;
@@ -53,12 +82,14 @@ public final class CapabilityEnrichmentService {
         try {
             List<CapabilityMap> queue = CapabilityEnrichmentQueue.loadQueued();
             if (queue.isEmpty()) {
+                // Visible (info) so a pending explicit follow-up that finds nothing left is verifiable.
+                LOGGER.info("ModIntelligence enrichment: queue empty — nothing to enrich (calls=0)");
                 ModIntelligenceService.recordLastEnrichmentBatch(0, 0, 0);
                 return;
             }
 
             Optional<ModIntelligenceSpendSafety.DeferReason> defer =
-                    ModIntelligenceSpendSafety.preflight(server, queue.size(), blacklist);
+                    ModIntelligenceSpendSafety.preflight(server, queue.size(), blacklist, limitOverride != null);
             if (defer.isPresent()) {
                 ModIntelligenceSpendSafety.notifyPlayer(
                         server, ModIntelligenceSpendSafety.messageFor(defer.get(), queue.size(), blacklist));
@@ -67,14 +98,22 @@ public final class CapabilityEnrichmentService {
                 return;
             }
 
-            int maxCalls = cfg.getModIntelligenceMaxEnrichmentCallsPerLaunch();
+            int configuredMax = cfg.getModIntelligenceMaxEnrichmentCallsPerLaunch();
+            int maxCalls = limitOverride != null ? limitOverride : configuredMax;
+            boolean unlimited = maxCalls <= 0;
             int maxFailures = cfg.getModIntelligenceMaxEnrichmentFailuresPerLaunch();
+            LOGGER.info("ModIntelligence enrichment: starting batch queued={} maxCalls={}{} maxFailures={}",
+                    queue.size(), unlimited ? "unlimited" : maxCalls,
+                    limitOverride != null
+                            ? " (command override; config " + (configuredMax <= 0 ? "unlimited" : configuredMax) + ")"
+                            : "",
+                    maxFailures);
 
             CapabilityStore store = ModIntelligenceService.store();
             List<CapabilityMap> pending = new ArrayList<>(queue);
 
             for (int i = 0; i < queue.size(); i++) {
-                if (calls >= maxCalls || failures >= maxFailures) {
+                if ((!unlimited && calls >= maxCalls) || failures >= maxFailures) {
                     break;
                 }
 
@@ -136,7 +175,9 @@ public final class CapabilityEnrichmentService {
         } finally {
             ModelBlacklist.clearBatchSnapshot();
             ModIntelligenceService.recordLastEnrichmentBatch(calls, failures, remainingCount);
-            ModIntelligenceService.setEnriching(false);
+            // Releases the lock AND starts the pending explicit follow-up batch, if one arrived
+            // mid-flight — on every completion path (success, failure, early stop).
+            ModIntelligenceService.finishEnrichment(server);
         }
     }
 

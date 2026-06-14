@@ -58,6 +58,11 @@ public class PlayerEngineSettings implements IFailableConfigFile {
    private float craftTableLookHoldSeconds = 0.25F;
    private boolean preferLocalCraftingTable = true;
    private boolean enableAgenticPlanner = false;
+   // ISSUE 1 (temporary, user request): gate LookAtOwnerTask scheduling. When false the bot does NOT set
+   // LookAtOwner after a command finishes/errors or on @idle — it simply holds with no user task (idles).
+   // Default FALSE per request; a fuller LookAtOwner rework is planned separately. Real toggle so the
+   // rework can re-enable without code changes. Do NOT delete LookAtOwnerTask; only its scheduling is gated.
+   private boolean enableLookAtOwnerIdle = false;
    private int agenticPlannerRagTopK = 8;
    private int agenticPlannerMaxSteps = 4;
    private boolean agenticPlannerFallbackGather = true;
@@ -66,7 +71,14 @@ public class PlayerEngineSettings implements IFailableConfigFile {
    private float gatherLooseItemsTimeoutSeconds = 60.0F;
    private float gatherLooseItemsSettleSeconds = 3.0F;
    private float agenticStorageSearchRadius = 20.0F;
-   private float agenticStoragePlacementRadius = 8.0F;
+   private float agenticStoragePlacementRadius = 4.0F;
+   // Issue B (immersion) cap: the maximum distance, in blocks, an agentic run may TRAVEL to reach a
+   // gather source or a pre-existing storage chest. Default 96 = 6 chunks, ~3/5 of the 1.20.1 default
+   // server view-distance (10 chunks / 160 blocks): a player would not see or reach a chest this far,
+   // so neither should the bot. This bounds the mine/gather far-source wander and rejects far existing
+   // chests. NOTE: when EllieGPS marked-chest memory exists, recall of a player-marked chest BEYOND
+   // this radius will be allowed explicitly (this cap governs only un-marked, auto-discovered targets).
+   private float agenticMaxTravelRadius = 96.0F;
    private boolean agenticStorageAllowPlacement = true;
    private boolean agenticStoragePreferExisting = true;
    private boolean agenticStorageAvoidLootChests = true;
@@ -81,6 +93,11 @@ public class PlayerEngineSettings implements IFailableConfigFile {
    private float mineCollectSettleSeconds = 1.0F;
    private int wanderBoundDefaultSeconds = 90;
    private int wanderNoImprovementSeconds = 30;
+   // EllieGPS (Part C5) settings — pinned field names match the config key table exactly.
+   // Getters are pinned in the Parallelization plan; do NOT rename without updating every consumer.
+   private boolean ellieGpsEnabled = true;
+   private int ellieGpsSnapshotSlotThreshold = 45;
+   private boolean ellieGpsUseModelDescription = true;
 
    private List<Item> throwawayItems = Arrays.asList(
       Items.DRIPSTONE_BLOCK,
@@ -357,6 +374,11 @@ public class PlayerEngineSettings implements IFailableConfigFile {
       return this.enableAgenticPlanner;
    }
 
+   /** ISSUE 1: whether LookAtOwnerTask may be scheduled (idle / post-finish / post-error). Default false. */
+   public boolean isEnableLookAtOwnerIdle() {
+      return this.enableLookAtOwnerIdle;
+   }
+
    public int getAgenticPlannerRagTopK() {
       return (int) clamp(this.agenticPlannerRagTopK, 1, 20);
    }
@@ -390,7 +412,20 @@ public class PlayerEngineSettings implements IFailableConfigFile {
    }
 
    public double getAgenticStoragePlacementRadius() {
-      return clamp(this.agenticStoragePlacementRadius, 2.0F, 16.0F);
+      // Cap reduced 16 -> 8 (and default 8 -> 4): candidate count is (2*ceil(r)+1)^2 * 5, so r=8 was
+      // 1445 getBlockState-heavy candidates per scan on the server thread; r=4 is 405. Placement only
+      // needs a nearby empty floor tile, so a small radius suffices and stays well under render distance.
+      return clamp(this.agenticStoragePlacementRadius, 2.0F, 8.0F);
+   }
+
+   /**
+    * Issue B (immersion): max distance an agentic run may travel to an un-marked, auto-discovered
+    * source/chest. Default 96 blocks (6 chunks), clamped 16..160 (never above the 10-chunk default
+    * render distance). EllieGPS (planned) will later allow explicit recall of player-marked chests
+    * beyond this radius; until then the bot must not path to something a player could not see/reach.
+    */
+   public double getAgenticMaxTravelRadius() {
+      return clamp(this.agenticMaxTravelRadius, 16.0F, 160.0F);
    }
 
    public boolean isAgenticStorageAllowPlacement() {
@@ -447,6 +482,40 @@ public class PlayerEngineSettings implements IFailableConfigFile {
 
    public int getWanderNoImprovementSeconds() {
       return (int) clamp(this.wanderNoImprovementSeconds, 0, 300);
+   }
+
+   // -------------------------------------------------------------------------
+   // EllieGPS settings (Part C5) — pinned getter signatures (Parallelization plan)
+   // -------------------------------------------------------------------------
+
+   /**
+    * Master EllieGPS switch. When false: commands refuse with a clear dual-audience error,
+    * the auto-hook silent-skips with a degradation note, and the counting term is 0.
+    * Effective on settings reload (no restart needed); the startup service swap is unconditional.
+    * Default: {@code true}.
+    */
+   public boolean getEllieGpsEnabled() {
+      return this.ellieGpsEnabled;
+   }
+
+   /**
+    * Slot-count threshold above which a waypoint record omits the inline item snapshot and
+    * becomes keyword-only. A count of used slots ({@code totalSlots - emptySlots}) strictly
+    * greater than this value triggers keyword-only mode.
+    * Clamped to {@code [1, 54]}. Default: {@code 45}.
+    */
+   public int getEllieGpsSnapshotSlotThreshold() {
+      return (int) clamp(this.ellieGpsSnapshotSlotThreshold, 1, 54);
+   }
+
+   /**
+    * Whether to dispatch an async SUMMARIZATION-routed LLM call to polish the waypoint
+    * description. The deterministic description is always built first; the LLM polish is
+    * best-effort and never blocks the command or the agentic run.
+    * Default: {@code true}.
+    */
+   public boolean getEllieGpsUseModelDescription() {
+      return this.ellieGpsUseModelDescription;
    }
 
    private static double clamp(float value, float min, float max) {
