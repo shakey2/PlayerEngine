@@ -113,4 +113,52 @@ public final class Player2NpcPersistencePaths {
     public static Path learnAuditFile(MinecraftServer server) {
         return learnAuditFile(server.getWorldPath(LevelResource.ROOT));
     }
+
+    // -------------------------------------------------------------------------
+    // EllieGPS paths (Part C5)
+    // -------------------------------------------------------------------------
+
+    /** Directory name for EllieGPS per-world data. */
+    public static final String ELLIEGPS_DIR_NAME = "elliegps";
+
+    /**
+     * Root EllieGPS directory: {@code <worldRoot>/player2npc/persistentdata/elliegps/}.
+     *
+     * <p>Contains {@code waypoints.json} (source of truth) and the {@code index/} subdirectory
+     * ({@code waypoints.bin} + {@code version.txt}).
+     */
+    public static Path ellieGpsRoot(Path worldRoot) {
+        return persistentDataRoot(worldRoot).resolve(ELLIEGPS_DIR_NAME);
+    }
+
+    public static Path ellieGpsRoot(MinecraftServer server) {
+        return ellieGpsRoot(server.getWorldPath(LevelResource.ROOT));
+    }
+
+    /**
+     * Authoritative waypoints file: {@code <worldRoot>/player2npc/persistentdata/elliegps/waypoints.json}.
+     * Written via atomic tmp-rename on every mutation; always the recovery source.
+     */
+    public static Path ellieGpsWaypointsFile(Path worldRoot) {
+        return ellieGpsRoot(worldRoot).resolve("waypoints.json");
+    }
+
+    public static Path ellieGpsWaypointsFile(MinecraftServer server) {
+        return ellieGpsWaypointsFile(server.getWorldPath(LevelResource.ROOT));
+    }
+
+    /**
+     * EllieGPS index directory: {@code <worldRoot>/player2npc/persistentdata/elliegps/index/}.
+     *
+     * <p>Contains {@code waypoints.bin} (serialized {@code LexicalIndex.State} +
+     * {@code MinHashIndex.State}) and {@code version.txt} (the version token). This directory
+     * is a derived cache; it is always rebuildable from {@link #ellieGpsWaypointsFile}.
+     */
+    public static Path ellieGpsIndexDir(Path worldRoot) {
+        return ellieGpsRoot(worldRoot).resolve("index");
+    }
+
+    public static Path ellieGpsIndexDir(MinecraftServer server) {
+        return ellieGpsIndexDir(server.getWorldPath(LevelResource.ROOT));
+    }
 }

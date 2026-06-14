@@ -22,7 +22,7 @@ public final class AgenticPlannerPrompt {
                   - gather_loose_items then resolve_storage_chest then deposit_items then label_chest
                 deposit_items always requires a preceding resolve_storage_chest in the same plan.
                 label_chest is optional, best-effort, and may only be the LAST step after deposit_items.
-                Do not output register_waypoint or elliegps steps; EllieGPS/waypoint support is not available yet.
+                Waypoints are managed automatically after deposits and via the create/delete/audit/compare/locate waypoint bot commands — never output waypoint plan steps (no register_waypoint or elliegps step kinds).
                 """;
     }
 
@@ -47,6 +47,8 @@ public final class AgenticPlannerPrompt {
             sb.append("quick_placement_possible: ").append(world.quickPlacementPossible()).append('\n');
             sb.append("has_depositable_items: ").append(world.hasDepositableItems()).append('\n');
             sb.append("sign_item_in_inventory: ").append(world.signItemInInventory()).append('\n');
+            sb.append("label_chest crafts a sign itself when none is held (if wood is obtainable nearby), so sign_item_in_inventory=false does not preclude a label_chest step.\n");
+            sb.append("When a sign must be crafted, request the generic \"sign\" (the mod picks the wood species deterministically from available wood); only name a specific \"<wood>_sign\" if the owner explicitly asked for that species.\n");
             sb.append("storage_target_resolvable: ").append(world.storageTargetResolvable()).append('\n');
         }
         sb.append("""
@@ -61,7 +63,7 @@ public final class AgenticPlannerPrompt {
                     {"id":"deposit-1","kind":"deposit_items","args":{"depositAll":"true","keepTools":"true","timeoutSeconds":"120"},"rationale":"Store the collected items."},
                     {"id":"label-1","kind":"label_chest","args":{"autoLabel":"true","timeoutSeconds":"60"},"rationale":"Label the storage chest (best-effort)."}
                   ],
-                  "plannerNote": "EllieGPS waypoints are not available yet."
+                  "plannerNote": "Storage waypoints are registered automatically after the deposit."
                 }
                 """);
         return sb.toString();

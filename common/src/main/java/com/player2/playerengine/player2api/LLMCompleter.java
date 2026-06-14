@@ -18,11 +18,17 @@ import com.player2.playerengine.util.ExecutorShutdown;
 import com.player2.playerengine.player2api.utils.Utils.ThrowingFunction;
 
 public class LLMCompleter {
+    // [DEBUG-INSTR:llm-latency-2026-06-13] Debug flag: set true to enable latency/timeout probes. Flip to false and rebuild to revert all probes in this class.
+    public static final boolean DEBUG_LLM_PROBE = false; // [DEBUG-INSTR:llm-latency-2026-06-13]
+
     /**
      * Caps blocking LLM work at proxy chat-completion ceiling + buffer ({@link Player2ClientApiBridge}, Phase A3).
      */
-    private static final long LLM_CHAT_WORKER_TIMEOUT_SECONDS =
-            Player2ClientApiBridge.defaultTimeoutForEndpoint("/v1/chat/completions") + 15L;
+    // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 3a: unbounded watchdog under debug flag so the real latency can be measured. Original: defaultTimeoutForEndpoint("/v1/chat/completions") + 15L
+    private static final long LLM_CHAT_WORKER_TIMEOUT_SECONDS = DEBUG_LLM_PROBE
+            ? 3600L
+            : Player2ClientApiBridge.defaultTimeoutForEndpoint("/v1/chat/completions") + 15L;
+    // [/DEBUG-INSTR:llm-latency-2026-06-13]
 
     private static final ScheduledExecutorService LLM_WATCHDOG_SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "playerengine-llm-watchdog");
@@ -99,11 +105,24 @@ public class LLMCompleter {
             Thread workerThread = Thread.currentThread();
             ScheduledFuture<?> watchdog = LLM_WATCHDOG_SCHEDULER.schedule(() -> workerThread.interrupt(),
                     LLM_CHAT_WORKER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 1: capture wall-clock start before the blocking LLM call
+            long dbgStartNs = DEBUG_LLM_PROBE ? System.nanoTime() : 0L; // [DEBUG-INSTR:llm-latency-2026-06-13]
             try {
                 T response = completeConversation.apply(history);
+                // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 1: log elapsed on SUCCESS path
+                if (DEBUG_LLM_PROBE) {
+                    String dbgElapsedS = String.format("%.3f", (System.nanoTime() - dbgStartNs) / 1_000_000_000.0);
+                    LOGGER.info("[DBG llm-latency-2026-06-13] chat completion elapsed={}s outcome=SUCCESS isConversation={}", dbgElapsedS, isConversation);
+                } // [/DEBUG-INSTR:llm-latency-2026-06-13]
                 LOGGER.info("LLMCompleter returned json={}", response);
                 onLLMResponse.accept(response);
             } catch (Exception e) {
+                // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 1: log elapsed on ERROR/TIMEOUT path
+                if (DEBUG_LLM_PROBE) {
+                    String dbgElapsedS = String.format("%.3f", (System.nanoTime() - dbgStartNs) / 1_000_000_000.0);
+                    String dbgOutcome = isInterruptedLike(e) ? "TIMEOUT/INTERRUPT" : "ERROR:" + e.getClass().getSimpleName();
+                    LOGGER.info("[DBG llm-latency-2026-06-13] chat completion elapsed={}s outcome={} isConversation={}", dbgElapsedS, dbgOutcome, isConversation);
+                } // [/DEBUG-INSTR:llm-latency-2026-06-13]
                 if (isInterruptedLike(e)) {
                     Thread.currentThread().interrupt();
                     onErrMsg.accept(StopReason.FATAL.name() + ":llm_worker_timeout");

@@ -43,21 +43,28 @@ public class ScanCommand extends Command {
          field.setAccessible(false);
       }
 
+      // Dual-audience rule (DESIGN.md §3): the result text goes to the log AND to the model
+      // via finishWithNote, so "Returns the position of the nearest matching block" is true
+      // for the model too — a bare finish() left it with only a generic "finished running".
       if (block == null) {
          String closest = FuzzySearchHelper.getClosestMatchMinecraftItems(blockStr, allBlockNames);
-         mod.log("Block named: \"" + blockStr + "\" not a valid block. Perhaps the user meant \"" + closest + "\"?" + (blockStr.contains("log") ? " Can try 'log' as well": ""));
+         String msg = "Block named: \"" + blockStr + "\" not a valid block. Perhaps the user meant \"" + closest + "\"?" + (blockStr.contains("log") ? " Can try 'log' as well": "");
+         mod.log(msg);
 
-         this.finish();
+         this.finishWithNote(msg);
       } else {
          BlockScanner blockScanner = mod.getBlockScanner();
          Optional<BlockPos> p = blockScanner.getNearestBlock(block, mod.getPlayer().position());
+         String msg;
          if (p.isPresent()) {
-            mod.log("Closest " + blockStr + ": " + p.get().toString());
+            BlockPos pos = p.get();
+            msg = "Closest " + blockStr + ": (" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + ")";
          } else {
-            mod.log("No blocks of type " + blockStr + " found nearby.");
+            msg = "No blocks of type " + blockStr + " found nearby.";
          }
+         mod.log(msg);
 
-         this.finish();
+         this.finishWithNote(msg);
       }
    }
 }

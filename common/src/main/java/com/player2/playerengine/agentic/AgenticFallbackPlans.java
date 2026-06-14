@@ -51,15 +51,7 @@ public final class AgenticFallbackPlans {
                 ? truncate(goalText.replace('\n', ' '), 120)
                 : "Gather drops and prepare storage";
         List<AgenticStepSpec> steps = List.of(
-                new AgenticStepSpec(
-                        "gather-1",
-                        AgenticSchemas.STEP_GATHER_LOOSE_ITEMS,
-                        Map.of(
-                                "radius", String.valueOf(settings.getGatherLooseItemsRadius()),
-                                "maxitems", String.valueOf(settings.getGatherLooseItemsMaxItems()),
-                                "settleseconds", String.valueOf(settings.getGatherLooseItemsSettleSeconds()),
-                                "timeoutseconds", String.valueOf(settings.getGatherLooseItemsTimeoutSeconds())),
-                        "Collect nearby drops."),
+                gatherStep(settings),
                 new AgenticStepSpec(
                         "storage-1",
                         AgenticSchemas.STEP_RESOLVE_STORAGE_CHEST,
@@ -102,15 +94,7 @@ public final class AgenticFallbackPlans {
                 ? truncate(goalText.replace('\n', ' '), 120)
                 : "Gather drops and store them in a chest";
         List<AgenticStepSpec> steps = new java.util.ArrayList<>();
-        steps.add(new AgenticStepSpec(
-                "gather-1",
-                AgenticSchemas.STEP_GATHER_LOOSE_ITEMS,
-                Map.of(
-                        "radius", String.valueOf(settings.getGatherLooseItemsRadius()),
-                        "maxitems", String.valueOf(settings.getGatherLooseItemsMaxItems()),
-                        "settleseconds", String.valueOf(settings.getGatherLooseItemsSettleSeconds()),
-                        "timeoutseconds", String.valueOf(settings.getGatherLooseItemsTimeoutSeconds())),
-                "Collect nearby drops."));
+        steps.add(gatherStep(settings));
         steps.add(new AgenticStepSpec(
                 "storage-1",
                 AgenticSchemas.STEP_RESOLVE_STORAGE_CHEST,
@@ -129,6 +113,24 @@ public final class AgenticFallbackPlans {
                 summary,
                 List.copyOf(steps),
                 withLabel ? "fallback_gather_resolve_deposit_label" : "fallback_gather_resolve_deposit");
+    }
+
+    /**
+     * The standard settings-driven gather step ("gather-1"). Shared by the deterministic fallback
+     * plans above and by {@code AgenticPlannerService}'s gather augmentation of accepted model
+     * plans (deterministic-over-model guard: deposit plan + drops on the ground + nothing
+     * depositable in inventory means a gather step must run first).
+     */
+    static AgenticStepSpec gatherStep(PlayerEngineSettings settings) {
+        return new AgenticStepSpec(
+                "gather-1",
+                AgenticSchemas.STEP_GATHER_LOOSE_ITEMS,
+                Map.of(
+                        "radius", String.valueOf(settings.getGatherLooseItemsRadius()),
+                        "maxitems", String.valueOf(settings.getGatherLooseItemsMaxItems()),
+                        "settleseconds", String.valueOf(settings.getGatherLooseItemsSettleSeconds()),
+                        "timeoutseconds", String.valueOf(settings.getGatherLooseItemsTimeoutSeconds())),
+                "Collect nearby drops.");
     }
 
     private static AgenticStepSpec labelStep(PlayerEngineSettings settings) {

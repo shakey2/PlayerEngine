@@ -13,7 +13,6 @@ import java.util.stream.Collectors;
 import dev.architectury.event.events.common.ChunkEvent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.chunk.EmptyLevelChunk;
 
 public class SimpleChunkTracker {
    private final PlayerEngineController mod;
@@ -48,8 +47,29 @@ public class SimpleChunkTracker {
       this.loaded.remove(pos);
    }
 
+   /**
+    * Whether a chunk is ALREADY in memory, via a live, NON-LOADING chunk-source query.
+    *
+    * <p>Issue C fix (preserved): this must never call {@code Level.getChunk(pos.x, pos.z)}, which is
+    * {@code getChunk(x, z, ChunkStatus.FULL, nonnull=true)} — a SYNCHRONOUS chunk LOAD/GENERATION on
+    * the server thread (ServerChunkCache.getChunkFutureMainThread -> managedBlock). When used as a
+    * guard inside a per-candidate hot loop (e.g. ChestPlacementSelector's 1445-candidate scan near
+    * unloaded-chunk boundaries) it WAS the multi-second server-thread stall it was meant to prevent.
+    *
+    * <p>The previous Issue C implementation checked membership in the event-maintained {@link #loaded}
+    * set, but the Architectury ChunkEvent LOAD_DATA/SAVE_DATA signals are wrong for "currently in
+    * memory": LOAD_DATA never fires for freshly GENERATED chunks (only disk deserialization), chunks
+    * loaded before this tracker's construction are never added, and SAVE_DATA fires on every
+    * world save for chunks that REMAIN loaded — so the set was empty/stale and every chunk-gated
+    * feature saw the world as unloaded (the "chunk_unloaded x1445 / no_valid_site" failure).
+    *
+    * <p>{@code ServerChunkCache.hasChunk(x, z)} is a pure {@code getVisibleChunkIfPresent} holder
+    * lookup against ChunkStatus.FULL — it NEVER loads or generates a chunk — so it is both
+    * authoritative and safe in hot loops.
+    */
    public boolean isChunkLoaded(ChunkPos pos) {
-      return !(this.mod.getWorld().getChunk(pos.x, pos.z) instanceof EmptyLevelChunk);
+      var world = this.mod.getWorld();
+      return world != null && world.getChunkSource().hasChunk(pos.x, pos.z);
    }
 
    public boolean isChunkLoaded(BlockPos pos) {

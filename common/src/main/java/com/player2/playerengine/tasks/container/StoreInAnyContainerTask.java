@@ -16,6 +16,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * Direct "store into any nearby/creatable container" task. It resolves a container (scan nearest valid
@@ -39,6 +40,17 @@ public class StoreInAnyContainerTask extends Task {
    private static final double OVERALL_TIMEOUT_SECONDS = 90.0;
    /** Per-chosen-container deposit budget handed to the shared bounded engine. */
    private static final double DEPOSIT_TIMEOUT_SECONDS = 45.0;
+   /**
+    * FIXED travel cap (blocks) for the direct {@code deposit} container search. Derived from the DEFAULT
+    * render distance: 3/5 * 12 chunks * 16 blocks/chunk = 115.2 -> 115. It is intentionally a constant,
+    * NOT the live {@code getAgenticMaxTravelRadius()} setting, so the direct-deposit path stays
+    * render-distance- and settings-independent: the bot must never walk to a container a player at default
+    * view distance could not see (the live bug pathed ~255 blocks to a village chest). When the nearest
+    * container is beyond this cap it is treated as "no container found" and the task falls through to
+    * placing/crafting a LOCAL chest instead of trekking. The agentic resolve path keeps its own tunable
+    * {@code getAgenticMaxTravelRadius()} cap; this constant deliberately does not share that knob.
+    */
+   private static final double DEPOSIT_TRAVEL_CAP_BLOCKS = 115.0;
 
    /** Terminal classification the {@code deposit} command reads to choose finish vs. escalate. */
    public enum Outcome {
@@ -137,6 +149,11 @@ public class StoreInAnyContainerTask extends Task {
       }
 
       Optional<BlockPos> closestContainer = this.controller.getBlockScanner().getNearestBlock(buildContainerPredicate(), StoreInContainerTask.CONTAINER_BLOCKS);
+      if (closestContainer.isPresent() && beyondTravelCap(closestContainer.get())) {
+         // Nearest container is too far for a direct deposit. Treat it as "no container found" so we fall
+         // through to placing/crafting a LOCAL chest rather than trekking to it (live bug: ~255-block walk).
+         closestContainer = Optional.empty();
+      }
       if (closestContainer.isPresent()) {
          // Lock onto this container and deposit through the bounded engine so it can never hang.
          this.chosenContainer = closestContainer.get();
@@ -209,6 +226,10 @@ public class StoreInAnyContainerTask extends Task {
             this.depositCore = null;
 
             Optional<BlockPos> next = this.controller.getBlockScanner().getNearestBlock(buildContainerPredicate(), StoreInContainerTask.CONTAINER_BLOCKS);
+            if (next.isPresent() && beyondTravelCap(next.get())) {
+               // The only other container is beyond the direct-deposit cap; do not trek to it.
+               next = Optional.empty();
+            }
             if (next.isPresent()) {
                this.chosenContainer = next.get();
                this.everChoseContainer = true;
@@ -248,6 +269,23 @@ public class StoreInAnyContainerTask extends Task {
 
    private ItemTarget[] getItemsToStore(PlayerEngineController controller) {
       return Arrays.stream(this.toStore).filter(target -> controller.getItemStorage().hasItem(target.getMatches())).toArray(ItemTarget[]::new);
+   }
+
+   /**
+    * True if {@code target} is farther than the FIXED {@link #DEPOSIT_TRAVEL_CAP_BLOCKS} direct-deposit
+    * travel cap from the bot. When true the caller treats the scan result as "no container found" and
+    * falls through to placing/crafting a LOCAL chest instead of pathing to a distant one. Logged for
+    * debugging so an ignored far container is visible in the log.
+    */
+   private boolean beyondTravelCap(BlockPos target) {
+      double capSq = DEPOSIT_TRAVEL_CAP_BLOCKS * DEPOSIT_TRAVEL_CAP_BLOCKS;
+      Vec3 origin = this.controller.getPlayer().position();
+      boolean beyond = origin.distanceToSqr(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5) > capSq;
+      if (beyond) {
+         this.controller.log("[deposit] ignoring container at " + target.toShortString()
+            + " beyond travel cap " + (int) DEPOSIT_TRAVEL_CAP_BLOCKS + " blocks; using a local chest instead");
+      }
+      return beyond;
    }
 
    private boolean isDungeonChest(PlayerEngineController controller, BlockPos pos) {

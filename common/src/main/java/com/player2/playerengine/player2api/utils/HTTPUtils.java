@@ -4,6 +4,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import com.player2.playerengine.player2api.LLMCompleter; // [DEBUG-INSTR:llm-latency-2026-06-13] import for debug flag
 import org.jetbrains.annotations.Nullable;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -21,7 +22,17 @@ public class HTTPUtils {
 
     /** Default timeouts so shutdown and network stalls cannot block workers indefinitely (ms). */
     private static final int DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
-    private static final int DEFAULT_READ_TIMEOUT_MS = 120_000;
+    static final int DEFAULT_READ_TIMEOUT_MS = 120_000;
+
+    /**
+     * Extended read timeout for background mod-intelligence ingestion/enrichment calls.
+     * Local LLMs (via the Player2 desktop app) can be significantly slower than cloud models;
+     * enrichment runs on a background thread with no player-facing watchdog, so a longer ceiling
+     * is safe. This is a production constant — NOT tied to the debug flag.
+     * To revert: change callers in Player2HTTPUtils and ModIntelligenceEnrichmentClient back to
+     * the no-timeout overloads, then remove this constant.
+     */
+    public static final int INGESTION_READ_TIMEOUT_MS = 600_000; // 10 minutes
 
 
     public static Map<String, JsonElement> sendRequest(String baseUrl, String endpoint, boolean postRequest, JsonObject requestBody,
@@ -38,10 +49,25 @@ public class HTTPUtils {
                                                  JsonObject requestBody,
                                                  @Nullable Map<String, String> extraHeaders)
             throws Exception {
+        return sendRequestElement(baseUrl, endpoint, method, requestBody, extraHeaders, DEFAULT_READ_TIMEOUT_MS);
+    }
+
+    /**
+     * Like {@link #sendRequestElement(String, String, String, JsonObject, Map)} but with an explicit
+     * read timeout. Use only for calls that require a non-default ceiling (e.g., background ingestion
+     * against a slow local model — see {@link #INGESTION_READ_TIMEOUT_MS}).
+     * All other callers must use the no-timeout-param overload.
+     */
+    public static JsonElement sendRequestElement(String baseUrl, String endpoint, String method,
+                                                 JsonObject requestBody,
+                                                 @Nullable Map<String, String> extraHeaders,
+                                                 int readTimeoutMs)
+            throws Exception {
         URL url = new URI(baseUrl + endpoint).toURL();
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setConnectTimeout(DEFAULT_CONNECT_TIMEOUT_MS);
-        connection.setReadTimeout(DEFAULT_READ_TIMEOUT_MS);
+        // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 3b: infinite read timeout under debug flag so local LLM has unlimited time to respond. Original: DEFAULT_READ_TIMEOUT_MS (120_000 ms)
+        connection.setReadTimeout(LLMCompleter.DEBUG_LLM_PROBE ? 0 : readTimeoutMs); // [DEBUG-INSTR:llm-latency-2026-06-13]
         connection.setRequestMethod(method);
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         connection.setRequestProperty("Accept", "application/json; charset=utf-8");
@@ -85,10 +111,24 @@ public class HTTPUtils {
     public static Map<String, JsonElement> sendRequest(String baseUrl, String endpoint, String method, JsonObject requestBody,
                                                        @Nullable Map<String, String> extraHeaders)
             throws Exception {
+        return sendRequest(baseUrl, endpoint, method, requestBody, extraHeaders, DEFAULT_READ_TIMEOUT_MS);
+    }
+
+    /**
+     * Like {@link #sendRequest(String, String, String, JsonObject, Map)} but with an explicit read
+     * timeout. Use only for calls that require a non-default ceiling (e.g., background ingestion
+     * against a slow local model — see {@link #INGESTION_READ_TIMEOUT_MS}).
+     * All other callers must use the no-timeout-param overload.
+     */
+    public static Map<String, JsonElement> sendRequest(String baseUrl, String endpoint, String method, JsonObject requestBody,
+                                                       @Nullable Map<String, String> extraHeaders,
+                                                       int readTimeoutMs)
+            throws Exception {
         URL url = new URI(baseUrl + endpoint).toURL();
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setConnectTimeout(DEFAULT_CONNECT_TIMEOUT_MS);
-        connection.setReadTimeout(DEFAULT_READ_TIMEOUT_MS);
+        // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 3b: infinite read timeout under debug flag so local LLM has unlimited time to respond. Original: DEFAULT_READ_TIMEOUT_MS (120_000 ms)
+        connection.setReadTimeout(LLMCompleter.DEBUG_LLM_PROBE ? 0 : readTimeoutMs); // [DEBUG-INSTR:llm-latency-2026-06-13]
         connection.setRequestMethod(method);
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         connection.setRequestProperty("Accept", "application/json; charset=utf-8");

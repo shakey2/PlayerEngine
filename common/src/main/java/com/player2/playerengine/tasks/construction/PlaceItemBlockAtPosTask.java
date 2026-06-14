@@ -104,6 +104,17 @@ public class PlaceItemBlockAtPosTask extends Task {
         if (result.consumesAction() || isFinished()) {
             mod.getPlayer().swing(hand);
             this.settleTicks = SETTLE_TICKS;
+            // ISSUE 2: register the just-placed block in the BlockScanner synchronously, the moment it is
+            // verified present, instead of waiting for the next close-block scan or the 80-tick background
+            // rescan. The world BlockPlaceEvent mixin only fires for redstone-conductor blocks, so a placed
+            // CHEST (not a conductor in 1.20.1) is otherwise NOT indexed for several ticks. That gap is why
+            // a follow-on resolve_storage_chest (preferExisting + no placement) scanned getKnownLocations
+            // (CHEST) and found nothing despite the bot having just placed/used the adjacent chest. addBlock
+            // self-guards with isBlockAtPosition, so this only registers a block actually present at placePos
+            // (here gated on isFinished()) -- no phantom entries.
+            if (isFinished()) {
+                mod.getBlockScanner().addBlock(this.expectedBlock, this.placePos);
+            }
         }
         return null;
     }

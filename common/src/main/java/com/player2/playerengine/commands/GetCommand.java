@@ -26,7 +26,7 @@ public class GetCommand extends Command {
    public GetCommand() throws CommandException {
       super(
          "get",
-         "Get a resource or Craft an item in Minecraft. You can craft item even if you don't have ingredients in inventory already. Examples: `get log 20` gets 20 logs, `get diamond_chestplate 1` gets 1 diamond chestplate. For equipments you have to specify the type of equipments like wooden, stone, iron, golden and diamond.",
+         "Get a resource or Craft an item in Minecraft. You can craft item even if you don't have ingredients in inventory already. Examples: `get log 20` gets 20 logs, `get diamond_chestplate 1` gets 1 diamond chestplate. For equipments you have to specify the type of equipments like wooden, stone, iron, golden and diamond. For wooden items, prefer the GENERIC name — `get sign 1`, `get planks 4`, `get log 2`, NOT `get oak_sign 1` — so the best wood species actually available nearby is chosen automatically; only name a species if that exact wood is required.",
          new Arg<>(ItemList.class, "items")
       );
    }
@@ -65,11 +65,45 @@ public class GetCommand extends Command {
                e.getState() == StepState.FAILED && e.getLastLogEntry().contains(StopReason.FATAL.name())
          ).orElse(false);
       }
+      // Creation-time degradation note (e.g. the explicit-sign species substitution): the player got
+      // the chat line at task creation; HERE is where the model learns of it, merged ahead of any
+      // termination reason in every outcome path so the AI can answer truthfully about what was
+      // actually crafted (DESIGN.md S3 dual-audience reporting).
+      String creationNote = null;
+      String terminationReason = null;
+      if (trackedTask instanceof CraftMacroResourceTask macro) {
+         creationNote = blankToNull(macro.getCreationNote());
+         terminationReason = blankToNull(macro.getFailureReason());
+      }
       if (genuineFailure) {
-         this.finishWithError(getFailureReason(trackedTask));
+         this.finishWithError(joinNotes(creationNote, getFailureReason(trackedTask)));
+      } else if (terminationReason != null || creationNote != null) {
+         // Non-FATAL termination/degradation of a craft macro (e.g. under-gathered, unobtainable
+         // wood, partial completion, a creation-time species substitution): route the recorded
+         // reason(s) through the SUCCESS-with-note path so the model's command-completion feedback
+         // carries the specific reason ("... finished running, but: <reason>.") instead of a generic
+         // success the AI could mistake for an unqualified full completion (DESIGN.md S3 dual-audience
+         // reporting). Blank/absent reasons degrade to a plain finish, byte-identical to a clean
+         // success.
+         this.finishWithNote(joinNotes(creationNote, terminationReason));
       } else {
          this.finish();
       }
+   }
+
+   private static String blankToNull(String s) {
+      return (s == null || s.isBlank()) ? null : s;
+   }
+
+   /** Join the creation note and the outcome reason ("; "-separated); either side may be null. */
+   private static String joinNotes(String first, String second) {
+      if (first == null) {
+         return second;
+      }
+      if (second == null) {
+         return first;
+      }
+      return first + "; " + second;
    }
 
    /** Prefer the macro task's recorded reason; otherwise a clear generic the model can act on. */

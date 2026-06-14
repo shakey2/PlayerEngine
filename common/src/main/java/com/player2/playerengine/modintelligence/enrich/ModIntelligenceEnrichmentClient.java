@@ -13,6 +13,7 @@ import com.player2.playerengine.player2api.config.BudgetThresholds;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
 import com.player2.playerengine.player2api.BudgetThresholdsResolver;
+import com.player2.playerengine.player2api.utils.HTTPUtils;
 import com.player2.playerengine.player2api.utils.Player2HTTPUtils;
 import com.player2.playerengine.player2api.ConversationHistory;
 import net.minecraft.server.MinecraftServer;
@@ -144,14 +145,18 @@ public final class ModIntelligenceEnrichmentClient {
             Player2PayerResolution.ApiBillingContext billing,
             String clientId,
             JsonObject requestBody) throws Exception {
+        // Background ingestion: use the extended read timeout so slow local models can finish.
+        // This is a production ceiling (not tied to the debug flag) — see HTTPUtils.INGESTION_READ_TIMEOUT_MS.
         if (billing.useStoredToken() && billing.storedTokenUsername() != null) {
             return Player2HTTPUtils.sendRequestWithStoredToken(
-                    billing.storedTokenUsername(), clientId, "/v1/chat/completions", "POST", requestBody);
+                    billing.storedTokenUsername(), clientId, "/v1/chat/completions", "POST", requestBody,
+                    HTTPUtils.INGESTION_READ_TIMEOUT_MS);
         }
         ServerPlayer payer = billing.onlinePayer();
         if (payer != null) {
             return Player2HTTPUtils.sendRequest(
-                    payer, clientId, "/v1/chat/completions", "POST", requestBody);
+                    payer, clientId, "/v1/chat/completions", "POST", requestBody,
+                    HTTPUtils.INGESTION_READ_TIMEOUT_MS);
         }
         throw new IllegalStateException("billing_unavailable");
     }

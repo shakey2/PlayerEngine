@@ -28,6 +28,29 @@ public final class ModIntelligenceService {
             new AtomicReference<>(new CapabilityQueryService(storeRef.get()));
     private static final AtomicBoolean inspecting = new AtomicBoolean(false);
     private static final AtomicBoolean enriching = new AtomicBoolean(false);
+    /**
+     * Single pending-override slot for an explicit {@code /playerengine capability enrich} command that
+     * arrived while a batch was in flight. Latest explicit invocation wins; auto-schedulers never
+     * populate it; consuming it clears it. A {@code null} limit (bare {@code enrich}, config governs)
+     * is still an explicit request, hence the wrapper record rather than a raw Integer.
+     */
+    private static final AtomicReference<PendingExplicitRequest> pendingExplicitRequest = new AtomicReference<>();
+
+    private record PendingExplicitRequest(Integer limitOverride) {}
+
+    /** Outcome of a schedule attempt, so explicit command callers can report truthfully. */
+    public enum ScheduleResult {
+        /** Batch submitted to the worker executor. */
+        STARTED,
+        /** A batch is in flight; for explicit callers the request was stored in the pending slot. */
+        ALREADY_RUNNING,
+        /** Enrichment queue is empty. */
+        NOTHING_QUEUED,
+        /** ModIntelligence or enrichment disabled in config. */
+        DISABLED,
+        /** No online player or stored owner token to bill against yet. */
+        BILLING_UNAVAILABLE
+    }
     private static volatile String lastError = null;
     private static volatile String packFingerprint = "";
     private static volatile boolean playerJoinHookRegistered = false;
@@ -91,25 +114,46 @@ public final class ModIntelligenceService {
         });
     }
 
-    /**
-     * Runs enrichment when billing is available and the queue is non-empty. Safe to call repeatedly.
-     */
+    /** Auto-scheduled batch (init, player join, post-ingestion) — guard outcomes intentionally ignored. */
     public static void scheduleEnrichmentBatch(MinecraftServer server) {
+        schedule(server, null, false);
+    }
+
+    /**
+     * Explicit {@code /playerengine capability enrich [limit]} invocation. Never silently dropped: if a
+     * batch is already in flight the request is stored in the single pending-override slot and started
+     * by {@link #finishEnrichment} when that batch completes.
+     *
+     * @param limitOverride per-batch call cap — overrides the config cap for this batch (0 = unlimited);
+     *        {@code null} = command given without an argument (config governs, still explicit).
+     * @return what actually happened, so the command can report truthfully.
+     */
+    public static ScheduleResult scheduleEnrichmentBatch(MinecraftServer server, Integer limitOverride) {
+        return schedule(server, limitOverride, true);
+    }
+
+    private static ScheduleResult schedule(MinecraftServer server, Integer limitOverride, boolean explicit) {
         Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
         if (!cfg.isModIntelligenceEnabled() || !cfg.isModIntelligenceEnrichmentEnabled()) {
-            return;
+            return ScheduleResult.DISABLED;
         }
         if (enriching.get()) {
-            return;
+            if (explicit) {
+                LOGGER.info("ModIntelligence enrichment: batch in flight — stored explicit follow-up request (limit={})",
+                        describeLimit(limitOverride));
+                parkExplicit(server, limitOverride);
+            }
+            return ScheduleResult.ALREADY_RUNNING;
         }
         if (CapabilityEnrichmentQueue.countQueuedLines() == 0) {
-            return;
+            return ScheduleResult.NOTHING_QUEUED;
         }
         if (!ModIntelligenceEnrichmentClient.isBillingAvailable(server)) {
             LOGGER.debug("ModIntelligence enrichment: waiting for billing (player join or stored token)");
-            return;
+            return ScheduleResult.BILLING_UNAVAILABLE;
         }
-        PlayerEngine.getExecutor().execute(() -> CapabilityEnrichmentService.runBatch(server));
+        PlayerEngine.getExecutor().execute(() -> CapabilityEnrichmentService.runBatch(server, limitOverride, explicit));
+        return ScheduleResult.STARTED;
     }
 
     public static void runIngestion(MinecraftServer server, boolean forceRebuild) {
@@ -184,7 +228,66 @@ public final class ModIntelligenceService {
         lastBatchRemaining = remaining;
     }
 
-    public static void setEnriching(boolean value) {
-        enriching.set(value);
+    /**
+     * Atomically claims the single-batch enrichment lock — called by
+     * {@link CapabilityEnrichmentService#runBatch} before doing any work. Replaces the old plain
+     * {@code setEnriching(true)}, which allowed two near-simultaneously scheduled batches to run
+     * concurrently.
+     *
+     * @return {@code true} if this caller now owns the batch; {@code false} if another batch is running.
+     */
+    public static boolean tryBeginEnrichment() {
+        return enriching.compareAndSet(false, true);
+    }
+
+    /**
+     * Parks an explicit batch request that arrived while another batch holds the lock (latest explicit
+     * request wins; auto batches that lose are simply skipped). After stashing, re-checks the lock: if
+     * the in-flight batch finished between the caller's check and the stash, its
+     * {@link #finishEnrichment} already ran and would never see this slot — drain it here so the
+     * request cannot be stranded until some unrelated future batch completes. Called from both
+     * {@code schedule()}'s ALREADY_RUNNING branch and {@code runBatch}'s lost-lock-race branch; the
+     * {@code getAndSet(null)} in {@link #drainPendingExplicit} keeps consumption single even if this
+     * re-check races a concurrent {@code finishEnrichment}.
+     */
+    public static void parkExplicit(MinecraftServer server, Integer limitOverride) {
+        pendingExplicitRequest.set(new PendingExplicitRequest(limitOverride));
+        if (!enriching.get()) {
+            drainPendingExplicit(server);
+        }
+    }
+
+    /**
+     * Batch completion (success, failure, or early stop): releases the lock, then starts the pending
+     * explicit follow-up batch if one was requested mid-flight. Called from {@code runBatch}'s finally.
+     */
+    public static void finishEnrichment(MinecraftServer server) {
+        enriching.set(false);
+        drainPendingExplicit(server);
+    }
+
+    /**
+     * Consumes (and clears) the pending explicit slot and submits the follow-up batch directly —
+     * deliberately not via {@link #schedule}: a pending explicit batch must run even if the queue
+     * drained meanwhile (it exits normally with calls=0), and {@code runBatch} re-checks
+     * disabled/billing itself. No endless chaining: the slot holds at most one request, only explicit
+     * commands populate it, and {@code getAndSet(null)} consumption clears it.
+     */
+    private static void drainPendingExplicit(MinecraftServer server) {
+        PendingExplicitRequest pending = pendingExplicitRequest.getAndSet(null);
+        if (pending == null) {
+            return;
+        }
+        Integer limit = pending.limitOverride();
+        LOGGER.info("ModIntelligence enrichment: starting pending explicit follow-up batch (limit={})",
+                describeLimit(limit));
+        PlayerEngine.getExecutor().execute(() -> CapabilityEnrichmentService.runBatch(server, limit, true));
+    }
+
+    private static String describeLimit(Integer limit) {
+        if (limit == null) {
+            return "config";
+        }
+        return limit <= 0 ? "unlimited" : String.valueOf(limit);
     }
 }

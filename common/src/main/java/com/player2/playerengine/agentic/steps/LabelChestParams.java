@@ -8,7 +8,10 @@ import java.util.List;
  * <p>{@code lines} are optional explicit front-side label lines; when empty and {@code autoLabel}
  * is true the task derives a deterministic template from the storage target. {@code signItemId} is
  * an optional explicit sign item id; when empty the task uses the first {@code SignItem} found in
- * the bot's inventory. The label step always finishes SUCCEEDED, so these are advisory only.
+ * the bot's inventory — or crafts one when none is held. {@code timeoutSeconds} is
+ * progress-refreshed while that sign-craft child is advancing (it measures idle time, not total
+ * elapsed; mirrors {@code resolve_storage_chest}). The label step always finishes SUCCEEDED, so
+ * these are advisory only.
  */
 public record LabelChestParams(
         List<String> lines,

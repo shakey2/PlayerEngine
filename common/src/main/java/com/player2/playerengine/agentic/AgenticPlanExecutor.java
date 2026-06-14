@@ -2,6 +2,7 @@ package com.player2.playerengine.agentic;
 
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.agentic.AgenticRunRegistry.AgenticRunState;
+import com.player2.playerengine.agentic.elliegps.WaypointAutoRegistrar;
 import com.player2.playerengine.executor.RollbackPolicy;
 import com.player2.playerengine.executor.StepState;
 import com.player2.playerengine.executor.TaskStepExecutorAdapter;
@@ -83,6 +84,11 @@ public final class AgenticPlanExecutor {
                 LOGGER.warn("[Agentic] step {} failed: {}", step.kind(), message);
                 finishOnServer(mod, onTerminal, false, message);
                 return;
+            }
+            // Post-deposit auto-registration hook (C5 / Decision 9): best-effort, synchronous-cheap,
+            // never fails or delays the run. Wrapped in WaypointAutoRegistrar's own catch-all.
+            if (AgenticSchemas.STEP_DEPOSIT_ITEMS.equals(step.kind())) {
+                WaypointAutoRegistrar.afterDeposit(context, mod);
             }
             runStep(index + 1, plan, mod, context, onTerminal);
         });

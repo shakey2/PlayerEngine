@@ -353,7 +353,13 @@ public class MineAndCollectTask extends ResourceTask {
 
          Vec3 origin = mod.getPlayer().position();
          double dropRadius = mod.getModSettings().getAggregateCountDropRadius();
-         double localSourceBlockRadius = mod.getModSettings().getAggregateLocalSourceBlockRadius();
+         // Issue B (immersion): never consider a mineable source farther than the agentic travel cap
+         // (default 96 blocks / 6 chunks, below render distance). aggregateLocalSourceBlockRadius (default
+         // 32) is already under the cap; clamping here guarantees no config widening can route the bot to
+         // an out-of-render-distance source, and keeps the gather subtree from pathing toward a far biome.
+         double localSourceBlockRadius = Math.min(
+            mod.getModSettings().getAggregateLocalSourceBlockRadius(),
+            mod.getModSettings().getAgenticMaxTravelRadius());
 
          // (b1) Prefer collecting eligible nearby drops over wandering (plan decision 7).
          if (mod.getEntityTracker().itemDropped(this.targets)

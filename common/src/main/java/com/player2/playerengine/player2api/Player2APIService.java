@@ -99,8 +99,27 @@ public class Player2APIService {
             .toString();
 
       requestBody.add("messages", messagesArray);
+      // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 2a: log outgoing request message count and body char length (NOT tokens)
+      if (LLMCompleter.DEBUG_LLM_PROBE) {
+         int dbgMsgCount = messagesArray.size();
+         int dbgBodyChars = requestBody.toString().length();
+         LOGGER.info("[DBG llm-latency-2026-06-13] request messages={} bodyChars={} taskClass={}", dbgMsgCount, dbgBodyChars, taskClass);
+      } // [/DEBUG-INSTR:llm-latency-2026-06-13]
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
       Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody, taskClass);
+      // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 2b: log usage tokens from response if backend provides them
+      if (LLMCompleter.DEBUG_LLM_PROBE) {
+         JsonElement dbgUsageEl = responseMap.get("usage");
+         if (dbgUsageEl != null && !dbgUsageEl.isJsonNull() && dbgUsageEl.isJsonObject()) {
+            com.google.gson.JsonObject dbgUsage = dbgUsageEl.getAsJsonObject();
+            int dbgPrompt = dbgUsage.has("prompt_tokens") ? dbgUsage.get("prompt_tokens").getAsInt() : -1;
+            int dbgCompletion = dbgUsage.has("completion_tokens") ? dbgUsage.get("completion_tokens").getAsInt() : -1;
+            int dbgTotal = dbgUsage.has("total_tokens") ? dbgUsage.get("total_tokens").getAsInt() : -1;
+            LOGGER.info("[DBG llm-latency-2026-06-13] usage prompt_tokens={} completion_tokens={} total_tokens={}", dbgPrompt, dbgCompletion, dbgTotal);
+         } else {
+            LOGGER.info("[DBG llm-latency-2026-06-13] usage not provided by backend (no estimate)");
+         }
+      } // [/DEBUG-INSTR:llm-latency-2026-06-13]
       if (responseMap.containsKey("choices")) {
          JsonArray choices = responseMap.get("choices").getAsJsonArray();
          if (choices.size() != 0) {
@@ -129,10 +148,29 @@ public class Player2APIService {
       }
 
       requestBody.add("messages", messagesArray);
+      // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 2a (toString variant): log outgoing request message count and body char length (NOT tokens)
+      if (LLMCompleter.DEBUG_LLM_PROBE) {
+         int dbgMsgCount = messagesArray.size();
+         int dbgBodyChars = requestBody.toString().length();
+         LOGGER.info("[DBG llm-latency-2026-06-13] request messages={} bodyChars={} taskClass={}", dbgMsgCount, dbgBodyChars, taskClass);
+      } // [/DEBUG-INSTR:llm-latency-2026-06-13]
       String lastMessageForDebug = conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1)
             .toString();
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
       Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody, taskClass);
+      // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 2b (toString variant): log usage tokens from response if backend provides them
+      if (LLMCompleter.DEBUG_LLM_PROBE) {
+         JsonElement dbgUsageEl = responseMap.get("usage");
+         if (dbgUsageEl != null && !dbgUsageEl.isJsonNull() && dbgUsageEl.isJsonObject()) {
+            com.google.gson.JsonObject dbgUsage = dbgUsageEl.getAsJsonObject();
+            int dbgPrompt = dbgUsage.has("prompt_tokens") ? dbgUsage.get("prompt_tokens").getAsInt() : -1;
+            int dbgCompletion = dbgUsage.has("completion_tokens") ? dbgUsage.get("completion_tokens").getAsInt() : -1;
+            int dbgTotal = dbgUsage.has("total_tokens") ? dbgUsage.get("total_tokens").getAsInt() : -1;
+            LOGGER.info("[DBG llm-latency-2026-06-13] usage prompt_tokens={} completion_tokens={} total_tokens={}", dbgPrompt, dbgCompletion, dbgTotal);
+         } else {
+            LOGGER.info("[DBG llm-latency-2026-06-13] usage not provided by backend (no estimate)");
+         }
+      } // [/DEBUG-INSTR:llm-latency-2026-06-13]
       if (responseMap.containsKey("choices")) {
          JsonArray choices = responseMap.get("choices").getAsJsonArray();
          if (choices.size() != 0) {

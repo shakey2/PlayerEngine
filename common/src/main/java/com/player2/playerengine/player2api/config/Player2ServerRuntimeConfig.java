@@ -72,6 +72,7 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     private boolean modIntelligenceInspectOnLaunch = true;
     private boolean modIntelligenceEnrichmentEnabled = false;
     private int modIntelligenceMaxInspectEntriesPerLaunch = 5000;
+    /** Per-batch enrichment API call cap; 0 = unlimited (the joules budget remains the spend safeguard). */
     private int modIntelligenceMaxEnrichmentCallsPerLaunch = 50;
     private int modIntelligenceMaxEnrichmentFailuresPerLaunch = 20;
     private int modIntelligenceQueryTopK = 12;

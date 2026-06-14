@@ -18,7 +18,10 @@ public final class ResolveStorageChestStepFactory implements AgenticStepFactory 
         Map<String, String> args = step.args() != null ? step.args() : Map.of();
         ResolveStorageChestParams params = new ResolveStorageChestParams(
                 parseDouble(args, "searchradius", settings.getAgenticStorageSearchRadius(), 4.0, 64.0),
-                parseDouble(args, "placementradius", settings.getAgenticStoragePlacementRadius(), 2.0, 16.0),
+                // Issue C: clamp a model-supplied placementRadius to 8 (matches getAgenticStoragePlacementRadius's
+                // new cap). The candidate count is (2*ceil(r)+1)^2 * 5 -- r=8 was 1445 getBlockState-heavy
+                // candidates scanned on the server thread; this hard cap stops the model re-requesting r=8.
+                parseDouble(args, "placementradius", settings.getAgenticStoragePlacementRadius(), 2.0, 8.0),
                 parseBool(args, "preferexisting", settings.isAgenticStoragePreferExisting()),
                 parseBool(args, "allowplacement", settings.isAgenticStorageAllowPlacement()),
                 parseBool(args, "avoidlootchests", settings.isAgenticStorageAvoidLootChests()),

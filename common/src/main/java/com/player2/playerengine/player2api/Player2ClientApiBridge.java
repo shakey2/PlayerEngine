@@ -114,6 +114,7 @@ public final class Player2ClientApiBridge {
             player.connection.send(NetworkManager.toPacket(NetworkManager.Side.S2C,
                     PlayerEngine.CLIENT_PLAYER2_PROXY_REQUEST_PACKET_ID, buf));
 
+            // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 3c note: dedicated-proxy path only (isDedicatedClientProxy=true). User is on singleplayer (dedicated=false) so this future.get is NOT reached during the repro. Left at original timeoutSeconds to avoid risk. [/DEBUG-INSTR:llm-latency-2026-06-13]
             return future.get(timeoutSeconds, TimeUnit.SECONDS);
         } finally {
             PENDING_REQUESTS.remove(requestId);

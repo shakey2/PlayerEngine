@@ -35,11 +35,25 @@ import com.player2.playerengine.player2api.BudgetThresholdsResolver;
 import com.player2.playerengine.modintelligence.enrich.ModIntelligenceEnrichmentClient;
 import com.player2.playerengine.modintelligence.enrich.ModIntelligenceSpendSafety;
 import com.player2.playerengine.modintelligence.enrich.ModelBlacklist;
+import com.player2.playerengine.agentic.elliegps.EllieGPSStore;
+import com.player2.playerengine.agentic.elliegps.EllieGPSWaypointCountingService;
+import com.player2.playerengine.agentic.elliegps.EllieGPSWaypointIndex;
+import com.player2.playerengine.util.helpers.MaterialAvailability;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.item.Item;
+
+import com.player2.playerengine.tasks.crafting.CraftMacroStep;
+import com.player2.playerengine.tasks.crafting.resolver.IngredientInspectorImpl;
+import com.player2.playerengine.tasks.crafting.resolver.MaterialResolver;
+import com.player2.playerengine.tasks.crafting.resolver.RecipeAccessImpl;
+import com.player2.playerengine.tasks.crafting.resolver.ResolverResult;
+import com.player2.playerengine.util.ItemTarget;
 
 import dev.architectury.event.events.common.LifecycleEvent;
 import net.minecraft.world.entity.player.Player;
@@ -81,6 +95,18 @@ public class MCCommands {
             LOGGER.info("Server starting, registering MC commands");
             register(server);
             ModIntelligenceService.initialize(server);
+            // EllieGPS (C5): load the per-world waypoint store + index, then swap the real
+            // counting service into the MaterialAvailability seam (startup-only swap; the
+            // ellieGpsEnabled toggle is enforced per-call inside count()). Failures log WARN
+            // and leave the stub in place — never abort server start.
+            try {
+                EllieGPSStore store = EllieGPSStore.loadForServer(server);
+                EllieGPSWaypointIndex.setCurrent(EllieGPSWaypointIndex.loadOrRebuild(store));
+                MaterialAvailability.setWaypointSource(new EllieGPSWaypointCountingService());
+            } catch (Exception e) {
+                LOGGER.warn("EllieGPS startup wiring failed — waypoint features degrade to the stub: {}",
+                        e.getMessage());
+            }
         });
         LifecycleEvent.SERVER_STOPPING.register(server -> {
             // On dedicated, drop queued AI work before tearing down executors so the next start
@@ -94,6 +120,17 @@ public class MCCommands {
                 } catch (Exception e) {
                     LOGGER.warn("SERVER_STOPPING clearPendingWork failed: {}", e.getMessage());
                 }
+            }
+            // EllieGPS (C5): clear the per-world store + index so the counting service
+            // degrades to 0 until the next SERVER_STARTING reloads them.
+            try {
+                EllieGPSStore ellieStore = EllieGPSStore.get();
+                if (ellieStore != null) {
+                    ellieStore.clear();
+                }
+                EllieGPSWaypointIndex.setCurrent(null);
+            } catch (Exception e) {
+                LOGGER.warn("SERVER_STOPPING EllieGPS cleanup failed: {}", e.getMessage());
             }
             PlayerEngine.shutdownBackgroundExecutors();
         });
@@ -113,6 +150,7 @@ public class MCCommands {
                          .then(registerRag())
                          .then(registerRouting())
                          .then(registerCapability())
+                         .then(registerResolve())
                         .then(registerHelp()));
     }
     private static LiteralArgumentBuilder<CommandSourceStack> registerHelp() {
@@ -636,8 +674,8 @@ public class MCCommands {
                         .then(Commands.literal("force")
                                 .executes(ctx -> capabilityRebuild(ctx.getSource(), true))))
                 .then(Commands.literal("enrich")
-                        .executes(ctx -> capabilityEnrich(ctx.getSource(), 0))
-                        .then(Commands.argument("limit", IntegerArgumentType.integer(1, 500))
+                        .executes(ctx -> capabilityEnrich(ctx.getSource(), null))
+                        .then(Commands.argument("limit", IntegerArgumentType.integer(0))
                                 .executes(ctx -> capabilityEnrich(ctx.getSource(),
                                         IntegerArgumentType.getInteger(ctx, "limit")))));
     }
@@ -709,7 +747,12 @@ public class MCCommands {
         return 1;
     }
 
-    private static int capabilityEnrich(CommandSourceStack src, int limit) {
+    /**
+     * @param limit explicit per-batch call cap; overrides the config cap for this batch (0 = unlimited)
+     *        and skips the B4.5 large-queue budget gate (informed consent). {@code null} = no argument
+     *        given, config governs. The joules budget hard/soft limits always remain enforced.
+     */
+    private static int capabilityEnrich(CommandSourceStack src, Integer limit) {
         if (!Player2ServerConfigHolder.get().isModIntelligenceEnrichmentEnabled()) {
             src.sendFailure(Component.literal("Enrichment disabled in server_player2.json"));
             return 0;
@@ -725,17 +768,132 @@ public class MCCommands {
             return 0;
         }
         ModelBlacklist.ModelBlacklistSnapshot blacklist = ModelBlacklist.load();
-        var defer = ModIntelligenceSpendSafety.preflight(server, queued, blacklist);
+        var defer = ModIntelligenceSpendSafety.preflight(server, queued, blacklist, limit != null);
         if (defer.isPresent()) {
             Component msg = ModIntelligenceSpendSafety.messageFor(defer.get(), queued, blacklist);
             src.sendFailure(msg);
             ModIntelligenceSpendSafety.notifyPlayer(server, msg);
             return 0;
         }
-        src.sendSuccess(() -> Component.literal(
-                "ModIntelligence enrichment batch started (queued=" + queued + ")"), false);
-        ModIntelligenceService.scheduleEnrichmentBatch(server);
-        return 1;
+        int configMax = Player2ServerConfigHolder.get().getModIntelligenceMaxEnrichmentCallsPerLaunch();
+        String configMaxText = configMax <= 0 ? "unlimited" : String.valueOf(configMax);
+        String limitText;
+        if (limit == null) {
+            limitText = configMaxText + " (config)";
+        } else {
+            limitText = (limit <= 0 ? "unlimited" : String.valueOf(limit))
+                    + " — overrides config " + configMaxText;
+        }
+        // Feedback only AFTER scheduling — the result says what actually happened (the old code claimed
+        // "batch started" unconditionally even when the request was dropped because a batch was running).
+        ModIntelligenceService.ScheduleResult result = ModIntelligenceService.scheduleEnrichmentBatch(server, limit);
+        return switch (result) {
+            case STARTED -> {
+                src.sendSuccess(() -> Component.literal(
+                        "ModIntelligence enrichment batch started (queued=" + queued + ", limit: " + limitText + ")"), false);
+                yield 1;
+            }
+            case ALREADY_RUNNING -> {
+                String pendingText = limit == null
+                        ? "config-limit"
+                        : (limit <= 0 ? "unlimited" : limit + "-limit");
+                src.sendSuccess(() -> Component.literal(
+                        "ModIntelligence enrichment: a batch is already running; your " + pendingText
+                                + " batch will start when it finishes (queued=" + queued + ")"), false);
+                yield 1;
+            }
+            case NOTHING_QUEUED -> {
+                src.sendFailure(Component.literal("ModIntelligence enrichment: nothing queued for enrichment"));
+                yield 0;
+            }
+            case DISABLED -> {
+                src.sendFailure(Component.literal(
+                        "ModIntelligence enrichment is disabled in config (server_player2.json)"));
+                yield 0;
+            }
+            case BILLING_UNAVAILABLE -> {
+                src.sendFailure(Component.literal(
+                        "ModIntelligence enrichment: billing not available yet — join a world or wait for the stored token"));
+                yield 0;
+            }
+        };
+    }
+
+    /**
+     * {@code /playerengine resolve <item> [count]} — OP-only (permission 2). Deterministic resolver
+     * dry-run: runs {@link MaterialResolver#resolve} against a live bot's CURRENT inventory and prints
+     * the {@link ResolverResult} (status, ordered sub-craft steps, external acquisitions, tiered
+     * deficit, failure reason). Operator debug tooling for Workstream 6.
+     *
+     * <p><b>Invariants:</b> ZERO Player2/AiTask/Joules calls and persists nothing — it only reads
+     * inventory counts and the Minecraft recipe/tag system through the deterministic resolver. It does
+     * not enqueue, start, or mutate any task; it is logging/output only.
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> registerResolve() {
+        return Commands.literal("resolve")
+                .requires(src -> src.hasPermission(2))
+                .then(Commands.argument("item", StringArgumentType.word())
+                        .executes(ctx -> executeResolve(ctx, 1))
+                        .then(Commands.argument("count", IntegerArgumentType.integer(1))
+                                .executes(ctx -> executeResolve(
+                                        ctx, IntegerArgumentType.getInteger(ctx, "count")))));
+    }
+
+    private static int executeResolve(CommandContext<CommandSourceStack> ctx, int count) {
+        CommandSourceStack src = ctx.getSource();
+        String itemName = StringArgumentType.getString(ctx, "item");
+
+        // Resolve the <item> string to a concrete Item; default the namespace to "minecraft:".
+        String qualified = itemName.contains(":") ? itemName : "minecraft:" + itemName;
+        ResourceLocation id = ResourceLocation.tryParse(qualified);
+        Optional<Item> targetOpt = id != null
+                ? BuiltInRegistries.ITEM.getOptional(id)
+                : Optional.empty();
+        if (targetOpt.isEmpty()) {
+            src.sendFailure(Component.literal("Unknown item: '" + itemName + "' (parsed as '" + qualified + "')."));
+            return 0;
+        }
+        Item target = targetOpt.get();
+
+        // Acquire a live bot controller via the existing staticAPIServices pattern (resolver reads the
+        // bot's current inventory through it). No API call is made.
+        if (PlayerEngineController.staticAPIServices.isEmpty()) {
+            src.sendFailure(Component.literal("No Player2 API service registered (no active bots)."));
+            return 0;
+        }
+        Player2APIService apiService = PlayerEngineController.staticAPIServices.values().iterator().next();
+        PlayerEngineController controller = apiService.getController();
+
+        // Deterministic resolver: zero model calls, no persistence.
+        MaterialResolver resolver = new MaterialResolver(new IngredientInspectorImpl(), new RecipeAccessImpl());
+        ResolverResult result = resolver.resolve(controller, target, count);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Resolve dry-run — ").append(qualified).append(" x").append(count).append('\n');
+        sb.append("  status: ").append(result.status()).append('\n');
+        sb.append("  remainingDeficit (tiered): ").append(result.remainingDeficit()).append('\n');
+        sb.append("  steps (").append(result.remainingSteps().size()).append("):\n");
+        for (CraftMacroStep step : result.remainingSteps()) {
+            String pooled = step.outputMatches() != null
+                    ? (" pooled=" + step.outputMatches().length)
+                    : " pooled=none";
+            sb.append("    - ").append(step.kind())
+              .append(" x").append(step.craftsNeeded())
+              .append(" [").append(step.debugLabel()).append("]")
+              .append(pooled).append('\n');
+        }
+        sb.append("  external (").append(result.externalNeeded().size()).append("):\n");
+        for (ItemTarget t : result.externalNeeded()) {
+            sb.append("    - ").append(t.getCatalogueName())
+              .append(" x").append(t.getTargetCount()).append('\n');
+        }
+        if (result.failureReason() != null && !result.failureReason().isEmpty()) {
+            sb.append("  failureReason: ").append(result.failureReason()).append('\n');
+        }
+
+        LOGGER.info(sb.toString());
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return result.status() == ResolverResult.Status.UNOBTAINABLE ? 0 : 1;
     }
 
 }
