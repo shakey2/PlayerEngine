@@ -1,6 +1,8 @@
 package com.player2.playerengine.tasks.movement;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.executor.StopReason;
+import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.tasks.base.Task;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
@@ -12,6 +14,13 @@ import net.minecraft.world.phys.Vec3;
 public class FollowPlayerTask extends Task {
    private final String playerName;
    private final double followDistance;
+   /**
+    * Set when we reached the followed player's last-known position but they are gone (no longer in
+    * the tracker / not merely out of render distance) — the death/disconnect/dimension-change signal.
+    * Consumed in {@link #onStop} to arm a graceful {@link StopReason#FOLLOWED_TARGET_GONE} on the
+    * step executor instead of letting it classify the stop as FATAL:task_stopped_without_finish.
+    */
+   private boolean targetGone = false;
 
    public FollowPlayerTask(String playerName, double followDistance) {
       this.playerName = playerName;
@@ -37,6 +46,9 @@ public class FollowPlayerTask extends Task {
          Vec3 target = lastPos.get();
          if (target.closerThan(mod.getPlayer().position(), 1.0) && !mod.getEntityTracker().isPlayerLoaded(this.playerName)) {
             mod.logWarning("Failed to get to player \"" + this.playerName + "\". We moved to where we last saw them but now have no idea where they are.");
+            // Reached their last-known position and they are gone (died / disconnected / changed
+            // dimension) rather than merely out of render distance — graceful termination, not FATAL.
+            this.targetGone = true;
             this.stop();
             return null;
          } else {
@@ -67,6 +79,13 @@ public class FollowPlayerTask extends Task {
 
    @Override
    protected void onStop(Task interruptTask) {
+      // If we stopped because the followed player vanished, arm a graceful FOLLOWED_TARGET_GONE on
+      // the step executor before the user task chain fires its terminal onFinish callback. Without
+      // this, the chain sees a task that stopped without finishing and labels it FATAL.
+      if (this.targetGone && this.controller != null
+            && this.controller.getStepExecutorAdapter() instanceof TaskStepExecutorAdapter adapter) {
+         adapter.armPendingChainCancel(StopReason.FOLLOWED_TARGET_GONE);
+      }
    }
 
    @Override

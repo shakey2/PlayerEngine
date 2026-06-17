@@ -8,9 +8,12 @@ import java.util.List;
 /**
  * Pure deterministic function — no I/O, no model call, no Player2 API.
  *
- * <p>Reads ONLY the structured degraded signals on {@link AgenticRunState} (never the *Progress
- * strings, which are rewritten unconditionally on clean runs). Returns "" when all signals are
- * CLEAN, guaranteeing the clean-success path produces no spurious note.
+ * <p>The DegradationLevel signals on {@link AgenticRunState} are the ONLY clean-vs-degraded signal
+ * (the *Progress strings are rewritten unconditionally and MUST NOT be used for that decision). On a
+ * CLEAN step the *Progress strings ARE read, but solely to extract FACTUAL success counts/targets
+ * (deposited N into chest at x y z, gathered N) so the model receives the real outcome instead of a
+ * generic "finished running" it would otherwise confabulate (DESIGN.md §3). Returns "" only when
+ * every signal is CLEAN and no success facts were recorded.
  */
 public final class AgenticDegradationSummary {
 
@@ -31,11 +34,26 @@ public final class AgenticDegradationSummary {
         // --- Gather ---
         if (s.getGatherDegradation() != DegradationLevel.CLEAN) {
             clauses.add(gatherClause(s.getGatherDegradationReason()));
+        } else {
+            // CLEAN gather still needs a FACTUAL note so the model does not confabulate the outcome.
+            // gatherProgress is rewritten on every run including success; read it ONLY for the count.
+            String clause = gatherSuccessClause(s.getGatherProgress());
+            if (clause != null && !clause.isBlank()) {
+                clauses.add(clause);
+            }
         }
 
         // --- Deposit ---
         if (s.getDepositDegradation() != DegradationLevel.CLEAN) {
             clauses.add(depositClause(s.getDepositDegradationReason()));
+        } else {
+            // CLEAN deposit (the most important outcome to report truthfully): a successful deposit
+            // previously left the model with only a generic "finished running", so it would invent
+            // "Iron is stored!". Surface the deposited count + the resolved chest coordinates.
+            String clause = depositSuccessClause(s.getDepositProgress(), s.getStorageTargetSummary());
+            if (clause != null && !clause.isBlank()) {
+                clauses.add(clause);
+            }
         }
 
         // --- Label ---
@@ -49,6 +67,57 @@ public final class AgenticDegradationSummary {
         }
 
         return String.join("; ", clauses);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CLEAN-success fact clauses — extract a count (and chest target) from the *Progress strings so
+    // the model receives the real outcome on a clean run. Empty string => no factual note to add.
+    // -----------------------------------------------------------------------------------------
+
+    private static String depositSuccessClause(String progress, String storageTarget) {
+        int n = parseToken(progress, "deposited=");
+        if (n <= 0) {
+            // 0 / unparseable: a genuine no-op is already surfaced by the SKIPPED branch
+            // (nothing_to_deposit); nothing factual to add here.
+            return "";
+        }
+        String clause = "deposited " + n + " item(s)";
+        if (storageTarget != null && !storageTarget.isBlank()) {
+            clause += " into " + storageTarget.trim();
+        }
+        return clause;
+    }
+
+    private static String gatherSuccessClause(String progress) {
+        int n = parseToken(progress, "gathered=");
+        return n > 0 ? "gathered " + n + " item(s)" : "";
+    }
+
+    /**
+     * Extracts the integer immediately following {@code token} (e.g. "deposited=") in a *Progress
+     * string. Returns -1 when the token is absent or the value is not a parseable non-negative int.
+     */
+    private static int parseToken(String progress, String token) {
+        if (progress == null || token == null) {
+            return -1;
+        }
+        int i = progress.indexOf(token);
+        if (i < 0) {
+            return -1;
+        }
+        int start = i + token.length();
+        int end = start;
+        while (end < progress.length() && Character.isDigit(progress.charAt(end))) {
+            end++;
+        }
+        if (end == start) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(progress.substring(start, end));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     // -----------------------------------------------------------------------------------------
@@ -82,7 +151,19 @@ public final class AgenticDegradationSummary {
             return "deposit partial: some items of the request not stored";
         }
         if (r.contains("nothing_to_deposit")) {
-            return "deposit no-op: nothing was deposited";
+            // A deposit no-op almost always means the requested resource was never in the bot's
+            // inventory and agentic could not obtain it: the only agentic resource step is
+            // gather_loose_items (loose DROPS already on the floor) — there is NO mine/get step. So a
+            // bare "nothing was deposited" leaves the model looping on agentic variants (deposit/store/
+            // gather+deposit) that all no-op for the same reason. Make the no-op TRUTHFUL and ACTIONABLE
+            // (DESIGN.md §3): tell the model the resource was never obtained and to use 'get' FIRST,
+            // mirroring the pure-mine redirect (AgenticPlannerService.mineGoalRedirectMessage). This
+            // clause reaches the MODEL via finishWithNote ("finished running, but: …"). The PLAYER gets
+            // the tailored line independently from DepositItemsTask.describeDepositOutcome -> report(…,
+            // true); both channels fire, so the model can self-correct in one turn instead of looping.
+            return "deposit no-op: nothing was deposited — the requested item was not in inventory and"
+                    + " agentic cannot mine or gather raw resources (it only picks up loose drops and"
+                    + " stores them). Use 'get <item> <count>' to obtain it first, then deposit.";
         }
         // Generic fallback.
         return reason.isBlank() ? "deposit partial" : "deposit partial: " + reason;

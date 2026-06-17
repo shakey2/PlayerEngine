@@ -267,6 +267,19 @@ public final class AgenticPlannerService {
         } else if (AgenticGatherIntentDetector.looksLikeGatherDropGoal(goalText)) {
             fallbackPlan = AgenticFallbackPlans.gatherLooseItemsPlan(goalText, settings);
             source = "fallback_gather";
+        } else if (AgenticGatherIntentDetector.looksLikeMineOrGetGoal(goalText)) {
+            // Pure mine/get goal ("find diamond_ore", "mine iron"): no agentic step kind can mine or
+            // acquire a resource (ALLOWED_STEP_KINDS covers only gather_loose_items /
+            // resolve_storage_chest / deposit_items / label_chest), so synthesising a plan would just
+            // fail revalidation. Return a TRUTHFUL, ACTIONABLE failure instead of the generic
+            // "I could not make a safe plan" — it reaches both the player (chat) and the model
+            // (command-completion feedback) via AgenticCommand.finishWithError (DESIGN.md §3), telling
+            // the model to redirect to the deterministic `get` command.
+            return new AgenticPlannerOutcome(
+                    AgenticPlanValidationResult.invalid(List.of(reason)),
+                    reason,
+                    toolIds,
+                    mineGoalRedirectMessage());
         }
         if (fallbackPlan == null) {
             return new AgenticPlannerOutcome(
@@ -285,6 +298,20 @@ public final class AgenticPlannerService {
     }
 
     private static String safePlanFailureMessage(String goalText) {
-        return "I could not make a safe plan for that yet.";
+        // Catch-all for an unrecognised goal that still reaches fallbackPlan==null. Point the model at
+        // the deterministic `get` command rather than dead-ending it: agentic step kinds only cover
+        // drop-pickup and chest storage, so anything else (notably mine/gather) belongs on `get`.
+        return "I could not make a safe plan for that yet (agentic planning covers drop pickup and chest"
+                + " storage only). To mine or collect a resource, use the 'get' command directly instead.";
+    }
+
+    /**
+     * Truthful, actionable message for a pure mine/get goal that no agentic step kind can fulfil.
+     * Delivered to both the player and the model via {@code AgenticCommand.finishWithError}.
+     */
+    private static String mineGoalRedirectMessage() {
+        return "Agentic planning cannot mine or gather resources — it handles drop pickup and chest"
+                + " storage only. Use 'get <item> <count>' directly instead (use the drop/item name,"
+                + " e.g. 'get diamond 3', not the ore-block name).";
     }
 }

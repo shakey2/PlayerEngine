@@ -51,9 +51,16 @@ public class TaskStepExecutorAdapter implements IStepExecutorAdapter {
      * Arms {@link #pendingFinishReason} when a tracked step is RUNNING and the user task chain
      * still holds an active task — used by {@link PlayerEngineController#stop(StopReason)} so
      * {@code stop()} / disconnect produce deterministic {@link StopReason} labels.
+     *
+     * <p>First-writer-wins: if a reason has already been armed (e.g. an operator
+     * {@code stop(CANCELLED_OPERATOR)} that races a follow self-stop), it is kept and not
+     * overwritten, so the originally-intended label is recorded rather than the later one.
      */
     public void armPendingChainCancel(StopReason reason) {
         if (reason == null) {
+            return;
+        }
+        if (this.pendingFinishReason != null) {
             return;
         }
         if (activeExecution != null && activeExecution.getState() == StepState.RUNNING
@@ -112,7 +119,16 @@ public class TaskStepExecutorAdapter implements IStepExecutorAdapter {
             this.lastCompletedExecution = exec;
             if (exec.getState() == StepState.FAILED) {
                 String lastEntry = exec.getLastLogEntry();
-                if (!lastEntry.contains("CANCELLED_")) {
+                if (lastEntry.contains(StopReason.FOLLOWED_TARGET_GONE.name())) {
+                    // Expected, graceful termination of a follow: the followed player died/left.
+                    // Never leak the raw state-machine string to the player \u2014 send a concise human line.
+                    Player owner = mod.getOwner();
+                    if (owner instanceof ServerPlayer sp) {
+                        sp.sendSystemMessage(Component.literal(
+                                "I lost you \u2014 looks like you died or left. "
+                                + "I'll wait here; tell me to follow again when you're ready."));
+                    }
+                } else if (!lastEntry.contains("CANCELLED_")) {
                     String msg = "[PlayerEngine] Step '" + exec.getStepKind()
                             + "' stopped unexpectedly \u2014 " + lastEntry;
                     mod.log(msg);

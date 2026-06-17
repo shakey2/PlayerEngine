@@ -20,6 +20,15 @@ public enum StopReason {
     CANCELLED_DISCONNECT,
     /** A new tracked step replaced the previous non-terminal execution. */
     CANCELLED_SUPERSEDED,
+    /** The companion was despawned/dismissed/removed while a task was running; the run cannot resume. */
+    CANCELLED_RESPAWN,
+    /**
+     * The followed player vanished (died / disconnected / changed dimension) while a follow was
+     * running. An expected, graceful termination of {@code follow_player} — not a FATAL unexpected
+     * stop and not an operator/companion cancel. Suppresses the raw state-machine chat dump (it is
+     * replaced with a concise human line) and routes the model a truthful "do not retry" note.
+     */
+    FOLLOWED_TARGET_GONE,
 
     /** Local call-count hard limit or Joules-balance hard threshold reached; no new AI steps until resolved. */
     BUDGET_HARD_LIMIT

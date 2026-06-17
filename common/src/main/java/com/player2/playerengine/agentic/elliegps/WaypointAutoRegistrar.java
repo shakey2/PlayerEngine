@@ -131,6 +131,30 @@ public final class WaypointAutoRegistrar {
             return;
         }
 
+        // --- No-op-deposit guard: nothing changed, a record already exists -> skip entirely ---
+        // afterDeposit runs in the deposit_items SUCCESS branch, but a no-op deposit
+        // ("nothing_to_deposit", e.g. the requested item was never in inventory) is ALSO a success
+        // (DepositItemsTask: empty selection / nothing held -> succeed). Without this guard every such
+        // failed-but-"successful" attempt re-scans the chest and re-runs store.upsert (re-persist +
+        // reindex + "EllieGPS: upserted waypoint …" log + a player milestone line) with byte-identical
+        // contents — observed ~8x in one session, all no-ops, all identical. When the deposit moved
+        // zero items (depositDegradation==SKIPPED, set only on nothing_to_deposit) AND a record already
+        // exists at this position, the freshly scanned snapshot would be unchanged: skip the scan,
+        // upsert, persist, reindex, log, and milestone. First-time registration and real content
+        // changes are untouched (no existing record, or a non-no-op deposit -> guard does not trip).
+        EllieGPSStore preStore = EllieGPSStore.get();
+        boolean depositWasNoOp =
+                context.runState().getDepositDegradation() == DegradationLevel.SKIPPED
+                && context.runState().getDepositDegradationReason() != null
+                && context.runState().getDepositDegradationReason().contains("nothing_to_deposit");
+        if (depositWasNoOp && preStore != null && preStore.byPosition(dimensionId, pos) != null) {
+            PlayerEngine.LOGGER.debug(
+                    "WaypointAutoRegistrar: deposit no-op and waypoint already registered at {}; "
+                            + "skipping redundant re-registration.",
+                    ContainerResolver.formatPos(pos));
+            return;
+        }
+
         // In-place scan — no navigation, no animation. The bot is standing at the chest it
         // just deposited into; the loot-table marker question was already answered pre-deposit
         // (ResolveStorageChestTask captured the evidence before any container contact).

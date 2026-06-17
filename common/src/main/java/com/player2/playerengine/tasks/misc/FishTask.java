@@ -3,9 +3,16 @@ package com.player2.playerengine.tasks.misc;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.automaton.Baritone;
 import com.player2.playerengine.automaton.process.FishingProcess;
+import java.util.function.Consumer;
 import net.minecraft.world.item.Items;
 
 public class FishTask extends Task {
+   private final Consumer<String> onCannotStart;
+
+   public FishTask(Consumer<String> onCannotStart) {
+      this.onCannotStart = onCannotStart != null ? onCannotStart : reason -> {};
+   }
+
    @Override
    protected void onStart() {
       ((Baritone)this.controller.getBaritone()).getFishingProcess().fish();
@@ -16,6 +23,8 @@ public class FishTask extends Task {
       FishingProcess fishingProcess = ((Baritone)this.controller.getBaritone()).getFishingProcess();
       if (!this.controller.getSlotHandler().forceEquipItem(Items.FISHING_ROD)) {
          this.setDebugState("Can't fish without a fishing rod");
+         this.onCannotStart.accept("No fishing rod in inventory");
+         this.stop();
          return null;
       } else {
          if (!fishingProcess.isActive()) {

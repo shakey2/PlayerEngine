@@ -11,7 +11,10 @@ public class PlayerEngineCommands {
             .registerNewCommand(
                   new GetCommand(),
                   new EquipCommand(),
-                  new BuildStructureCommand(),
+                  // DISABLED for release: "build_structure" schematic builder is broken. Registration
+                  // cut so the AI cannot call it; BuildStructureCommand/BuildStructureTask code left
+                  // intact. Re-enable here AND in SeedToolMetadata (doc("build_structure", ...)) once fixed.
+                  // new BuildStructureCommand(),
                   new BodyLanguageCommand(),
                   new DepositCommand(),
                   new GotoCommand(),

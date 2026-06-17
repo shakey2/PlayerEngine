@@ -116,6 +116,22 @@ public abstract class Command {
       }
    }
 
+   /**
+    * Ends the command via the SUCCESS path carrying an informational RESULT {@code payload} (e.g.
+    * {@code locate_storage} coordinates) that is NOT a degradation. Unlike {@link #finishWithNote(String)},
+    * which the model sees framed as "finished running, but: …" (implying something went wrong), this
+    * frames the payload as a neutral result while still delivering the standard "what next?" cue. A
+    * {@code null}/blank payload degrades to a plain {@link #finish()}.
+    */
+   protected void finishWithInfo(String payload) {
+      if (payload == null || payload.isBlank()) {
+         this.finish();
+         return;
+      }
+      this.finishWithNote(
+            com.player2.playerengine.player2api.AgentConversationData.INFO_RESULT_NOTE_PREFIX + payload);
+   }
+
    public String getHelpRepresentation() {
       StringBuilder sb = new StringBuilder(this.name);
 

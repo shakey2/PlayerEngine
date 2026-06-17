@@ -84,11 +84,16 @@ public class LocateStorageCommand extends Command {
         } else {
             payload = String.join("\n", lines);
         }
-        AiConversationFeedback.enqueueInfo(mod, payload);
         Debug.logMessage("storage-locate ok lines=" + lines.size()
                 + " user=" + (user != null ? user.getGameProfile().getName() : "none")
                 + " bot=" + bot.getName().getString());
-        this.finish();
+        // Deliver the coordinates as the command-finish RESULT rather than a bare enqueueInfo + finish().
+        // The old pattern left the just-enqueued InfoMessage in the event queue at finish time, so
+        // onCommandFinish's "queue not empty" guard suppressed the standard "what shall we do next?"
+        // cue — the model got raw coordinates with no follow-up prompt and picked `deposit` (no coords)
+        // instead of `deposit_to_storage <x y z>`. finishWithInfo routes the payload through the
+        // command-finish prompt so the coordinates AND the next-step cue arrive together.
+        this.finishWithInfo(payload);
     }
 
     /** One labeled coordinate; the kind token is appended only when it is not a plain chest. */
