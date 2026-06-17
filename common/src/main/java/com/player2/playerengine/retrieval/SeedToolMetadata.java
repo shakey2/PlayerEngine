@@ -172,7 +172,7 @@ public final class SeedToolMetadata {
             doc("agentic",
                 "agentic",
                 "Plan and run multi-step storage goals: gather loose drops, find OR craft/place a chest even when none is nearby, deposit, and optionally label the chest with a sign.",
-                "Use for multi-step gather-and-store goals, or when a direct 'deposit' could not finish. It can collect nearby drops first, find or craft/place one chest (even when none exists nearby), deposit the selected (or all non-tool) items, and best-effort craft (if needed) and place a labeled sign. This is the recommended escalation when a one-shot 'deposit' reports it could not complete. Prefer pickup_drops for simple floor pickup only.",
+                "Use for multi-step gather-and-store goals, or when a direct 'deposit' could not finish. It can collect nearby drops first, find or craft/place one chest (even when none exists nearby), deposit the selected (or all non-tool) items, and best-effort craft (if needed) and place a labeled sign. This is the recommended escalation when a one-shot 'deposit' reports it could not complete. Prefer pickup_drops for simple floor pickup only. NOTE: agentic does NOT mine or fetch raw resources — 'gather' here means picking up loose drops already on the ground, not mining blocks or sourcing items. To deposit an item the NPC does not yet hold, use 'get <item> <count>' to obtain it FIRST, then deposit.",
                 list("agentic store my cobblestone", "agentic pick up nearby drops",
                      "agentic find a chest nearby",
                      "agentic collect the drops and prepare a chest",
@@ -245,19 +245,22 @@ public final class SeedToolMetadata {
                      "biome structure", "vanilla structure"),
                 list("movement", "navigation", "observation")),
 
-            doc("build_structure",
-                "build_structure",
-                "Build a structure at specified coordinates using a schematic search query and description. The NPC does not need to collect materials beforehand.",
-                "Use when the owner asks the NPC to build or construct something at a specific location. Provide XYZ coordinates for the build center-bottom, a short schematic search query, and a longer description. If no coordinates are specified, use the owner's or NPC's current position.",
-                list(
-                    "build_structure -305 406 72 \"gray modern house\" \"a gray modern house with a rose garden\"",
-                    "build_structure 100 64 200 \"small barn\" \"a wooden barn for storing hay\""
-                ),
-                list("build", "construct", "create structure", "make building", "place building",
-                     "erect", "architect", "schematic", "house", "base", "shelter", "cabin",
-                     "tower", "wall", "build house", "build base", "build something",
-                     "put up", "place structure"),
-                list("building", "placement")),
+            // DISABLED for release: "build_structure" schematic builder is broken (registration cut in
+            // PlayerEngineCommands). Tool doc removed so the model is never told the command exists and no
+            // "metadata but no registered Command" warning fires. Re-enable alongside the registration.
+            // doc("build_structure",
+            //     "build_structure",
+            //     "Build a structure at specified coordinates using a schematic search query and description. The NPC does not need to collect materials beforehand.",
+            //     "Use when the owner asks the NPC to build or construct something at a specific location. Provide XYZ coordinates for the build center-bottom, a short schematic search query, and a longer description. If no coordinates are specified, use the owner's or NPC's current position.",
+            //     list(
+            //         "build_structure -305 406 72 \"gray modern house\" \"a gray modern house with a rose garden\"",
+            //         "build_structure 100 64 200 \"small barn\" \"a wooden barn for storing hay\""
+            //     ),
+            //     list("build", "construct", "create structure", "make building", "place building",
+            //          "erect", "architect", "schematic", "house", "base", "shelter", "cabin",
+            //          "tower", "wall", "build house", "build base", "build something",
+            //          "put up", "place structure"),
+            //     list("building", "placement")),
 
             doc("bodylang",
                 "bodylang",

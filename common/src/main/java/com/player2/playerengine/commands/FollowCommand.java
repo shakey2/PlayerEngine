@@ -6,6 +6,9 @@ import com.player2.playerengine.commands.base.ArgParser;
 import com.player2.playerengine.commands.base.Command;
 import com.player2.playerengine.commands.base.CommandException;
 import com.player2.playerengine.executor.RollbackPolicy;
+import com.player2.playerengine.executor.StepState;
+import com.player2.playerengine.executor.StopReason;
+import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.tasks.movement.FollowPlayerTask;
 
 public class FollowCommand extends Command {
@@ -31,7 +34,23 @@ public class FollowCommand extends Command {
       mod.runUserTaskTracked(
          "follow_player-" + username, "follow_player",
          new FollowPlayerTask(username), RollbackPolicy.NONE,
-         () -> this.finish()
+         () -> {
+            // If the follow ended because the followed player vanished (died / disconnected /
+            // changed dimension), give the model a truthful, actionable reason via the note path so
+            // it does not read this as a clean success and blindly re-issue follow into an instant
+            // repeat failure. Any other terminal state keeps the plain clean-finish route.
+            if (mod.getStepExecutorAdapter() instanceof TaskStepExecutorAdapter adapter
+                  && adapter.getLastCompletedExecution()
+                        .map(e -> e.getState() == StepState.FAILED
+                              && e.getLastLogEntry().contains(StopReason.FOLLOWED_TARGET_GONE.name()))
+                        .orElse(false)) {
+               this.finishWithNote(
+                     "the followed player died or disconnected, so following stopped — do not retry "
+                     + "follow until they confirm they are back");
+               return;
+            }
+            this.finish();
+         }
       );
    }
 }

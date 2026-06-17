@@ -141,6 +141,15 @@ public final class AgenticRunRegistry {
         public DegradationLevel getWaypointDegradation() { return waypointDegradation; }
         public String getWaypointDegradationReason() { return waypointDegradationReason; }
 
+        // Progress/target readers used by AgenticDegradationSummary to emit FACTUAL success notes on
+        // a clean run (deposited N, gathered N, chest at x y z). The *Progress strings are rewritten
+        // unconditionally — read them ONLY for success facts, never as a clean-vs-degraded signal
+        // (the DegradationLevel fields above are the signal). storageTargetSummary is set by
+        // ResolveStorageChestTask when a chest is selected.
+        public String getDepositProgress() { return depositProgress; }
+        public String getGatherProgress() { return gatherProgress; }
+        public String getStorageTargetSummary() { return storageTargetSummary; }
+
         /**
          * Returns the most relevant per-step progress note for the given step kind, used to surface
          * the specific failure reason (e.g. "could_not_obtain_chest_materials") in the terminal

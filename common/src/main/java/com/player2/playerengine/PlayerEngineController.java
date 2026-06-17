@@ -22,6 +22,7 @@ import com.player2.playerengine.equip.PickupWeaponEvalQueue;
 
 import com.player2.playerengine.player2api.manager.ConversationManager;
 import com.player2.playerengine.player2api.AgentSideEffects;
+import com.player2.playerengine.player2api.AiConversationFeedback;
 import com.player2.playerengine.player2api.AIPersistantData;
 import com.player2.playerengine.player2api.Player2APIService;
 
@@ -301,6 +302,45 @@ public class PlayerEngineController {
       this.getTaskRunner().disable();
       this.getBaritone().getPathingBehavior().forceCancel();
       this.getBaritone().getInputOverrideHandler().clearAllKeys();
+   }
+
+   /**
+    * Despawn/dismiss/removal hook (cross-mod contract with Player2NPC). When the companion is torn
+    * down while a task or agentic run is in flight, the run silently vanished and the model's next
+    * turn began with a fresh greeting and no knowledge of what was running — so the model could (and
+    * did) falsely claim the task succeeded. This emits the interruption to BOTH audiences (DESIGN.md
+    * §3) before {@code stop} cancels the chains:
+    * <ul>
+    *   <li>the player gets a concise chat line (only when an owner ServerPlayer is online);</li>
+    *   <li>the model gets an InfoMessage on THIS companion's conversation queue, enqueued BEFORE the
+    *       call site's {@code ConversationManager.despwnCompanion} wipes that queue.</li>
+    * </ul>
+    * MUST be called by Player2NPC despawn sites in place of {@code stop()}, ahead of
+    * {@code unregisterFromGlobalRegistry()} and {@code despwnCompanion(uuid)}. {@code ownerPlayer} may
+    * be {@code null} (e.g. the entity {@code remove} path with the owner offline): the player line is
+    * then skipped but the model InfoMessage is still enqueued, preserving truthfulness.
+    */
+   public void stopWithRespawnNotification(ServerPlayer ownerPlayer) {
+      boolean active = this.hasActiveNonIdleUserTask()
+            || AgenticRunRegistry.get(this.getEntity().getUUID()).isPresent();
+      if (active) {
+         // Model-facing (truthfulness-directed): enqueue onto THIS companion's queue before it is wiped.
+         AiConversationFeedback.enqueueInfo(this,
+               "You were despawned while a task was running. The task has been cancelled and will not"
+                     + " resume. Do not claim the task completed or succeeded.");
+         // Player-facing: concise human chat line, only when the owner is an online ServerPlayer.
+         if (ownerPlayer != null && ownerPlayer.getServer() != null) {
+            Character character = this.getAIPersistantData() != null
+                  ? this.getAIPersistantData().getCharacter() : null;
+            String name = character != null && character.shortName() != null
+                  ? character.shortName() : "Your companion";
+            AgentSideEffects.broadcastChatToPlayer(ownerPlayer.getServer(),
+                  name + " was despawned while a task was running — the task has been stopped and will"
+                        + " not resume.",
+                  ownerPlayer);
+         }
+      }
+      this.stop(StopReason.CANCELLED_RESPAWN);
    }
 
    private void initializeBaritoneSettings() {

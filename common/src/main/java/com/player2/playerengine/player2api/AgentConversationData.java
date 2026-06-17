@@ -47,6 +47,14 @@ public class AgentConversationData {
 
     private static short MAX_EVENT_QUEUE_SIZE = 10;
 
+    /**
+     * Marker prefix for a {@code finishWithNote} note that carries an informational RESULT payload
+     * (e.g. {@code locate_storage} coordinates) rather than a degradation. The command-finish prompt
+     * strips it and frames the note as a neutral result instead of a "but:" degradation. Commands wrap
+     * their payload with {@link com.player2.playerengine.commands.base.Command#finishWithInfo(String)}.
+     */
+    public static final String INFO_RESULT_NOTE_PREFIX = "[info-result] ";
+
     public static final Logger LOGGER = LogManager.getLogger();
 
     private final PlayerEngineController mod;
@@ -821,6 +829,15 @@ public class AgentConversationData {
             addEventToQueue(new InfoMessage(String.format(
                     "Command feedback: %s finished running. What shall we do next? If no new action is needed to finish user's request, generate empty command `\"\"`.",
                     commandName)));
+        } else if (note.startsWith(INFO_RESULT_NOTE_PREFIX)) {
+            // Succeeded with an informational RESULT payload (e.g. locate_storage coordinates) — NOT a
+            // degradation. Frame it as a result, not a "but:", so the model neither treats the payload
+            // as a problem nor loses the standard "what next?" cue (which the old enqueueInfo+finish()
+            // path suppressed by leaving a non-empty event queue at finish time).
+            addEventToQueue(new InfoMessage(String.format(
+                    "Command feedback: %s finished running. Result: %s. What shall we do next? If no new action is needed to finish user's request, generate empty command `\"\"`.",
+                    commandName,
+                    note.substring(INFO_RESULT_NOTE_PREFIX.length()))));
         } else {
             // Succeeded-but-degraded: same single InfoMessage, with a factual clause so the model can
             // truthfully report the degradation instead of claiming a clean success.

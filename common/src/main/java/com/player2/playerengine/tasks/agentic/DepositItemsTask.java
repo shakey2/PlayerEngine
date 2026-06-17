@@ -364,7 +364,10 @@ public final class DepositItemsTask extends Task implements DescribesProgress {
             return "stored " + depositedCount + ", " + n + " item(s) left";
         }
         if (message.equals("nothing_to_deposit")) {
-            return "nothing to deposit";
+            // Tailored player line (DESIGN.md §3): the no-op nearly always means the requested item
+            // was never in inventory and agentic cannot mine/gather it. Tell the player how to fix it
+            // in one step instead of a bare "nothing to deposit" that reads like a silent failure.
+            return "nothing to deposit (I don't have that item — try 'get <item> <count>' first)";
         }
         return message;
     }
