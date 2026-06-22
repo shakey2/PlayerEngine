@@ -93,6 +93,24 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     /** When true, owner clients may send {@code tts_playback_done} to early-clear speaker cooldown. */
     private boolean botTtsPlaybackAckEnabled = false;
 
+    // --- Bot lifecycle: auto-respawn + permadeath toggles ---
+
+    /**
+     * When true, the server-level lifecycle config wins over each player's per-player config
+     * (default ON: server overrides). Consulted only on dedicated servers; integrated/LAN/SP
+     * always use the server config. See {@code BotLifecycleSettingsResolver}.
+     */
+    private boolean serverOverridesPlayerConfig = true;
+    /** Server-level auto-respawn value (used in SP/LAN, or on a dedicated server when override is ON). */
+    private boolean serverAutoRespawn = true;
+    /**
+     * Server-level bot permadeath, tri-state (Model A): {@code null} = unset, so the resolver falls back
+     * to {@code world.isHardcore()}; explicit {@code true}/{@code false} is honored verbatim (OFF works
+     * even in hardcore). Gson omits the key when {@code null}, and an absent key deserializes back to
+     * {@code null} (= unset). Nullable on purpose — do not change to a primitive boolean.
+     */
+    private Boolean serverBotPermadeath = null;
+
     public Player2PayerMode getPayerMode() {
         return payerMode == null ? Player2PayerMode.PROMPTER_PAYS : payerMode;
     }
@@ -290,6 +308,34 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
 
     public void setBotTtsPlaybackAckEnabled(boolean botTtsPlaybackAckEnabled) {
         this.botTtsPlaybackAckEnabled = botTtsPlaybackAckEnabled;
+    }
+
+    // --- Bot lifecycle getters/setters ---
+
+    public boolean isServerOverridesPlayerConfig() {
+        return serverOverridesPlayerConfig;
+    }
+
+    public void setServerOverridesPlayerConfig(boolean serverOverridesPlayerConfig) {
+        this.serverOverridesPlayerConfig = serverOverridesPlayerConfig;
+    }
+
+    public boolean isServerAutoRespawn() {
+        return serverAutoRespawn;
+    }
+
+    public void setServerAutoRespawn(boolean serverAutoRespawn) {
+        this.serverAutoRespawn = serverAutoRespawn;
+    }
+
+    /** Nullable on purpose: {@code null} = unset (resolver falls back to {@code world.isHardcore()}). */
+    public Boolean getServerBotPermadeath() {
+        return serverBotPermadeath;
+    }
+
+    /** Accepts {@code null} (unset) or an explicit {@code true}/{@code false} (Model A). */
+    public void setServerBotPermadeath(Boolean serverBotPermadeath) {
+        this.serverBotPermadeath = serverBotPermadeath;
     }
 
     // --- Phase B5 getters/setters ---

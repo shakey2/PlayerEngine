@@ -10,11 +10,17 @@ public final class AgenticSchemas {
     public static final String STEP_RESOLVE_STORAGE_CHEST = "resolve_storage_chest";
     public static final String STEP_DEPOSIT_ITEMS = "deposit_items";
     public static final String STEP_LABEL_CHEST = "label_chest";
+    public static final String STEP_SMELT_ITEMS = "smelt_items";
+    public static final String STEP_SMITH_ITEMS = "smith_items";
+    public static final String STEP_MINE_BLOCK = "mine_block";
     public static final Set<String> ALLOWED_STEP_KINDS = Set.of(
             STEP_GATHER_LOOSE_ITEMS,
             STEP_RESOLVE_STORAGE_CHEST,
             STEP_DEPOSIT_ITEMS,
-            STEP_LABEL_CHEST);
+            STEP_LABEL_CHEST,
+            STEP_SMELT_ITEMS,
+            STEP_SMITH_ITEMS,
+            STEP_MINE_BLOCK);
     public static final String PLANNER_COMMAND_ID = "agentic";
 
     /** Step kinds that must never execute yet (reserved for C5: EllieGPS waypoints). */

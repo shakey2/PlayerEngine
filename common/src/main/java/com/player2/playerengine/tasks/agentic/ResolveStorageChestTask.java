@@ -277,7 +277,10 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
         }
         obtainAttempts++;
         ItemTarget chestTarget = new ItemTarget(Items.CHEST, 1);
-        Task macro = CraftMacroTasks.tryCreateMacroTask(this.controller, chestTarget);
+        // WS4: thread the run's chain-scoped reservation ledger so this craft respects sibling agentic
+        // steps' pre-seeded reservations (additive floor; can only lower perceived free stock).
+        Task macro = CraftMacroTasks.tryCreateMacroTask(this.controller, chestTarget,
+                context != null ? context.reservations() : null);
         if (macro != null) {
             updateProgress("obtaining chest item (craft macro)");
             child = macro;
@@ -494,7 +497,7 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
     private static String humanizeObtainReason(String macroReason) {
         // Demand-driven provisioning reasons are already enumerated, human-readable, and truthful (they
         // name the output and the owed externals WITH counts). Pass them through BEFORE the legacy broad
-        // contains() keys below — those would otherwise shadow the enumerated reason back into the
+        // contains() keys below -- those would otherwise shadow the enumerated reason back into the
         // untruthful generic "couldn't get enough wood" line (the 2026-06-09 evening playtest claimed
         // exactly that while the bot held 28 plank-equivalents). Ordering is load-bearing.
         if (macroReason.startsWith("Cannot finish crafting")
@@ -558,7 +561,7 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
      * <ul>
      *   <li>a CraftMacro <b>phase advance</b> ({@code COLLECT -> CRAFT -> FIND/MOVE/LOOK -> CRAFT_3X3 -> DONE});</li>
      *   <li>a rise in the bot's held count of chest-craft materials (logs + planks + crafting tables +
-     *       chests) — this covers a long single-phase {@code COLLECT} where the bot is slowly gathering
+     *       chests) -- this covers a long single-phase {@code COLLECT} where the bot is slowly gathering
      *       logs from the surface (the live failure: held flat at 0 for ~151s while pathing up from y=-58
      *       and the absolute clock fired). As each log/plank/table/chest enters inventory the count rises
      *       and the clock resets.</li>
@@ -567,7 +570,7 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
      * <p>On either signal {@code lastProgressMs} is set to now. Returns true when the most recent progress
      * was within {@code params.timeoutSeconds()} (so the macro is "making progress" and the timeout is
      * suppressed this tick). A genuinely stalled macro (no phase advance, no material gain) stops resetting
-     * the clock, so the idle-deadline in {@link #onTick} fires bounded — and in practice the macro's own
+     * the clock, so the idle-deadline in {@link #onTick} fires bounded -- and in practice the macro's own
      * collectNoGain (~60s) / collect-stall (~15s) / table-approach (~15s) / craft-fail caps terminate the
      * child first, then {@link #MAX_OBTAIN_ATTEMPTS} bounds the obtain loop. No infinite hang is introduced.
      */

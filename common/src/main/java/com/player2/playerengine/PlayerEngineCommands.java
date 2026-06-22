@@ -24,6 +24,9 @@ public class PlayerEngineCommands {
                   new StopCommand(),
                   new FoodCommand(),
                   new MeatCommand(),
+                  new SmeltCommand(),
+                  new SmithCommand(),
+                  new MineCommand(),
                   new ReloadSettingsCommand(),
                   new ResetMemoryCommand(),
                   // DISABLED for release: "beat the game" (gamer) is broken. Registration cut so it

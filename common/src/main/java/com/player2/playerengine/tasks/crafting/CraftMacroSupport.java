@@ -2,6 +2,8 @@ package com.player2.playerengine.tasks.crafting;
 
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.TaskCatalogue;
+import com.player2.playerengine.tasks.crafting.resolver.RecipeAccess;
+import com.player2.playerengine.tasks.crafting.resolver.RecipeAccessImpl;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.util.ItemTarget;
 import com.player2.playerengine.util.WoodType;
@@ -12,8 +14,11 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.crafting.RecipeManager;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.Vec3;
@@ -36,20 +41,43 @@ public final class CraftMacroSupport {
       return Arrays.asList(ItemHelper.WOOD_SIGN).contains(item);
    }
 
-   public static boolean isSupportedTarget(ItemTarget target) {
-      if (target.isCatalogueItem()) {
-         String name = target.getCatalogueName();
-         if (name.equals("sign") || name.equals("chest") || name.equals("crafting_table") || name.equals("stick") || name.equals("planks")) {
-            return true;
-         }
-         return name.endsWith("_sign") || name.endsWith("_planks");
+   /**
+    * Returns {@code true} iff the given {@code target} maps to a single concrete {@link Item} that
+    * has at least one {@code RecipeType.CRAFTING} recipe in the live {@link RecipeManager}. This
+    * replaces the old per-name whitelist with a live-recipe-manager check so any registered item
+    * with a crafting recipe is accepted.
+    *
+    * <p>Resolution order:
+    * <ol>
+    *   <li>Resolve the target to a single concrete {@code Item} via
+    *       {@link #resolveSingleOutputItem(PlayerEngineController, ItemTarget)}.
+    *       If that returns empty, return {@code false}.</li>
+    *   <li>Obtain the {@link RecipeManager} and {@link RegistryAccess} from the server. If the
+    *       server is unavailable (pre-join edge case), return {@code false}.</li>
+    *   <li>Delegate to {@link RecipeAccess#hasRecipe} which checks {@code RecipeType.CRAFTING} only,
+    *       so smelt/smith/stonecut-only items correctly return {@code false} and fall back to the
+    *       {@code TaskCatalogue} path.</li>
+    * </ol>
+    *
+    * <p>{@link #resolveSingleOutputItem} and {@link #isSupportedItem} are left UNCHANGED per the
+    * WS1 plan; the 5 legacy species-pick branches in {@code resolveSingleOutputItem} continue to
+    * function correctly since each resolves to a concrete single {@code Item} whose crafting recipe
+    * is present in the vanilla {@code RecipeManager}.
+    */
+   private static final RecipeAccess RECIPE_ACCESS = new RecipeAccessImpl();
+
+   public static boolean isSupportedTarget(PlayerEngineController mod, ItemTarget target) {
+      Optional<Item> outputItemOpt = resolveSingleOutputItem(mod, target);
+      if (outputItemOpt.isEmpty()) {
+         return false;
       }
-      for (Item match : target.getMatches()) {
-         if (isSupportedItem(match)) {
-            return true;
-         }
+      MinecraftServer server = mod.getPlayer() != null ? mod.getPlayer().getServer() : null;
+      if (server == null) {
+         return false;
       }
-      return false;
+      RecipeManager recipeManager = server.getRecipeManager();
+      RegistryAccess registries = server.registryAccess();
+      return RECIPE_ACCESS.hasRecipe(recipeManager, outputItemOpt.get(), registries);
    }
 
    public static Optional<Item> resolveSingleOutputItem(PlayerEngineController mod, ItemTarget target) {

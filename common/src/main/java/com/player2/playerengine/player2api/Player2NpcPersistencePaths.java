@@ -161,4 +161,38 @@ public final class Player2NpcPersistencePaths {
     public static Path ellieGpsIndexDir(MinecraftServer server) {
         return ellieGpsIndexDir(server.getWorldPath(LevelResource.ROOT));
     }
+
+    // -------------------------------------------------------------------------
+    // Deferred-job store paths (WS7)
+    // -------------------------------------------------------------------------
+
+    /** Directory name for deferred-job per-world data. */
+    public static final String DEFERRED_JOBS_DIR_NAME = "deferredjobs";
+
+    /**
+     * Root deferred-jobs directory:
+     * {@code <worldRoot>/player2npc/persistentdata/deferredjobs/}.
+     *
+     * <p>Contains {@code jobs.json} (source of truth for all active deferred jobs).
+     */
+    public static Path deferredJobsRoot(Path worldRoot) {
+        return persistentDataRoot(worldRoot).resolve(DEFERRED_JOBS_DIR_NAME);
+    }
+
+    public static Path deferredJobsRoot(MinecraftServer server) {
+        return deferredJobsRoot(server.getWorldPath(LevelResource.ROOT));
+    }
+
+    /**
+     * Authoritative deferred-jobs file:
+     * {@code <worldRoot>/player2npc/persistentdata/deferredjobs/jobs.json}.
+     * Written via atomic tmp-rename on every mutation; always the recovery source.
+     */
+    public static Path deferredJobsFile(Path worldRoot) {
+        return deferredJobsRoot(worldRoot).resolve("jobs.json");
+    }
+
+    public static Path deferredJobsFile(MinecraftServer server) {
+        return deferredJobsFile(server.getWorldPath(LevelResource.ROOT));
+    }
 }

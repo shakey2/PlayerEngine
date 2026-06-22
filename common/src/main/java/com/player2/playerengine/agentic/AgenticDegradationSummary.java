@@ -66,6 +66,48 @@ public final class AgenticDegradationSummary {
             clauses.add(waypointClause(s.getWaypointDegradation(), s.getWaypointDegradationReason()));
         }
 
+        // --- Smelt (deferred cooking: smelt_items) ---
+        if (s.getSmeltDegradation() != DegradationLevel.CLEAN) {
+            clauses.add(smeltClause(s.getSmeltDegradationReason()));
+        } else {
+            // CLEAN smelt still needs a FACTUAL note so the model reports the real count rather than
+            // confabulating a generic "finished running" (DESIGN.md §3). smeltProgress is rewritten on
+            // every run including success; read it ONLY for the count, never as a clean-vs-degraded
+            // signal (the DegradationLevel field above is the signal).
+            String clause = smeltSuccessClause(s.getSmeltProgress());
+            if (clause != null && !clause.isBlank()) {
+                clauses.add(clause);
+            }
+        }
+
+        // --- Smith (smithing-table upgrade: smith_items) ---
+        if (s.getSmithDegradation() != DegradationLevel.CLEAN) {
+            clauses.add(smithClause(s.getSmithDegradationReason()));
+        } else {
+            // CLEAN smith still needs a FACTUAL note so the model reports the real count rather than
+            // confabulating a generic "finished running" (DESIGN.md §3). smithProgress is rewritten on
+            // every run including success; read it ONLY for the count, never as a clean-vs-degraded
+            // signal (the DegradationLevel field above is the signal).
+            String clause = smithSuccessClause(s.getSmithProgress());
+            if (clause != null && !clause.isBlank()) {
+                clauses.add(clause);
+            }
+        }
+
+        // --- Mine (generic block mining: mine_block) ---
+        if (s.getMineDegradation() != DegradationLevel.CLEAN) {
+            clauses.add(mineClause(s.getMineDegradationReason(), s.getMineProgress()));
+        } else {
+            // CLEAN mine still needs a FACTUAL note so the model reports the real count rather than
+            // confabulating a generic "finished running" (DESIGN.md §3). mineProgress is rewritten on
+            // every run including success; read it ONLY for the count, never as a clean-vs-degraded
+            // signal (the DegradationLevel field above is the signal).
+            String clause = mineSuccessClause(s.getMineProgress());
+            if (clause != null && !clause.isBlank()) {
+                clauses.add(clause);
+            }
+        }
+
         return String.join("; ", clauses);
     }
 
@@ -94,6 +136,56 @@ public final class AgenticDegradationSummary {
     }
 
     /**
+     * Clean-smelt factual clause: extract the smelted count (and output item name when present) from
+     * the smeltProgress string written by the agentic smelt step, e.g. {@code "smelted=16
+     * item=minecraft:iron_ingot"}. Empty string when nothing parseable was recorded.
+     */
+    private static String smeltSuccessClause(String progress) {
+        int n = parseToken(progress, "smelted=");
+        if (n <= 0) {
+            return "";
+        }
+        String item = parseStringToken(progress, "item=");
+        return (item != null && !item.isBlank())
+                ? "smelted " + n + " " + item
+                : "smelted " + n + " item(s)";
+    }
+
+    /**
+     * Clean-smith factual clause: extract the upgraded count (and output item name when present)
+     * from the smithProgress string written by the agentic smith step, e.g.
+     * {@code "upgraded=1 item=minecraft:netherite_pickaxe"}. Empty string when nothing
+     * parseable was recorded.
+     */
+    private static String smithSuccessClause(String progress) {
+        int n = parseToken(progress, "upgraded=");
+        if (n <= 0) {
+            return "";
+        }
+        String item = parseStringToken(progress, "item=");
+        return (item != null && !item.isBlank())
+                ? "upgraded " + n + " " + item + " at the smithing table"
+                : "upgraded " + n + " item(s) at the smithing table";
+    }
+
+    /**
+     * Clean-mine factual clause: extract the mined count (and target block name when present) from the
+     * mineProgress string written by the agentic mine_block step, e.g.
+     * {@code "mined=3 noDrops=0 block=minecraft:cobblestone"}. Empty string when nothing parseable
+     * was recorded.
+     */
+    private static String mineSuccessClause(String progress) {
+        int n = parseToken(progress, "mined=");
+        if (n <= 0) {
+            return "";
+        }
+        String block = parseStringToken(progress, "block=");
+        return (block != null && !block.isBlank())
+                ? "mined " + n + " " + block
+                : "mined " + n + " block(s)";
+    }
+
+    /**
      * Extracts the integer immediately following {@code token} (e.g. "deposited=") in a *Progress
      * string. Returns -1 when the token is absent or the value is not a parseable non-negative int.
      */
@@ -118,6 +210,29 @@ public final class AgenticDegradationSummary {
         } catch (NumberFormatException e) {
             return -1;
         }
+    }
+
+    /**
+     * Extracts the whitespace-delimited string value immediately following {@code token} (e.g.
+     * "item=") in a *Progress string. Returns null when the token is absent or empty.
+     */
+    private static String parseStringToken(String progress, String token) {
+        if (progress == null || token == null) {
+            return null;
+        }
+        int i = progress.indexOf(token);
+        if (i < 0) {
+            return null;
+        }
+        int start = i + token.length();
+        int end = start;
+        while (end < progress.length() && !Character.isWhitespace(progress.charAt(end))) {
+            end++;
+        }
+        if (end == start) {
+            return null;
+        }
+        return progress.substring(start, end);
     }
 
     // -----------------------------------------------------------------------------------------
@@ -206,6 +321,163 @@ public final class AgenticDegradationSummary {
         return reason.isBlank()
                 ? "waypoint not registered"
                 : "waypoint not registered: " + reason;
+    }
+
+    /**
+     * Renders a deferred-smelt degradation reason token into a model-facing clause. Tokens are the
+     * machine-readable reasons recorded by the agentic smelt step (see {@code SmeltStepFactory}),
+     * derived from {@code SmeltDeferredTask.OutcomeKind} / {@link
+     * com.player2.playerengine.tasks.deferred.DeferredDegradation#label()}. Defensive: unknown
+     * tokens fall through to a generic, reason-preserving form so the model still receives the truth.
+     */
+    private static String smeltClause(String reason) {
+        if (reason == null) {
+            reason = "";
+        }
+        String r = reason.toLowerCase(java.util.Locale.ROOT);
+        // Fuel pre-gather outcomes (checked FIRST, before the generic 'partial'/'out_of_fuel'/'no_fuel'
+        // matches below, so the distinctive 'fuel_gather' stem is never swallowed by them). The agentic
+        // smelt step auto-gathered fuel before cooking; two honest forms:
+        if (r.contains("fuel_gather")) {
+            if (r.contains("no_acquirable")) {
+                // ZERO: the gather found no usable fuel anywhere.
+                return "smelt failed: tried to gather fuel automatically but none was acquirable "
+                        + "(no coal/chests in range, no trees, or no pickaxe)";
+            }
+            // PARTIAL: gathered some fuel, but only enough for part of the batch. Parse 'collected=N of M'.
+            java.util.regex.Matcher m =
+                    java.util.regex.Pattern.compile("collected=(\\d+)\\s+of\\s+(\\d+)").matcher(r);
+            if (m.find()) {
+                return "smelt partial: auto-gathered fuel but only enough for " + m.group(1)
+                        + " of " + m.group(2);
+            }
+            return "smelt partial: auto-gathered fuel but only enough for part of the batch ("
+                    + reason + ")";
+        }
+        if (r.contains("partial") || r.contains("out_of_fuel")) {
+            // Partial yield: some items cooked, then the fuel ran out mid-batch.
+            return "smelt partial: ran out of fuel mid-batch — collected what finished (" + reason + ")";
+        }
+        if (r.contains("no_fuel")) {
+            return "smelt failed: no fuel was available to start the cook";
+        }
+        if (r.contains("no_recipe")) {
+            return "smelt failed: that item has no furnace/blast/smoke recipe (nothing was cooked)";
+        }
+        if (r.contains("furnace_gone") || r.contains("station_gone")) {
+            return "smelt failed: the furnace was removed while I was away (couldn't finish)";
+        }
+        if (r.contains("tampered")) {
+            return "smelt partial: the furnace contents changed while I was away — collected what I could";
+        }
+        if (r.contains("stalled_timeout")) {
+            return "smelt failed: the furnace chunk stopped ticking and the job timed out before it finished";
+        }
+        if (r.contains("stalled")) {
+            return "smelt incomplete: the furnace chunk stopped ticking — will finish when back near the furnace";
+        }
+        if (r.contains("no_furnace")) {
+            return "smelt failed: no furnace, blast furnace, or smoker was reachable";
+        }
+        if (r.contains("no_input")) {
+            return "smelt skipped: I don't have that item to smelt";
+        }
+        // Generic fallback preserves the reason token for the model.
+        return reason.isBlank() ? "smelt incomplete" : "smelt incomplete: " + reason;
+    }
+
+    /**
+     * Renders a deferred-smith degradation reason token into a model-facing clause. Tokens are the
+     * machine-readable reasons recorded by the agentic smith step (see {@code SmithStepFactory}),
+     * derived from {@code SmithDeferredTask.OutcomeKind}. Defensive: unknown tokens fall through
+     * to a generic, reason-preserving form so the model still receives the truth.
+     */
+    private static String smithClause(String reason) {
+        if (reason == null) {
+            reason = "";
+        }
+        String r = reason.toLowerCase(java.util.Locale.ROOT);
+        if (r.contains("partial")) {
+            return "smith partial: upgraded some items but could not complete the full batch ("
+                    + reason + ")";
+        }
+        if (r.contains("tampered")) {
+            return "smith partial: smithing table or inventory changed mid-run — upgraded what was possible";
+        }
+        if (r.contains("no_table")) {
+            return "smith failed: no smithing table was reachable or placeable";
+        }
+        if (r.contains("no_recipe")) {
+            return "smith failed: nothing in the smithing registry produces that item";
+        }
+        if (r.contains("missing_template")) {
+            return "smith failed: could not gather the required template item (" + reason + ")";
+        }
+        if (r.contains("missing_base")) {
+            return "smith failed: could not gather the required base item (" + reason + ")";
+        }
+        if (r.contains("missing_addition")) {
+            return "smith failed: could not gather the required upgrade material (" + reason + ")";
+        }
+        if (r.contains("setup_failed")) {
+            return "smith failed: could not start the upgrade (" + reason + ")";
+        }
+        if (r.contains("no_input")) {
+            return "smith skipped: no item was specified or resolved";
+        }
+        // Generic fallback preserves the reason token for the model.
+        return reason.isBlank() ? "smith incomplete" : "smith incomplete: " + reason;
+    }
+
+    /**
+     * Renders a mine_block degradation reason token into a model-facing clause. The mine step records
+     * three partial degradations, all PARTIAL level: the no-drops-on-incorrect-tool case
+     * ({@code incorrect_tool_no_drops}), a genuine overall timeout ({@code timeout} — more blocks may
+     * remain, retrying can continue), and range exhaustion ({@code no_more_blocks_in_range} — no more
+     * matching blocks within reach, the bot must RELOCATE to mine more). The factual mined/no-drops
+     * count and target block are parsed from {@code mineProgress}
+     * ({@code "mined=<N> noDrops=<M> block=<id>"}). Hard failures (no tool / unknown block / no
+     * target) do NOT pass through here — they surface via {@code progressForKind("mine_block")}.
+     * Defensive: unknown tokens fall through to a generic, reason-preserving form.
+     */
+    private static String mineClause(String reason, String progress) {
+        if (reason == null) {
+            reason = "";
+        }
+        String r = reason.toLowerCase(java.util.Locale.ROOT);
+        if (r.contains("incorrect_tool") || r.contains("no_drops")) {
+            int noDrops = parseToken(progress, "noDrops=");
+            String block = parseStringToken(progress, "block=");
+            String what = (block != null && !block.isBlank()) ? block : "block(s)";
+            if (noDrops > 0) {
+                return "broke " + noDrops + " " + what
+                        + " with an insufficient tool — no drops collected";
+            }
+            return "broke a " + what + " with an insufficient tool — no drops collected";
+        }
+        if (r.contains("no_more_blocks_in_range")) {
+            // Range exhaustion: NOT a timeout — actionable hint is to RELOCATE, the main motivation
+            // for splitting this out from the timeout case.
+            int mined = parseToken(progress, "mined=");
+            String block = parseStringToken(progress, "block=");
+            String what = (block != null && !block.isBlank()) ? block : "block(s)";
+            return mined > 0
+                    ? "mine partial: mined " + mined + " " + what
+                            + " then exhausted range — no more within reach, relocate to mine more"
+                    : "mine partial: no more " + what + " within reach — relocate to mine more";
+        }
+        if (r.contains("timeout")) {
+            // Genuine overall timeout: more blocks may remain, retrying can continue.
+            int mined = parseToken(progress, "mined=");
+            String block = parseStringToken(progress, "block=");
+            String what = (block != null && !block.isBlank()) ? block : "block(s)";
+            return mined > 0
+                    ? "mine partial: timed out after " + mined + " " + what
+                            + " — more may remain, retrying can continue"
+                    : "mine partial: timed out — more may remain, retrying can continue";
+        }
+        // Generic fallback preserves the reason token for the model.
+        return reason.isBlank() ? "mine partial" : "mine partial: " + reason;
     }
 
     private static String labelClause(String reason) {

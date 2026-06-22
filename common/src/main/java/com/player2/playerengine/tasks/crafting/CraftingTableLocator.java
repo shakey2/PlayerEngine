@@ -39,6 +39,36 @@ public final class CraftingTableLocator {
       return pos.closerToCenterThan(mod.getPlayer().position(), REACH) && WorldHelper.canReach(mod, pos);
    }
 
+   /**
+    * TABLE-REUSE search (distinct from {@link #isReachable}'s arm's-reach gate). Finds the nearest
+    * pre-existing crafting_table the macro should ADOPT and WALK to instead of placing a new one: it must
+    * be a real crafting table within {@code radius} blocks of the bot AND pass a pathability/reachability
+    * filter ({@link WorldHelper#canReach}, the same negative-cache the gather subtree honors) so an
+    * unreachable / elevated table is not chosen. Returns empty when none qualifies, in which case the
+    * caller places its own table. This does NOT imply arm's reach — the caller still walks to the result
+    * via MOVE_TO_TABLE, and the bounded approach (MAX_TABLE_APPROACH_STALL_TICKS) guards against a table
+    * that turns out unreachable mid-approach.
+    *
+    * @param radius reuse search radius in blocks (e.g. 48 = 3 chunks), measured from the bot.
+    */
+   public static Optional<BlockPos> findReusableNearby(PlayerEngineController mod, double radius) {
+      Optional<BlockPos> nearest = mod.getBlockScanner().getNearestBlock(Blocks.CRAFTING_TABLE);
+      if (nearest.isEmpty()) {
+         return Optional.empty();
+      }
+      BlockPos pos = nearest.get();
+      if (!mod.getWorld().getBlockState(pos).is(Blocks.CRAFTING_TABLE)) {
+         return Optional.empty();
+      }
+      if (!pos.closerToCenterThan(mod.getPlayer().position(), radius)) {
+         return Optional.empty();
+      }
+      if (!WorldHelper.canReach(mod, pos)) {
+         return Optional.empty();
+      }
+      return Optional.of(pos);
+   }
+
    public static Task placeNearbyTask() {
       return new PlaceBlockNearbyTask(Blocks.CRAFTING_TABLE);
    }

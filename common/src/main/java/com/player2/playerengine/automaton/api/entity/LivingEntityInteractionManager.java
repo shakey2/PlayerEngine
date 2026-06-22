@@ -284,7 +284,15 @@ public class LivingEntityInteractionManager {
          } else {
             ItemStack itemStack = this.livingEntity.getMainHandItem();
             ItemStack itemStack2 = itemStack.copy();
-            boolean bl2 = true;
+            // Vanilla parity (ServerPlayerGameMode.destroyBlock): a survival break drops loot ONLY when the
+            // held tool can harvest the block for drops. Automatone previously hardcoded this true, so a
+            // wrong/insufficient tool break (e.g. bare-handed stone) fabricated a drop that vanilla never
+            // gives. Gate on the class's own canHarvest predicate, captured on the pre-mineBlock copy
+            // (itemStack2) so durability mutation does not affect the harvest check. block.destroy and
+            // mineBlock stay unconditional (the block is still removed and tool durability still applies);
+            // only the loot drop is gated, and HAND-requirement blocks (!requiresCorrectToolForDrops) still
+            // drop because canHarvest returns true for them.
+            boolean bl2 = this.canHarvest(blockState, itemStack2);
             itemStack.getItem().mineBlock(itemStack, this.world, blockState, pos, this.livingEntity);
             if (bl && bl2) {
                Block.dropResources(blockState, this.world, pos, blockEntity, this.livingEntity, itemStack2);

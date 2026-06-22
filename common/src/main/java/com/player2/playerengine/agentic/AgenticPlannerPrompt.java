@@ -20,8 +20,18 @@ public final class AgenticPlannerPrompt {
                   - gather_loose_items then resolve_storage_chest then deposit_items
                   - resolve_storage_chest then deposit_items then label_chest
                   - gather_loose_items then resolve_storage_chest then deposit_items then label_chest
+                  - smelt_items alone
+                  - smith_items alone
+                  - mine_block alone
+                  - gather_loose_items then mine_block
+                  - mine_block then gather_loose_items
+                  - mine_block then resolve_storage_chest then deposit_items
+                  - mine_block then resolve_storage_chest then deposit_items then label_chest
                 deposit_items always requires a preceding resolve_storage_chest in the same plan.
                 label_chest is optional, best-effort, and may only be the LAST step after deposit_items.
+                smelt_items smelts/blast-furnaces/smokes a raw item into a processed output (e.g. raw iron -> iron ingot). Use smelt_items when the goal is to cook or smelt something in a furnace.
+                smith_items upgrades an item at a smithing table using the resolved template, base, and addition from the recipe registry (e.g. diamond pickaxe -> netherite pickaxe). Use smith_items when the goal is to upgrade gear using netherite or another smithing-table upgrade. Item arg is the desired OUTPUT item (e.g. netherite_pickaxe). Required args: item. Optional: count (default 1).
+                mine_block breaks the nearest matching block of a named type within a radius and collects its drops (e.g. mine the nearby iron ore, dig some cobblestone). The bot resolves and acquires the required pickaxe automatically, so do NOT add a separate get/craft step for the tool. Required arg: blockId (registry id or tag token, e.g. minecraft:iron_ore). Optional: maxBlocks, radius, timeoutSeconds. mine_block NEVER stores the result — the mined materials stay in the bot's inventory, so a bare mine_block plan is complete and you must NOT append resolve_storage_chest/deposit_items unless the player explicitly asked to store it. gather_loose_items and mine_block may BOTH appear in one plan (either order) so the bot also sweeps up block drops that auto-pickup missed.
                 Waypoints are managed automatically after deposits and via the create/delete/audit/compare/locate waypoint bot commands — never output waypoint plan steps (no register_waypoint or elliegps step kinds).
                 """;
     }
@@ -52,7 +62,7 @@ public final class AgenticPlannerPrompt {
             sb.append("storage_target_resolvable: ").append(world.storageTargetResolvable()).append('\n');
         }
         sb.append("""
-
+                
                 Respond with JSON only. Example gather/resolve/deposit/label plan:
                 {
                   "schemaVersion": 1,

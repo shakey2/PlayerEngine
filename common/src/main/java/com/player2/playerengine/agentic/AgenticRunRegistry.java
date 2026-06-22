@@ -50,6 +50,9 @@ public final class AgenticRunRegistry {
         private String storageProgress = "";
         private String depositProgress = "";
         private String labelProgress = "";
+        private String smeltProgress = "";
+        private String smithProgress = "";
+        private String mineProgress = "";
         private String storageTargetSummary = "";
         // Set true once the run reaches a terminal outcome (see terminal(...)). The post-terminal
         // guard (C4) reads this off the run-state object the tasks hold, NOT via an
@@ -69,6 +72,12 @@ public final class AgenticRunRegistry {
         private String labelDegradationReason = "";
         private DegradationLevel waypointDegradation = DegradationLevel.CLEAN;
         private String waypointDegradationReason = "";
+        private DegradationLevel smeltDegradation = DegradationLevel.CLEAN;
+        private String smeltDegradationReason = "";
+        private DegradationLevel smithDegradation = DegradationLevel.CLEAN;
+        private String smithDegradationReason = "";
+        private DegradationLevel mineDegradation = DegradationLevel.CLEAN;
+        private String mineDegradationReason = "";
 
         public AgenticRunState(String runId, String goalSummary, String planningSource) {
             this.runId = runId;
@@ -96,6 +105,18 @@ public final class AgenticRunRegistry {
 
         public void setLabelProgress(String progress) {
             this.labelProgress = progress != null ? progress : "";
+        }
+
+        public void setSmeltProgress(String progress) {
+            this.smeltProgress = progress != null ? progress : "";
+        }
+
+        public void setSmithProgress(String progress) {
+            this.smithProgress = progress != null ? progress : "";
+        }
+
+        public void setMineProgress(String progress) {
+            this.mineProgress = progress != null ? progress : "";
         }
 
         public void setStorageTargetSummary(String summary) {
@@ -132,6 +153,47 @@ public final class AgenticRunRegistry {
             this.waypointDegradationReason = reason != null ? reason : "";
         }
 
+        /**
+         * Records a deferred-smelt degradation in the run state. Called by the agentic
+         * {@code smelt_items} step (via {@code SmeltStepFactory}) on any non-clean terminal
+         * outcome (partial yield, out-of-fuel, tampered, furnace gone, stalled). Never called on
+         * a clean success — that path records only {@link #setSmeltProgress(String)} for the
+         * factual clause so {@code AgenticDegradationSummary} can surface the real count to the
+         * model (DESIGN.md §3, dual-audience truthfulness).
+         */
+        public void setSmeltDegraded(DegradationLevel level, String reason) {
+            this.smeltDegradation = level != null ? level : DegradationLevel.CLEAN;
+            this.smeltDegradationReason = reason != null ? reason : "";
+        }
+
+        /**
+         * Records a deferred-smith degradation in the run state. Called by the agentic
+         * {@code smith_items} step (via {@code SmithStepFactory}) on any non-clean terminal
+         * outcome (partial yield, missing inputs, no table, no recipe). Never called on a clean
+         * success — that path records only {@link #setSmithProgress(String)} for the factual
+         * clause so {@code AgenticDegradationSummary} can surface the real count to the model
+         * (DESIGN.md §3, dual-audience truthfulness).
+         */
+        public void setSmithDegraded(DegradationLevel level, String reason) {
+            this.smithDegradation = level != null ? level : DegradationLevel.CLEAN;
+            this.smithDegradationReason = reason != null ? reason : "";
+        }
+
+        /**
+         * Records a mine_block degradation in the run state. Called by the agentic {@code mine_block}
+         * step (via {@code MineBlockStepFactory} -> {@code MineBlockTask}) when a block is broken with
+         * an insufficient tool and yields no drops (PARTIAL). Never called on a clean success — that
+         * path records only {@link #setMineProgress(String)} for the factual clause so
+         * {@code AgenticDegradationSummary} can surface the real count to the model (DESIGN.md §3,
+         * dual-audience truthfulness). Hard failures (no tool / unknown block / no target) do NOT use a
+         * degradation level — they write the reason via {@link #setMineProgress(String)} and the
+         * executor surfaces it through {@link #progressForKind(String)}.
+         */
+        public void setMineDegraded(DegradationLevel level, String reason) {
+            this.mineDegradation = level != null ? level : DegradationLevel.CLEAN;
+            this.mineDegradationReason = reason != null ? reason : "";
+        }
+
         public DegradationLevel getGatherDegradation() { return gatherDegradation; }
         public String getGatherDegradationReason() { return gatherDegradationReason; }
         public DegradationLevel getDepositDegradation() { return depositDegradation; }
@@ -140,6 +202,12 @@ public final class AgenticRunRegistry {
         public String getLabelDegradationReason() { return labelDegradationReason; }
         public DegradationLevel getWaypointDegradation() { return waypointDegradation; }
         public String getWaypointDegradationReason() { return waypointDegradationReason; }
+        public DegradationLevel getSmeltDegradation() { return smeltDegradation; }
+        public String getSmeltDegradationReason() { return smeltDegradationReason; }
+        public DegradationLevel getSmithDegradation() { return smithDegradation; }
+        public String getSmithDegradationReason() { return smithDegradationReason; }
+        public DegradationLevel getMineDegradation() { return mineDegradation; }
+        public String getMineDegradationReason() { return mineDegradationReason; }
 
         // Progress/target readers used by AgenticDegradationSummary to emit FACTUAL success notes on
         // a clean run (deposited N, gathered N, chest at x y z). The *Progress strings are rewritten
@@ -148,6 +216,9 @@ public final class AgenticRunRegistry {
         // ResolveStorageChestTask when a chest is selected.
         public String getDepositProgress() { return depositProgress; }
         public String getGatherProgress() { return gatherProgress; }
+        public String getSmeltProgress() { return smeltProgress; }
+        public String getSmithProgress() { return smithProgress; }
+        public String getMineProgress() { return mineProgress; }
         public String getStorageTargetSummary() { return storageTargetSummary; }
 
         /**
@@ -168,6 +239,15 @@ public final class AgenticRunRegistry {
             }
             if (k.contains("label")) {
                 return labelProgress;
+            }
+            if (k.contains("smelt") || k.contains("cook") || k.contains("blast") || k.contains("smoke")) {
+                return smeltProgress;
+            }
+            if (k.contains("smith")) {
+                return smithProgress;
+            }
+            if (k.contains("mine")) {
+                return mineProgress;
             }
             // resolve_storage_chest and other storage steps report via storageProgress.
             return storageProgress;
@@ -217,6 +297,24 @@ public final class AgenticRunRegistry {
                     msg.append(" | ");
                 }
                 msg.append(labelProgress);
+            }
+            if (!smeltProgress.isBlank()) {
+                if (msg.length() > 0) {
+                    msg.append(" | ");
+                }
+                msg.append(smeltProgress);
+            }
+            if (!smithProgress.isBlank()) {
+                if (msg.length() > 0) {
+                    msg.append(" | ");
+                }
+                msg.append(smithProgress);
+            }
+            if (!mineProgress.isBlank()) {
+                if (msg.length() > 0) {
+                    msg.append(" | ");
+                }
+                msg.append(mineProgress);
             }
             return new AgenticRunSnapshot(
                     runId,

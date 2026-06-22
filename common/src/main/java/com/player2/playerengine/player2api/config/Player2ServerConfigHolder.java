@@ -37,6 +37,9 @@ public final class Player2ServerConfigHolder {
                 cached.isRagLiveEnabled(), cached.getRagTopKClamped(), cached.isRagFallbackToFullList(),
                 cached.getRagMinGoalCharsClamped());
         LOGGER.info("Player2 TTS pacing config: botTtsPlaybackAckEnabled={}", cached.isBotTtsPlaybackAckEnabled());
+        LOGGER.info("Player2 bot lifecycle config: serverOverridesPlayerConfig={} serverAutoRespawn={} serverBotPermadeath={}",
+                cached.isServerOverridesPlayerConfig(), cached.isServerAutoRespawn(),
+                cached.getServerBotPermadeath() == null ? "unset" : cached.getServerBotPermadeath());
         LOGGER.info("Player2 ModIntelligence config: enabled={} enrichmentEnabled={} maxEnrichmentCallsPerLaunch={} maxEnrichmentFailuresPerLaunch={}",
                 cached.isModIntelligenceEnabled(), cached.isModIntelligenceEnrichmentEnabled(),
                 cached.getModIntelligenceMaxEnrichmentCallsPerLaunch() <= 0
@@ -95,7 +98,6 @@ public final class Player2ServerConfigHolder {
             LOGGER.warn("Player2 config: softBudgetCallsPerWindow ({}) >= hardBudgetCallsPerWindow ({}) — soft should be lower than hard.", soft, hard);
         }
 
-        // Phase B3: RAG field validation (clamp on read via getters; fix stored values if out of range)
         int ragTopK = c.getRagTopK();
         if (ragTopK < 5 || ragTopK > 20) {
             LOGGER.warn("Player2 config: ragTopK out of range 5–20 (got {}); using clamped value {}.", ragTopK, c.getRagTopKClamped());

@@ -803,15 +803,32 @@ public class ItemHelper {
       public static final Item[] FOODS = Stream.of(RAW_FOODS, COOKED_FOODS, OTHER_FOODS).flatMap(Arrays::stream).toArray(Item[]::new);
       private static Map<Item, Integer> fuelTimeMap = null;
 
+      /**
+       * Human/agent display name for an item. Vanilla items render as their bare path (e.g.
+       * {@code "iron_ingot"}); MODDED items render as their full registry id (e.g.
+       * {@code "iceandfire:podium_oak"}), NOT the translation/lang key
+       * ({@code "block.iceandfire.podium_oak"}).
+       *
+       * <p>Historically this returned {@code getDescriptionId()} for modded items, leaking the lang
+       * key into agentStatus inventory, worldStatus nearby-blocks, craft-failure reasons, and step
+       * ids. That lang key is NOT a valid {@code @get} token — the model would echo it back and the
+       * existence gate would reject it (the modded-podium give-up bug). Sourcing the display name from
+       * the registry key keeps the name round-trippable as a {@code @get} argument for both vanilla and
+       * modded items.
+       */
       public static String stripItemName(Item item) {
+            net.minecraft.resources.ResourceLocation key = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(item);
+            if (key != null) {
+                  return "minecraft".equals(key.getNamespace()) ? key.getPath() : key.toString();
+            }
+            // Defensive fallback: unregistered item (should not happen for live items). Strip the vanilla
+            // lang-key prefixes as before so behaviour is unchanged for the registry-less edge case.
             String[] possibilities = new String[] { "item.minecraft.", "block.minecraft." };
-
             for (String possible : possibilities) {
                   if (item.getDescriptionId().startsWith(possible)) {
                         return item.getDescriptionId().substring(possible.length());
                   }
             }
-
             return item.getDescriptionId();
       }
 

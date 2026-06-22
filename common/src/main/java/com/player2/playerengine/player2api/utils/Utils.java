@@ -4,13 +4,21 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.google.gson.JsonSyntaxException;
+import com.google.gson.stream.JsonReader;
+import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 public class Utils {
+   private static final Logger LOGGER = LogManager.getLogger();
+
+   /** Max chars of raw model content echoed into logs on a parse failure (avoid log spam / huge replies). */
+   private static final int RAW_CONTENT_LOG_LIMIT = 2000;
    public static String replacePlaceholders(String input, Map<String, String> replacements) {
       for (Entry<String, String> entry : replacements.entrySet()) {
          String placeholder = "\\{\\{" + entry.getKey() + "}}";
@@ -58,10 +66,137 @@ public class Utils {
       }
    }
 
-   public static JsonObject parseCleanedJson(String content) throws JsonSyntaxException {
-      content = content.replaceAll("^```json\\s*", "").replaceAll("\\s*```$", "").trim();
-      JsonParser parser = new JsonParser();
-      return parser.parse(content).getAsJsonObject();
+   /**
+    * Parse an LLM reply into a {@link JsonObject}, tolerating the common ways a model wraps or pads
+    * its JSON. The previous implementation stripped only an exact lowercase {@code ```json} fence and
+    * then STRICT-parsed, so any stray prefix/prose, a bare/uppercase fence, or trailing text made gson
+    * throw a raw {@code MalformedJsonException} that was broadcast verbatim to the player.
+    *
+    * <p>Hardening, in order:
+    * <ol>
+    *   <li>Strip a leading code fence (```json / ```JSON / bare ```), trailing fence, and surrounding
+    *       whitespace.</li>
+    *   <li>Lenient-parse the cleaned text (gson {@code JsonReader.setLenient(true)}) and return it if it
+    *       is a JSON object.</li>
+    *   <li>Fallback: extract the first balanced {@code { ... }} object substring (respecting strings and
+    *       escapes) from anywhere in the content and lenient-parse that. Handles leading/trailing prose.</li>
+    * </ol>
+    *
+    * @return the parsed JSON object
+    * @throws LlmJsonParseException if no JSON object can be recovered. The raw (truncated) content is
+    *         logged at WARN here and carried on the exception for the caller; it is never shown to the player.
+    */
+   public static JsonObject parseCleanedJson(String content) throws LlmJsonParseException {
+      String original = content == null ? "" : content;
+      String cleaned = stripCodeFences(original);
+
+      // 1) Lenient parse of the whole cleaned string.
+      JsonObject obj = tryLenientParseObject(cleaned);
+      if (obj != null) {
+         return obj;
+      }
+
+      // 2) Fallback: pull the first balanced { ... } object out of the (possibly prose-padded) content
+      //    and lenient-parse that.
+      String extracted = extractFirstJsonObject(cleaned);
+      if (extracted != null) {
+         JsonObject extractedObj = tryLenientParseObject(extracted);
+         if (extractedObj != null) {
+            LOGGER.warn("parseCleanedJson: recovered JSON object via balanced-brace extraction from a padded model reply");
+            return extractedObj;
+         }
+      }
+
+      // 3) Give up: log the raw content (truncated) so the malformed payload is diagnosable, and throw
+      //    a typed failure the conversation layer can translate per-audience (DESIGN.md §3).
+      LOGGER.warn("parseCleanedJson: could not parse model reply as JSON. Raw content (truncated to {} chars): <<<{}>>>",
+            RAW_CONTENT_LOG_LIMIT, truncateForLog(original).replace('\n', ' ').replace('\r', ' '));
+      throw new LlmJsonParseException(truncateForLog(original), null);
+   }
+
+   /** Strip a leading/trailing markdown code fence (```json, ```JSON, or bare ```), then trim. */
+   private static String stripCodeFences(String content) {
+      if (content == null) {
+         return "";
+      }
+      String out = content.trim();
+      // Leading fence: ``` optionally followed by a language tag (json/JSON/etc.) on the same line.
+      out = out.replaceFirst("(?is)^```[ \\t]*[a-z0-9_-]*[ \\t]*\\r?\\n?", "");
+      // Trailing fence.
+      out = out.replaceFirst("(?s)\\r?\\n?[ \\t]*```[ \\t]*$", "");
+      return out.trim();
+   }
+
+   /** Lenient-parse {@code text}; return the {@link JsonObject} if it is one, else null (never throws). */
+   private static JsonObject tryLenientParseObject(String text) {
+      if (text == null || text.isEmpty()) {
+         return null;
+      }
+      try {
+         JsonReader reader = new JsonReader(new StringReader(text));
+         reader.setLenient(true);
+         JsonElement el = JsonParser.parseReader(reader);
+         if (el != null && el.isJsonObject()) {
+            return el.getAsJsonObject();
+         }
+      } catch (com.google.gson.JsonParseException | IllegalStateException e) {
+         // JsonParseException covers JsonSyntaxException; IllegalStateException covers getAsJsonObject on
+         // a non-object. Fall through: caller tries the extraction fallback or fails with a typed error.
+      }
+      return null;
+   }
+
+   /**
+    * Return the first balanced {@code { ... }} object substring in {@code content}, honoring quoted
+    * strings and backslash escapes so braces inside string values do not throw off the depth count.
+    * Returns null if there is no balanced object.
+    */
+   private static String extractFirstJsonObject(String content) {
+      if (content == null) {
+         return null;
+      }
+      int start = content.indexOf('{');
+      if (start < 0) {
+         return null;
+      }
+      int depth = 0;
+      boolean inString = false;
+      boolean escaped = false;
+      for (int i = start; i < content.length(); i++) {
+         char c = content.charAt(i);
+         if (inString) {
+            if (escaped) {
+               escaped = false;
+            } else if (c == '\\') {
+               escaped = true;
+            } else if (c == '"') {
+               inString = false;
+            }
+            continue;
+         }
+         if (c == '"') {
+            inString = true;
+         } else if (c == '{') {
+            depth++;
+         } else if (c == '}') {
+            depth--;
+            if (depth == 0) {
+               return content.substring(start, i + 1);
+            }
+         }
+      }
+      return null;
+   }
+
+   /** Truncate raw content for safe logging (single visible block, capped length). */
+   private static String truncateForLog(String content) {
+      if (content == null) {
+         return "null";
+      }
+      if (content.length() <= RAW_CONTENT_LOG_LIMIT) {
+         return content;
+      }
+      return content.substring(0, RAW_CONTENT_LOG_LIMIT) + "...[truncated " + (content.length() - RAW_CONTENT_LOG_LIMIT) + " chars]";
    }
 
    public static String[] splitLinesToArray(String input) {

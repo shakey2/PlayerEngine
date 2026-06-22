@@ -373,6 +373,17 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
    }
 
    /**
+    * WS4 FAULT-2 adoption-trap fix: reset the no-improvement clock on the LIVE adopted wander so a bot
+    * standing still while actively mining a vein (a concurrent DestroyBlockTask) does not falsely
+    * self-terminate via the no-improvement arm of {@link #boundExpired()}. Only mutates a long; the
+    * DEADLINE arm (wall-clock budget) is intentionally NOT reset so a genuinely-wedged session still
+    * gives up. Harmless if ever called on a not-yet-started instance (no controller read -> no NPE).
+    */
+   public void resetNoImprovementClock() {
+      this.lastImprovementMs = System.currentTimeMillis();
+   }
+
+   /**
     * Bounded give-up check (WS4). Returns true when a non-null {@link #deadlineMs} has elapsed since
     * {@link #onStart()}, OR no net distance progress from {@link #origin} has occurred for
     * {@link #noImprovementGiveUpSeconds}. Always false when the wander is unbounded.

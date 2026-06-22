@@ -114,8 +114,17 @@ public class StatusUtils {
          for (int dy = -radius; dy <= radius; dy++) {
             for (int dz = -radius; dz <= radius; dz++) {
                BlockPos pos = center.offset(dx, dy, dz);
-               String blockName = mod.getWorld().getBlockState(pos).getBlock().getDescriptionId()
-                     .replace("block.minecraft.", "");
+               // Render modded blocks as their registry id (iceandfire:silver_ore), vanilla as the
+               // bare path. The old getDescriptionId() leaked the lang key (block.iceandfire.silver_ore)
+               // into worldStatus, which the model then echoed back as a (rejected) @get token — the
+               // same lang-key contamination that defeated the modded-craft flow.
+               net.minecraft.world.level.block.Block block =
+                     mod.getWorld().getBlockState(pos).getBlock();
+               net.minecraft.resources.ResourceLocation blockKey =
+                     net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block);
+               String blockName = blockKey != null
+                     ? ("minecraft".equals(blockKey.getNamespace()) ? blockKey.getPath() : blockKey.toString())
+                     : block.getDescriptionId().replace("block.minecraft.", "");
                if (!blockName.equals("air")) {
                   blockCounts.put(blockName, blockCounts.getOrDefault(blockName, 0) + 1);
                }
@@ -164,25 +173,25 @@ public class StatusUtils {
       ItemStack offhand = player.getItemBySlot(EquipmentSlot.OFFHAND);
       status.add("helmet",
             !head.isEmpty() && head.getItem() instanceof ArmorItem
-                  ? head.getItem().getDescriptionId().replace("item.minecraft.", "")
+                  ? ItemHelper.stripItemName(head.getItem())
                   : "none");
       status.add(
             "chestplate",
             !chest.isEmpty() && chest.getItem() instanceof ArmorItem
-                  ? chest.getItem().getDescriptionId().replace("item.minecraft.", "")
+                  ? ItemHelper.stripItemName(chest.getItem())
                   : "none");
       status.add("leggings",
             !legs.isEmpty() && legs.getItem() instanceof ArmorItem
-                  ? legs.getItem().getDescriptionId().replace("item.minecraft.", "")
+                  ? ItemHelper.stripItemName(legs.getItem())
                   : "none");
       status.add("boots",
             !feet.isEmpty() && feet.getItem() instanceof ArmorItem
-                  ? feet.getItem().getDescriptionId().replace("item.minecraft.", "")
+                  ? ItemHelper.stripItemName(feet.getItem())
                   : "none");
       status.add(
             "offhand_shield",
             !offhand.isEmpty() && offhand.getItem() instanceof ShieldItem
-                  ? offhand.getItem().getDescriptionId().replace("item.minecraft.", "")
+                  ? ItemHelper.stripItemName(offhand.getItem())
                   : "none");
       return status.toString();
    }

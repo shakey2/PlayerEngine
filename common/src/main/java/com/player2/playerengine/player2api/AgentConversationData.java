@@ -78,6 +78,27 @@ public class AgentConversationData {
     private List<RetrievalHit> cachedRetrievalHits = List.of();
     /** Hash of the last injected tool-id set; used to skip redundant system-prompt rewrites. */
     private int cachedPromptIdHash = 0;
+
+    // --- Prefix-cache restructure: per-turn RAG command block relocated to the user tail ---
+    /**
+     * The RAG command block to inject into THIS turn's latest user message ({@code validCommands} key).
+     * Null on session-stable branches (full-list / always-include / greeting), where the list stays in
+     * the system message instead. Cleared per turn in {@link #resetB5TurnState()}.
+     */
+    private String pendingValidCommandsBlock = null;
+    /**
+     * Session-scoped cache of the last built RAG block string (NOT reset per turn). Reused by the
+     * churn-gate skip and {@code applyRagPromptFromCache} so those turns can re-supply the same block to
+     * the user tail without rebuilding (and without leaving the model with an empty command set).
+     */
+    private String cachedValidCommandsBlock = null;
+
+    // --- Prefix-cache restructure: status locals captured once per turn for follow-up tail rebuilds ---
+    /** worldStatus/agentStatus/gameDebugMessages/reminders captured at first-pass assembly (L290-295). */
+    private String turnWorldStatus = "";
+    private String turnAgentStatus = "";
+    private String turnAltoClefDebugMsgs = "";
+    private Optional<String> turnReminderString = Optional.empty();
     /** Suppress repeated warnings when the RAG index is not yet initialised for this bot. */
     private boolean ragFallbackWarnedOnce = false;
 
@@ -97,6 +118,17 @@ public class AgentConversationData {
      * queued or awaiting an LLM response. Prevents the same completion from re-triggering API rounds.
      */
     private String commandAwaitingFinishAck = null;
+
+    /**
+     * Consecutive LLM JSON parse failures since the last successful parse. Bounds the
+     * "resend valid JSON" retry loop so a model that keeps emitting unparseable output does not
+     * spin forever (DESIGN.md §3 reporting must not turn into an infinite re-prompt). Reset to 0 on
+     * any successful response in {@link #handleLlmResponse}.
+     */
+    private int consecutiveParseFailures = 0;
+
+    /** Max consecutive parse-failure re-prompts before giving up this chain and notifying the player only. */
+    private static final int MAX_PARSE_RETRY = 2;
 
     /**
      * Per-bot TTS pacing: nanoTime() after which this specific bot is allowed to start a new
@@ -191,13 +223,16 @@ public class AgentConversationData {
         clearTtsCooldown();
         cachedRetrievalHits = List.of();
         cachedPromptIdHash = 0;
+        cachedValidCommandsBlock = null;
         resetB5TurnState();
         commandAwaitingFinishAck = null;
+        consecutiveParseFailures = 0;
     }
 
     private void resetB5TurnState() {
         activeRetrievalHits = List.of();
         activePromptToolIds = Set.of();
+        pendingValidCommandsBlock = null;
         lastRagGoalText = "";
         pendingLearnSuggestion = Optional.empty();
         deepCheckAttemptsThisTurn = 0;
@@ -223,6 +258,42 @@ public class AgentConversationData {
 
         Consumer<String> onErrMsg = errMsg -> {
             this.isProcessing = false;
+            // DESIGN.md §3: a model JSON parse failure must reach BOTH audiences, each tailored.
+            //   - Model: reflect "your last reply was unparseable; re-send valid JSON" into the
+            //     conversation feedback (an InfoMessage) so it retries truthfully next round.
+            //   - Player: a concise human line — NEVER the raw com.google.gson exception string.
+            // The raw payload is already logged in Utils.parseCleanedJson; do not surface it here.
+            if (errMsg != null && errMsg.startsWith(
+                    com.player2.playerengine.player2api.utils.LlmJsonParseException.SENTINEL)) {
+                consecutiveParseFailures++;
+                if (consecutiveParseFailures <= MAX_PARSE_RETRY) {
+                    LOGGER.warn("[AICommandBridge]: LLM reply failed to parse as JSON for bot={} "
+                            + "(attempt {}/{}); asking model to resend valid JSON and notifying player.",
+                            getName(), consecutiveParseFailures, MAX_PARSE_RETRY);
+                    addEventToQueue(new InfoMessage(
+                            "Your previous reply could not be read because it was not valid JSON. "
+                            + "Resend ONLY a single valid JSON object with the \"message\" and \"command\" fields, "
+                            + "no extra text, no markdown code fences."));
+                    extOnErrMsg.accept(getName() + " had trouble understanding that — let me try again.");
+                } else {
+                    // Repeated unparseable output: stop re-prompting (avoid a token-burning loop) and
+                    // tell the player plainly. The model already received the corrective InfoMessage on
+                    // the prior attempts; do not queue another (DESIGN.md §3 — both audiences served).
+                    LOGGER.error("[AICommandBridge]: LLM reply still unparseable after {} retries for bot={}; "
+                            + "giving up this chain.", MAX_PARSE_RETRY, getName());
+                    consecutiveParseFailures = 0;
+                    // Give-up aborts this chain WITHOUT the model ever responding to the round, so
+                    // acknowledgeCommandFinishRoundIfComplete (in handleLlmResponse's finally) never runs.
+                    // If the aborted round was a command-finish prompt, a stale commandAwaitingFinishAck
+                    // would survive and suppress the NEXT command's finish as a false "duplicate" — the
+                    // dead-callback-idle condition for subsequent commands. Clear it here so give-up does
+                    // not strand the ack. (Safe: a true same-execution double-fire is still guarded while
+                    // isProcessing is true / the finish InfoMessage is queued.)
+                    commandAwaitingFinishAck = null;
+                    extOnErrMsg.accept(getName() + " couldn't respond clearly just now. Please try again.");
+                }
+                return;
+            }
             extOnErrMsg.accept(errMsg);
         };
 
@@ -290,9 +361,16 @@ public class AgentConversationData {
         String agentStatus = AgentStatus.fromMod(this.mod).toString();
         String worldStatus = WorldStatus.fromMod(this.mod).toString();
         String altoClefDebugMsgs = this.playerEngineMsgBuffer.dumpAndGetString();
+        // Capture the per-turn status locals so mid-turn follow-ups (deep-check / post-decision retry)
+        // can rebuild the wrapped copy with the relocated command block WITHOUT re-draining the debug
+        // buffer (dumpAndGetString is draining) and without re-deriving world/agent/reminder status.
+        this.turnWorldStatus = worldStatus;
+        this.turnAgentStatus = agentStatus;
+        this.turnAltoClefDebugMsgs = altoClefDebugMsgs;
+        this.turnReminderString = reminderString;
         ConversationHistory historyWithWrappedStatus = mod.getAIPersistantData()
                 .getConversationHistoryWrappedWithStatus(worldStatus, agentStatus, altoClefDebugMsgs,
-                        mod.getPlayer2APIService(), reminderString);
+                        mod.getPlayer2APIService(), reminderString, Optional.ofNullable(pendingValidCommandsBlock));
 
         LOGGER.info("[AICommandBridge/processChatWithAPI]: Calling LLM: history={}",
                 new Object[] { historyWithWrappedStatus.toString() });
@@ -441,8 +519,20 @@ public class AgentConversationData {
         activePromptToolIds = toolIdsFromHits(hits);
 
         int newHash = RagPromptBuilder.toolIdSetHash(RagPromptBuilder.ALWAYS_INCLUDE_IDS, hits);
-        if (newHash == cachedPromptIdHash) {
-            LOGGER.debug("[RAG] same tool set (hash={}), skipping prompt update for bot={}", newHash, getName());
+        if (newHash == cachedPromptIdHash && cachedValidCommandsBlock != null) {
+            // Churn-gate hit: same tool set as last build AND we hold the cached block string. The block is
+            // NOT rebuilt here, so reuse the cached block and route it to the user tail (the system message
+            // stays the byte-stable base). Without this the model would get an empty command set on a
+            // same-set turn.
+            // Guard: cachedPromptIdHash starts at 0 and toolIdSetHash returns Set.hashCode(), which is 0 for
+            // an empty set (and in principle could be 0 for a non-empty set). If that collided on the FIRST
+            // build of a session, cachedValidCommandsBlock would still be null here and reusing it would
+            // strand the model with an empty validCommands tail even though activePromptToolIds (set above)
+            // holds real ids. Requiring a non-null cached block forces fall-through to the build path in
+            // that window, so the block is actually built before being cached/routed.
+            LOGGER.debug("[RAG] same tool set (hash={}), reusing cached block for bot={}", newHash, getName());
+            pendingValidCommandsBlock = cachedValidCommandsBlock;
+            mod.getAIPersistantData().updateSystemPromptStatic();
             return;
         }
 
@@ -451,9 +541,12 @@ public class AgentConversationData {
 
         String block = RagPromptBuilder.buildValidCommandsBlock(
                 retriever.getRegistry(), hits, mod.getCommandExecutor(), RagPromptBuilder.ALWAYS_INCLUDE_IDS);
-        LOGGER.debug("[RAG] injecting {} hits into prompt for goal=\"{}\" bot={} source={}",
+        LOGGER.debug("[RAG] injecting {} hits into user-tail validCommands for goal=\"{}\" bot={} source={}",
                 hits.size(), goalText, getName(), lastRagPromptSource);
-        mod.getAIPersistantData().updateSystemPromptWithBlock(block);
+        // Relocate the per-turn block to the user tail; keep message 0 byte-stable.
+        cachedValidCommandsBlock = block;
+        pendingValidCommandsBlock = block;
+        mod.getAIPersistantData().updateSystemPromptStatic();
     }
 
     private static Set<String> toolIdsFromHits(List<RetrievalHit> hits) {
@@ -476,6 +569,8 @@ public class AgentConversationData {
             Event.UserMessage lastUserMsgForRag,
             boolean isFollowUpDecision,
             boolean isModelDeepSearchFollowUp) {
+        // A response reached us = the LLM reply parsed successfully; clear the parse-retry guard.
+        this.consecutiveParseFailures = 0;
         String llmMessage = Utils.getStringJsonSafely(jsonResp, "message");
         String command = this.isGreetingResponse ? "bodylang greeting"
                 : Utils.getStringJsonSafely(jsonResp, "command");
@@ -617,11 +712,14 @@ public class AgentConversationData {
         lastDeepCheckTriggerReason = "model_requested";
         LOGGER.info("[B5] model_deepsearch_ok source={} bot={}", applied.promptSource(), getName());
 
+        // Rebuild the wrapped copy so the newly-retrieved command set reaches the user tail (the prior
+        // copy still carries the first-pass block). System message is not mutated mid-turn.
+        ConversationHistory followUpHistory = rebuildWrappedStatusForFollowUp();
         Consumer<JsonObject> followUp = jsonResp -> handleLlmResponse(
                 jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
-                historyWithWrappedStatus, lastUserMsgForRag, true, true);
+                followUpHistory, lastUserMsgForRag, true, true);
         completer.processToJson(
-                mod.getPlayer2APIService(), historyWithWrappedStatus, followUp, onErrMsg, true, AiTaskClass.DECISION);
+                mod.getPlayer2APIService(), followUpHistory, followUp, onErrMsg, true, AiTaskClass.DECISION);
         return true;
     }
 
@@ -634,10 +732,28 @@ public class AgentConversationData {
                 applied.activeResult().hits(),
                 mod.getCommandExecutor(),
                 RagPromptBuilder.ALWAYS_INCLUDE_IDS);
-        mod.getAIPersistantData().updateSystemPromptWithBlock(block);
+        // Prefix-cache restructure: do NOT mutate message 0 mid-turn (it would re-bust the cache and
+        // would not reach the already-built wrapped copy anyway). Stage the block; the follow-up call
+        // sites rebuild the wrapped copy carrying this block in the user tail.
+        cachedValidCommandsBlock = block;
+        pendingValidCommandsBlock = block;
         cachedRetrievalHits = applied.activeResult().hits();
         cachedPromptIdHash = RagPromptBuilder.toolIdSetHash(
                 RagPromptBuilder.ALWAYS_INCLUDE_IDS, applied.activeResult().hits());
+    }
+
+    /**
+     * Rebuilds the wrapped user-tail copy for a mid-turn follow-up LLM call (deep-check / post-decision
+     * retry) using the status locals captured at first-pass assembly plus the freshly-staged
+     * {@link #pendingValidCommandsBlock}. Re-supplies world/agent status, reminders, and the (already
+     * drained) debug messages so the follow-up turn keeps full status — the system message is left
+     * untouched (byte-stable for the conversation).
+     */
+    private ConversationHistory rebuildWrappedStatusForFollowUp() {
+        return mod.getAIPersistantData().getConversationHistoryWrappedWithStatus(
+                turnWorldStatus, turnAgentStatus, turnAltoClefDebugMsgs,
+                mod.getPlayer2APIService(), turnReminderString,
+                Optional.ofNullable(pendingValidCommandsBlock));
     }
 
     private void registerPendingLearnCandidate() {
@@ -721,24 +837,52 @@ public class AgentConversationData {
         lastRagPromptSource = applied.promptSource();
         lastDeepCheckTriggerReason = "post_decision_out_of_top_k";
 
+        // Rebuild the wrapped copy so the re-retrieved command set reaches the user tail. System message
+        // is not mutated mid-turn.
+        ConversationHistory retryHistory = rebuildWrappedStatusForFollowUp();
         Consumer<JsonObject> retryHandler = jsonResp -> handleLlmResponse(
                 jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
-                historyWithWrappedStatus, lastUserMsgForRag, true, false);
+                retryHistory, lastUserMsgForRag, true, false);
         completer.processToJson(
-                mod.getPlayer2APIService(), historyWithWrappedStatus, retryHandler, onErrMsg, true, AiTaskClass.DECISION);
+                mod.getPlayer2APIService(), retryHistory, retryHandler, onErrMsg, true, AiTaskClass.DECISION);
         return true;
     }
 
     private void applyRagPromptFromCache(Player2ServerRuntimeConfig config) {
         if (cachedRetrievalHits.isEmpty()) {
-            // No prior retrieval this session; use full list or always-include only.
+            // No prior retrieval this session; use full list or always-include only (session-stable,
+            // stays in the system message; no user-tail block).
             if (config.isRagFallbackToFullList()) {
                 mod.getAIPersistantData().updateSystemPrompt();
             } else {
                 updateSystemPromptAlwaysIncludeOnly();
             }
+            return;
         }
-        // Otherwise the existing system prompt already contains the cached set — nothing to do.
+        // Prior retrieval exists this session. Under the prefix-cache restructure the cached set is NO
+        // LONGER in the system message, so re-supply it to the user tail and keep message 0 byte-stable.
+        // Without this, InfoMessage-only / short-goal / autonomous-step turns would send the model an
+        // empty command set (no system list AND no tail block).
+        //
+        // Defense-in-depth (mirrors the churn-gate guard at L474): cachedRetrievalHits being non-empty is
+        // today paired with a cachedValidCommandsBlock write (build path L491/L499, applyRetrievalToPrompt),
+        // but that pairing is an invariant no assert enforces. If a future edit populates cachedRetrievalHits
+        // without also setting cachedValidCommandsBlock, routing a null block here would yield
+        // Optional.ofNullable(null) -> an absent validCommands key and an empty command set this turn -- the
+        // exact failure WS3 set out to prevent. Make the violation loud and degrade to the session-stable
+        // path (list rendered in message 0) instead of silently sending zero commands.
+        if (cachedValidCommandsBlock == null) {
+            LOGGER.warn("[RAG] applyRagPromptFromCache: non-empty cachedRetrievalHits but cachedValidCommandsBlock "
+                    + "is null for bot={} — falling back to system-message list", getName());
+            if (config.isRagFallbackToFullList()) {
+                mod.getAIPersistantData().updateSystemPrompt();
+            } else {
+                updateSystemPromptAlwaysIncludeOnly();
+            }
+            return;
+        }
+        pendingValidCommandsBlock = cachedValidCommandsBlock;
+        mod.getAIPersistantData().updateSystemPromptStatic();
     }
 
     private void updateSystemPromptAlwaysIncludeOnly() {
@@ -813,7 +957,11 @@ public class AgentConversationData {
         }
         String normalized = normalizeCommandNameForFinishAck(commandName);
         if (commandAwaitingFinishAck != null && commandAwaitingFinishAck.equals(normalized)) {
-            LOGGER.info("Skipping duplicate command finish prompt for cmd={}", commandName);
+            // [DEBUG-INSTR:dead-callback-idle] log the held ack vs incoming key to confirm the Gap-2
+            // dedup path (cobblestone vs stone_pickaxe) post-fix. Remove with the ledger once confirmed.
+            LOGGER.info(
+                    "Skipping duplicate command finish prompt for cmd={} (held ack={} normalized={})",
+                    commandName, commandAwaitingFinishAck, normalized);
             return false;
         }
         return true;
@@ -853,26 +1001,21 @@ public class AgentConversationData {
         if (!(lastEvent instanceof InfoMessage info) || !isCommandFinishPromptMessage(info.message())) {
             return;
         }
-        if (isTerminalLlmCommand(command)) {
-            LOGGER.info("Command-finish round complete (terminal LLM command); clearing finish-ack for cmd={}",
-                    commandAwaitingFinishAck);
-            commandAwaitingFinishAck = null;
-        }
-    }
-
-    private static boolean isTerminalLlmCommand(String command) {
-        if (command == null || command.isBlank()) {
-            return true;
-        }
-        String trimmed = command.trim();
-        if ("\"\"".equals(trimmed)) {
-            return true;
-        }
-        String lower = trimmed.toLowerCase(Locale.ROOT);
-        if (lower.startsWith("@")) {
-            lower = lower.substring(1);
-        }
-        return lower.equals("idle") || lower.startsWith("idle ");
+        // The model has now RESPONDED to this command-finish-prompt round (with any command — terminal
+        // or a follow-up like another `get`). The round is acknowledged, so the dedup guard has done its
+        // job and must be cleared. Previously this only cleared on a terminal command (idle/empty), so a
+        // normal follow-up command left the ack set; the NEXT command's successful finish then matched
+        // the stale ack, was suppressed as a "duplicate", enqueued no event, and — with an empty queue
+        // and no auto-tick — the model idled until an external UserMessage cleared the ack (dead-callback
+        // idle). Clearing unconditionally here lets each successful command's finish enqueue its own
+        // "what next?" prompt and reliably drive the model's next turn. This does NOT re-introduce genuine
+        // duplicate prompts: the ack is SET at enqueue time and a true double-fire of onCommandFinish for
+        // the SAME execution happens before the model responds (while the finish InfoMessage is still
+        // queued / isProcessing is still true), so the duplicate is still suppressed; this clear only runs
+        // after the model has actually answered the round, when no duplicate remains to guard against.
+        LOGGER.info("Command-finish round complete (model responded with cmd={}); clearing finish-ack for cmd={}",
+                command, commandAwaitingFinishAck);
+        commandAwaitingFinishAck = null;
     }
 
     public void onCommandFinish(AgentSideEffects.CommandExecutionStopReason stopReason) {

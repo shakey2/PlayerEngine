@@ -6,6 +6,7 @@ import java.util.Set;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.item.crafting.Ingredient;
 
 /**
@@ -63,7 +64,7 @@ public class IngredientInspectorImpl implements IngredientInspector {
          return items;
       }
       for (ItemStack stack : slot.getItems()) {
-         if (stack != null && !stack.isEmpty()) {
+         if (stack != null && !stack.isEmpty() && stack.getItem() != Items.BARRIER) {
             items.add(stack.getItem());
          }
       }

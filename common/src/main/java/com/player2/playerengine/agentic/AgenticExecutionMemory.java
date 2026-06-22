@@ -58,4 +58,38 @@ public final class AgenticExecutionMemory {
     public void clearWaypointOriginEvidence() {
         this.waypointOriginEvidence = null;
     }
+
+    // -------------------------------------------------------------------------
+    // Material reservation ledger (cross-step reservation; WS1)
+    //
+    // Chain-scoped, item-keyed conservative floor every material-consuming step
+    // consults so an earlier-or-pending step cannot cannibalize a later step's
+    // reserved input. Lazily created on first use; server-thread only;
+    // non-persisted. Cleared at every run terminal (call sites wired in WS5).
+    // -------------------------------------------------------------------------
+
+    private MaterialReservationService materialReservations;
+
+    /**
+     * Returns the per-run material reservation ledger, creating it on first access.
+     * Never null; the service itself is null-safe at its consumers' call sites (callers
+     * that may run outside a run thread a {@code @Nullable} reference instead).
+     */
+    public MaterialReservationService materialReservations() {
+        if (this.materialReservations == null) {
+            this.materialReservations = new MaterialReservationService();
+        }
+        return this.materialReservations;
+    }
+
+    /**
+     * Drops all material reservations for this run. Reachable teardown for the run-terminal
+     * clear performed at the {@code AgenticPlanExecutor} terminal call sites (WS5). No-op when
+     * the ledger was never created.
+     */
+    public void clearMaterialReservations() {
+        if (this.materialReservations != null) {
+            this.materialReservations.clear();
+        }
+    }
 }

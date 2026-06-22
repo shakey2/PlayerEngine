@@ -8,7 +8,7 @@ import java.util.List;
  * Phase B2 — complete hand-authored {@link ToolDocument} records for every command
  * registered in {@code PlayerEngineCommands.init()}.
  *
- * <p>B1 authored 15 representative entries as a spike. B2 fills out all 29 registered
+ * <p>B1 authored 15 representative entries as a spike. B2 fills out all 30 registered
  * commands and patches keyword gaps identified in the B1 spike report:
  * <ul>
  *   <li>Singular/plural forms added (e.g. "logs", "trees", "mobs").
@@ -40,16 +40,51 @@ public final class SeedToolMetadata {
 
             doc("get",
                 "get",
-                "Gather resources or craft an item. Handles mining, chopping, mob drops, and crafting automatically.",
-                "Use when the NPC needs a specific item or resource in its inventory. Works for raw materials (logs, stone, ores) and crafted items (tools, armor, food). Provide item ID and optional quantity. For wooden items use the GENERIC name (sign, planks, log), not a wood species like oak_sign — the best available wood nearby is chosen automatically.",
-                list("get log 20", "get sign 1", "get diamond_chestplate 1", "get iron_ingot 64", "get wooden_pickaxe 1"),
+                "Gather resources or craft any item. Handles mining, chopping, mob drops, and crafting automatically. Any item with a vanilla or modded crafting recipe is supported — not just the catalogued vanilla items.",
+                "Use when the NPC needs a specific item or resource in its inventory. Works for raw materials (logs, stone, ores) and crafted items (tools, armor, food). Any item with a crafting recipe is supported, not just catalogued vanilla items. Provide item ID and optional quantity. For MODDED items use the full registry id namespace:path (e.g. iceandfire:podium_oak) — never a bare modded name and never the translation/lang key shown in inventory (block.iceandfire.podium_oak). Bare names work only for vanilla items. If you only know the display/lang key, look up the real registry id with `inspect ITEM <id>` or an advanced tooltip (F3+H). For wooden items use the GENERIC name (sign, planks, log), not a wood species like oak_sign — the best available wood nearby is chosen automatically. Items that require a furnace or smithing table (stone, glass, netherite gear) still work via their catalogue entries.",
+                list("get log 20", "get sign 1", "get diamond_chestplate 1", "get iron_ingot 64", "get wooden_pickaxe 1", "get minecraft:iron_pickaxe 1", "get iceandfire:podium_oak 1"),
                 list("gather", "collect", "acquire", "obtain", "fetch", "mine", "chop", "harvest",
                      "craft", "make", "create", "build item", "resource", "material", "wood", "stone",
                      "ore", "log", "logs", "trees", "tree", "lumber", "cut trees", "chop trees",
                      "cut wood", "item", "pickaxe", "sword", "tool", "ingredient",
                      "coal", "iron ore", "gravel", "sand", "dirt", "cobblestone", "planks", "sticks",
-                     "sign", "signs"),
+                     "sign", "signs", "modded item", "registry id", "any item"),
                 list("inventory", "crafting")),
+
+            doc("smelt",
+                "smelt",
+                "Smelt, blast, or smoke an item using a nearby furnace, blast furnace, or smoker as a deferred background job. The NPC walks to the furnace, loads the input plus enough fuel, waits while it cooks (reading the real furnace progress, not a timer), then collects the result.",
+                "Use when the NPC needs to cook or smelt raw materials into a processed output — e.g. raw iron/gold/copper ore into ingots, raw food into cooked food, sand into glass, cobblestone into stone. Provide the INPUT item name and an optional count (defaults to 1). The output and cook time are resolved from the recipe registry, so any item with a furnace/blast/smoker recipe works — no need to specify the furnace type. Fuel is chosen and sized automatically (charcoal/coal/planks preferred; lava is not used). The NPC must have the input items in its inventory and a furnace, blast furnace, or smoker must be reachable nearby. Returning to the furnace to collect is a normal success, not a failure. Use 'get' first if the NPC does not yet have the raw material.",
+                list("smelt iron 16", "smelt raw_iron 32", "smelt raw_gold 8", "smelt potato 8", "smelt cobblestone 64", "smelt sand 16"),
+                list("smelt", "smelting", "cook", "cooking", "blast", "blasting", "smoke", "smoking",
+                     "furnace", "blast furnace", "smoker", "iron", "ingot", "ingots", "ore", "raw iron",
+                     "raw gold", "raw copper", "food", "cooked food", "glass", "stone", "charcoal",
+                     "process", "refine", "melt", "bake", "roast"),
+                list("crafting", "resources")),
+
+            doc("smith",
+                "smith",
+                "Upgrade an item at a smithing table. The NPC resolves the required template, base, and addition from the recipe registry, gathers all three ingredients, walks to a smithing table, and performs the upgrade. Works for any registered SmithingTransformRecipe — vanilla netherite upgrades and modded upgrades alike. Provide the desired OUTPUT item name (e.g. netherite_pickaxe) and an optional count.",
+                "Use when the owner wants to upgrade gear to netherite or perform any other smithing-table upgrade — e.g. diamond to netherite, apply a modded upgrade. Provide the OUTPUT item (what you want to end up with). The NPC figures out the template, base, and addition automatically from the recipe registry. Examples: `smith netherite_pickaxe`, `smith netherite_chestplate 1`. Also use for `smith_items` in agentic plans where the goal is a smithing-table upgrade. This command does NOT smelt (use 'smelt' for furnace work) and does NOT craft (use 'get' for crafting-table recipes).",
+                list("smith netherite_pickaxe", "smith netherite_chestplate 1", "smith netherite_sword",
+                     "smith netherite_helmet", "smith netherite_leggings", "smith netherite_boots",
+                     "smith netherite_axe", "smith netherite_shovel", "smith netherite_hoe"),
+                list("smith", "smithing", "smithing table", "upgrade", "upgrade armor", "upgrade tool",
+                     "upgrade gear", "upgrade equipment", "netherite", "netherite upgrade",
+                     "apply netherite", "netherite my", "make netherite", "diamond to netherite",
+                     "upgrade diamond gear", "upgrade diamond armor", "upgrade diamond tools",
+                     "upgrade diamond pickaxe", "upgrade diamond sword", "upgrade diamond helmet",
+                     "upgrade diamond chestplate", "upgrade diamond leggings", "upgrade diamond boots",
+                     "upgrade diamond axe", "upgrade diamond shovel",
+                     "netherite pickaxe", "netherite sword", "netherite helmet", "netherite chestplate",
+                     "netherite leggings", "netherite boots", "netherite axe", "netherite shovel",
+                     "netherite ingot", "netherite upgrade smithing template", "smithing template",
+                     "armor upgrade", "tool upgrade", "gear upgrade", "weapon upgrade",
+                     "make my pickaxe netherite", "make my sword netherite", "make my armor netherite",
+                     "turn diamond into netherite", "convert diamond to netherite",
+                     "modded upgrade", "smithing transform", "transform recipe",
+                     "armor trim redirect", "smithing station"),
+                list("crafting", "resources", "inventory")),
 
             doc("goto",
                 "goto",
@@ -126,11 +161,12 @@ public final class SeedToolMetadata {
 
             doc("give",
                 "give",
-                "Give items from the NPC's inventory to a specified nearby player.",
-                "Use when the NPC should transfer items it is carrying to a particular player.",
+                "Give or drop items the NPC is carrying to a player: the NPC walks to the player and drops the items on the ground for them to pick up.",
+                "Use when the owner wants the NPC to drop or hand over items it is carrying so a player can pick them up. Items are dropped on the ground next to the player (not forced into their inventory).",
                 list("give iron_ingot 10 Steve", "give log 5 PlayerName", "give diamond 1 Owner"),
-                list("hand over", "transfer", "share", "offer", "provide", "deliver", "trade",
-                     "toss", "player", "owner", "pass", "inventory"),
+                list("drop", "drop off", "drop on ground", "drop the items", "drop for me", "drop here",
+                     "throw down", "put on ground", "hand over", "give to me", "transfer", "share",
+                     "offer", "provide", "deliver", "trade", "toss", "player", "owner", "pass", "inventory"),
                 list("inventory", "social")),
 
             doc("fish",
@@ -504,7 +540,33 @@ public final class SeedToolMetadata {
                      "where is the iron chest", "find my storage", "search waypoints",
                      "storage search", "remembered chests", "find chest with", "which chest holds",
                      "where do I keep", "my waypoints", "list waypoints"),
-                list("storage", "waypoints"))
+                list("storage", "waypoints")),
+
+            doc("mine_block",
+                "mine_block",
+                "Mine the nearest matching block of a named type within a radius. The NPC deterministically figures out which pickaxe tier the block needs (wood/stone/iron/diamond), acquires a sufficient tool if it lacks one (checking its inventory, then EllieGPS-marked chests, then nearby chests, then crafting one up the material chain), breaks the block(s), and collects the drops into its inventory. Breaking a block with too weak a tool yields no drops (vanilla behavior) and is reported honestly. Mined materials stay in the inventory — this step never stores or deposits them.",
+                "Use as an agentic plan step when the goal is to break and collect a specific kind of block in the world (ore, stone, deepslate, obsidian, etc.) rather than gather loose drops already on the ground. Provide the block id (e.g. minecraft:iron_ore, cobblestone) and optional radius/maxBlocks. v1 targets ONLY the nearest matching block within the radius (no coordinate, area, or vein mining). The NPC resolves and acquires the required pickaxe automatically — do not pre-craft a tool. Mining does NOT auto-store the result; the materials remain in inventory for a later craft step (or an explicit store step) to use. Pair with gather_loose_items to also sweep up drops auto-pickup missed.",
+                list("mine_block minecraft:iron_ore", "mine_block cobblestone 8", "mine_block minecraft:deepslate", "mine_block obsidian 1"),
+                list("mine", "mining", "dig", "digging", "break", "break block", "break blocks",
+                     "destroy block", "ore", "ores", "iron ore", "gold ore", "diamond ore", "coal ore",
+                     "copper ore", "stone", "cobblestone", "deepslate", "obsidian", "rock", "boulder",
+                     "pickaxe", "tool tier", "wooden pickaxe", "stone pickaxe", "iron pickaxe",
+                     "diamond pickaxe", "mineable", "excavate", "extract", "quarry", "harvest block",
+                     "mine the ore", "mine some stone", "dig out", "break the rock"),
+                list("resources", "mining", "tools")),
+
+            doc("mine",
+                "mine",
+                "Standalone mine command — break and collect up to N of the nearest matching block of a named type. The NPC deterministically resolves and acquires the right pickaxe tier if it lacks one, breaks the block(s), and collects the drops into its inventory; it reports no-drops (too-weak tool) honestly and NEVER auto-stores the result.",
+                "Use when the user asks the companion to mine/dig/break a specific block or ore by name, optionally with a count. Prefer this over `get` for items obtained by MINING rather than crafting (ores, stone, cobblestone, deepslate, obsidian, gravel). The companion picks the pickaxe tier automatically — do not pre-craft a tool. Count is a number of BLOCKS to break (a block may drop multiple items, or none with too weak a tool) and defaults to 1.",
+                list("mine iron_ore 8", "mine cobblestone 32", "mine minecraft:deepslate", "mine diamond_ore 3"),
+                list("mine", "mining", "dig", "digging", "dig up", "dig out", "break block",
+                     "break blocks", "destroy block", "ore", "ores", "iron ore", "gold ore", "coal ore",
+                     "diamond ore", "copper ore", "redstone ore", "lapis ore", "emerald ore",
+                     "cobblestone", "stone", "deepslate", "obsidian", "gravel", "harvest block",
+                     "extract ore", "mine ore", "mine some", "mine a block", "mine the", "pickaxe",
+                     "quarry", "excavate"),
+                list("resources", "mining", "tools"))
 
         );
     }

@@ -10,6 +10,7 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+import com.player2.playerengine.automaton.utils.accessor.ServerChunkManagerAccessor;
 import dev.architectury.event.events.common.ChunkEvent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.ChunkPos;
@@ -74,6 +75,32 @@ public class SimpleChunkTracker {
 
    public boolean isChunkLoaded(BlockPos pos) {
       return this.isChunkLoaded(new ChunkPos(pos));
+   }
+
+   /**
+    * Whether the chunk containing {@code pos} is at BLOCK-TICKING level — i.e. a furnace (or any
+    * other block entity) at that position will actually progress this tick.
+    *
+    * <p>Uses {@link ServerChunkManagerAccessor#automatone$getChunkNow(int, int)}, which delegates to
+    * {@code chunkHolder.getTickingChunk()}. Non-null means the chunk is at EntityTicking/BlockTicking
+    * level; null means it is absent or not yet ticking.
+    *
+    * <p>This is a CHECKS-ONLY call — it never generates, loads, or force-loads any chunk.
+    * It is hot-loop safe (pure holder map lookup, same as {@link #isChunkLoaded}).
+    *
+    * <p>NOT the same as {@link #isChunkLoaded}: a chunk can be visible/present (isChunkLoaded=true)
+    * without being at block-ticking level. Only isChunkSimulated=true guarantees furnace progress.
+    */
+   public boolean isChunkSimulated(ChunkPos pos) {
+      var world = this.mod.getWorld();
+      if (world == null) return false;
+      var src = world.getChunkSource();
+      if (!(src instanceof ServerChunkManagerAccessor accessor)) return false;
+      return accessor.automatone$getChunkNow(pos.x, pos.z) != null;
+   }
+
+   public boolean isChunkSimulated(BlockPos pos) {
+      return this.isChunkSimulated(new ChunkPos(pos));
    }
 
    public List<ChunkPos> getLoadedChunks() {

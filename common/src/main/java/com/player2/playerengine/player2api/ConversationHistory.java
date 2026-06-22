@@ -17,8 +17,11 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class ConversationHistory {
+   private static final Logger LOGGER = LogManager.getLogger();
    private final List<JsonObject> conversationHistory = new ArrayList<>();
    private final Path historyFile;
    private boolean loadedFromFile = false;
@@ -165,7 +168,14 @@ public class ConversationHistory {
          try {
             String line;
             while ((line = reader.readLine()) != null) {
-               JsonObject obj = Utils.parseCleanedJson(line);
+               JsonObject obj;
+               try {
+                  obj = Utils.parseCleanedJson(line);
+               } catch (com.player2.playerengine.player2api.utils.LlmJsonParseException ex) {
+                  // Corrupted/partial history line — skip it rather than aborting the whole load.
+                  LOGGER.warn("loadFromFile: skipping unparseable history line");
+                  continue;
+               }
                if (obj.has("content")) {
                   String content = obj.get("content").getAsString();
                   if (content.length() > 500) {
@@ -311,8 +321,11 @@ public class ConversationHistory {
    }
 
    // ReminderString adds a reminder to the latest user message if present.
+   // validCommandsBlock (when present) carries the per-turn RAG-retrieved command subset; it is injected
+   // ONLY into this throwaway copy (historyFile == null) and so is never persisted to conversation.jsonl.
    public ConversationHistory copyThenWrapLatestWithStatus(String worldStatus, String agentStatus,
-         String altoclefStatusMsgs, Player2APIService player2apiService, Optional<String> reminderString) {
+         String altoclefStatusMsgs, Player2APIService player2apiService, Optional<String> reminderString,
+         Optional<String> validCommandsBlock) {
       ConversationHistory copy = new ConversationHistory(this.conversationHistory.get(0).get("content").getAsString());
 
       for (int i = 1; i < this.conversationHistory.size() - 1; i++) {
@@ -333,6 +346,9 @@ public class ConversationHistory {
             if (!altoclefStatusMsgs.isBlank()) {
                msgObj.add("gameDebugMessages", altoclefStatusMsgs);
             }
+            validCommandsBlock
+                  .filter(s -> !s.isBlank())
+                  .ifPresent(block -> msgObj.add("validCommands", block));
             last.addProperty("content", msgObj.toString());
          }
 
