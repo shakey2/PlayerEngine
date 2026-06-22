@@ -15,7 +15,14 @@ public class Prompts {
   public static final String reminderOnOwnerMsg = "Last message was from your owner.";
   public static final String reminderOnOtherUSerMsg = "Last message was from a user that was not your owner.";
   public static final String generalConversationReminder = "Remember to output valid JSON reponse with reason, command and message.";
-  private static String aiNPCPromptTemplate = """
+  /**
+   * Stable base template (byte-identical across turns). Contains NO per-turn-variable command list.
+   * The live RAG path uses this base verbatim; the per-turn retrieved command subset is delivered in
+   * the latest user turn under the {@code validCommands} key (see {@code copyThenWrapLatestWithStatus}).
+   * Session-stable paths (full-list fallback / always-include-only) append {@link #validCommandsSection}
+   * and fill the {@code {{validCommands}}} placeholder.
+   */
+  private static final String aiNPCPromptTemplateBase = """
       General Instructions:
       You are an AI-NPC. You have been spawned in by your owner, who's username is "{{ownerUsername}}", but you can also talk and interact with other users. You can provide Minecraft guides, answer questions, and chat as a friend.
       When asked, you can collect materials, craft items, scan/find blocks, and fight mobs or players using the valid commands.
@@ -31,6 +38,7 @@ public class Prompts {
           "agentStatus" : "The status of you, the agent in the game."
           "reminders" : "Reminders with additional instructions."
           "gameDebugMessages" : "The most recent debug messages that the game has printed out. The user cannot see these."
+          "validCommands" : "The subset of command ids retrieved for THIS turn (present only on the current message). When this key is present, ONLY these command ids (plus idle/stop/bodylang) may be selected; if none fit, use idle/stop/bodylang. When this key is absent, use the command list given in these instructions instead."
       }
       Response Format:
       Respond with JSON containing message, command and reason. All of these are strings.
@@ -51,6 +59,15 @@ public class Prompts {
       - Avoid Filler Phrases: Do not engage in repetitive or filler content.
       - If somebody asks, greets or talks to another person, don't respond. Although you can try and offer your help if needed.
       - JSON format: Always follow this JSON format regardless of conversations.
+      """;
+
+  /**
+   * Session-stable command-list section appended ONLY by the placeholder-bearing assembly methods
+   * (full-list fallback and always-include-only). The live RAG path omits this entirely so its system
+   * message stays byte-stable; that path delivers its per-turn subset via the user-turn {@code validCommands}
+   * key instead.
+   */
+  private static final String validCommandsSection = """
       Valid Commands (subset retrieved for this turn — use idle/stop/bodylang if none fit; only listed command ids can be selected):
       {{validCommands}}
       """;
@@ -72,7 +89,7 @@ public class Prompts {
     }
     String validCommandsFormatted = commandListBuilder.toString();
 
-    String newPrompt = Utils.replacePlaceholders(aiNPCPromptTemplate,
+    String newPrompt = Utils.replacePlaceholders(aiNPCPromptTemplateBase + validCommandsSection,
         Map.of(
             "characterDescription", character.description(),
             "characterName", character.name(),
@@ -84,17 +101,39 @@ public class Prompts {
 
   /**
    * RAG-backed prompt: {@code validCommandsBlock} is produced by {@link com.player2.playerengine.retrieval.RagPromptBuilder}.
+   *
+   * <p>Session-stable use only: still called by the always-include-only path
+   * ({@code updateSystemPromptAlwaysIncludeOnly}, built with {@code List.of()} hits). The per-turn live
+   * RAG subset is NOT rendered here anymore — it goes to the user tail via
+   * {@link #getAINPCSystemPromptNoCommandsBlock}. Do not delete: still used by the session-stable path.
    */
   public static String getAINPCSystemPromptWithValidCommandsBlock(
       Character character,
       String validCommandsBlock,
       String ownerUsername) {
     String block = validCommandsBlock == null ? "" : validCommandsBlock;
-    return Utils.replacePlaceholders(aiNPCPromptTemplate,
+    return Utils.replacePlaceholders(aiNPCPromptTemplateBase + validCommandsSection,
         Map.of(
             "characterDescription", character.description(),
             "characterName", character.name(),
             "validCommands", block,
+            "ownerUsername", ownerUsername,
+            "commandFieldInstructions", commandFieldInstructionsForPrompt()));
+  }
+
+  /**
+   * Byte-stable live-RAG system prompt: the stable base ONLY, with no {@code validCommands} section,
+   * header, or command list. Used by the live RAG path so the system message (message index 0) is
+   * byte-identical across turns regardless of which commands are retrieved. The per-turn retrieved
+   * subset is delivered in the latest user turn under the {@code validCommands} key instead.
+   */
+  public static String getAINPCSystemPromptNoCommandsBlock(
+      Character character,
+      String ownerUsername) {
+    return Utils.replacePlaceholders(aiNPCPromptTemplateBase,
+        Map.of(
+            "characterDescription", character.description(),
+            "characterName", character.name(),
             "ownerUsername", ownerUsername,
             "commandFieldInstructions", commandFieldInstructionsForPrompt()));
   }

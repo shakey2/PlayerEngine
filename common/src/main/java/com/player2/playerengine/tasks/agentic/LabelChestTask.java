@@ -238,7 +238,10 @@ public final class LabelChestTask extends Task implements DescribesProgress {
         // Generic "sign" request: CraftMacroSupport.pickSignSpecies resolves the species
         // deterministically from what is fundable RIGHT NOW. A null macro means fast-craft macros
         // are disabled in settings — a non-craft skip with its own truthful code.
-        Task macro = CraftMacroTasks.tryCreateMacroTask(this.controller, new ItemTarget("sign", 1));
+        // WS4: thread the run's chain-scoped reservation ledger so the sign craft respects sibling
+        // agentic steps' pre-seeded reservations (additive floor; only lowers perceived free stock).
+        Task macro = CraftMacroTasks.tryCreateMacroTask(this.controller, new ItemTarget("sign", 1),
+                context != null ? context.reservations() : null);
         if (macro == null) {
             finishWithWarning("sign_craft_unavailable");
             return null;

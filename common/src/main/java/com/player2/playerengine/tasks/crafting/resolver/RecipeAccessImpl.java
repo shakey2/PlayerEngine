@@ -3,8 +3,11 @@ package com.player2.playerengine.tasks.crafting.resolver;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import net.minecraft.core.NonNullList;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.crafting.CraftingInput;
 import net.minecraft.world.item.crafting.CraftingRecipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.item.crafting.RecipeManager;
@@ -36,10 +39,18 @@ public final class RecipeAccessImpl implements RecipeAccess {
    @Override
    public List<CraftingRecipe> getCraftingRecipes(RecipeManager mgr) {
       // 1.21.1: getAllRecipesFor returns List<RecipeHolder<CraftingRecipe>>; unwrap each via .value().
+      // Pre-filter special recipes (CustomRecipe subclasses: firework, shulker dye, banner, map clone,
+      // repair, tipped arrow, etc.) and incomplete recipes (empty/unbound ingredient lists). Both
+      // isSpecial() and isIncomplete() are stable across branches; calling them here keeps the resolver
+      // from mis-classifying BARRIER-returning or unresolvable ingredient slots downstream.
       List<RecipeHolder<CraftingRecipe>> holders = mgr.getAllRecipesFor(RecipeType.CRAFTING);
       List<CraftingRecipe> result = new ArrayList<>(holders.size());
       for (RecipeHolder<CraftingRecipe> holder : holders) {
-         result.add(holder.value());
+         CraftingRecipe recipe = holder.value();
+         if (recipe.isSpecial() || recipe.isIncomplete()) {
+            continue;
+         }
+         result.add(recipe);
       }
       return result;
    }
@@ -82,5 +93,23 @@ public final class RecipeAccessImpl implements RecipeAccess {
    public int outputCountOf(CraftingRecipe recipe, RegistryAccess registries) {
       // MC's Recipe interface has NO outputCount(); the per-craft yield is the result stack's count.
       return recipe.getResultItem(registries).getCount();
+   }
+
+   /**
+    * WS6 implementation — 1.21.1 branch.
+    *
+    * <p>Constructs a {@link CraftingInput} from the given slot contents via
+    * {@link CraftingInput#of(int, int, List)}, which internally crops the grid to the minimal
+    * bounding box of non-empty items. The returned {@link NonNullList} size therefore equals the
+    * cropped item count, NOT {@code width * height}. Callers MUST iterate the list and reinsert
+    * each non-{@link ItemStack#EMPTY} stack without assuming slot-position correspondence to the
+    * original {@code slotContents} layout (see WS5 note in {@link RecipeAccess#getRemainingItems}).
+    */
+   @Override
+   public NonNullList<ItemStack> getRemainingItems(
+         CraftingRecipe recipe, List<ItemStack> slotContents,
+         int width, int height, RegistryAccess registries) {
+      CraftingInput input = CraftingInput.of(width, height, slotContents);
+      return recipe.getRemainingItems(input);
    }
 }

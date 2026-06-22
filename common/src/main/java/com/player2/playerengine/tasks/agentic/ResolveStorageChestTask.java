@@ -277,7 +277,10 @@ public final class ResolveStorageChestTask extends Task implements DescribesProg
         }
         obtainAttempts++;
         ItemTarget chestTarget = new ItemTarget(Items.CHEST, 1);
-        Task macro = CraftMacroTasks.tryCreateMacroTask(this.controller, chestTarget);
+        // WS4: thread the run's chain-scoped reservation ledger so this craft respects sibling agentic
+        // steps' pre-seeded reservations (additive floor; can only lower perceived free stock).
+        Task macro = CraftMacroTasks.tryCreateMacroTask(this.controller, chestTarget,
+                context != null ? context.reservations() : null);
         if (macro != null) {
             updateProgress("obtaining chest item (craft macro)");
             child = macro;

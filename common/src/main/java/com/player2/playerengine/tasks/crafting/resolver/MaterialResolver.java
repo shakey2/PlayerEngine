@@ -2,6 +2,8 @@ package com.player2.playerengine.tasks.crafting.resolver;
 
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.TaskCatalogue;
+import com.player2.playerengine.agentic.MaterialReservationService;
+import com.player2.playerengine.tasks.cooking.resolver.CookingRecipeAccess;
 import com.player2.playerengine.tasks.crafting.CraftMacroStep;
 import com.player2.playerengine.tasks.crafting.CraftMacroStepKind;
 import com.player2.playerengine.tasks.crafting.resolver.IngredientInspector.SlotKind;
@@ -21,6 +23,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.crafting.CraftingRecipe;
 import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.RecipeManager;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Deterministic, on-device material resolver: given a target {@link Item} + count and the bot's
@@ -30,9 +33,9 @@ import net.minecraft.world.item.crafting.RecipeManager;
  * human-meaningful reason.
  *
  * <p><b>This class is destined to be byte-identical across the 1.20.1 and 1.21.1 PlayerEngine
- * branches.</b> It depends ONLY on the two cross-version abstractions {@link IngredientInspector} and
- * {@link RecipeAccess} (both constructor-injected by the executor wiring step), never on a
- * version-specific recipe API directly. The MC {@link CraftingRecipe} interface FQN it references
+ * branches.</b> It depends ONLY on the three cross-version abstractions {@link IngredientInspector},
+ * {@link RecipeAccess}, and {@link CookingRecipeAccess} (all constructor-injected by the executor
+ * wiring step), never on a version-specific recipe API directly. The MC {@link CraftingRecipe} interface FQN it references
  * exists with the same name in both versions; all version divergence (the {@code RecipeHolder} unwrap
  * and the {@code Recipe<CraftingContainer>} vs {@code Recipe<CraftingInput>} generic bound) lives
  * inside {@code RecipeAccessImpl}.
@@ -60,14 +63,44 @@ public final class MaterialResolver {
    private final RecipeAccess recipes;
 
    /**
+    * Cross-version smelt-recipe access (constructor-injected, NOT instantiated here — preserves the
+    * inject-don't-instantiate invariant above). Used ONLY by the smelt-divert: a smeltable ingot the
+    * bot cannot fund a real craft for is routed to a raw external named by its own id so the existing
+    * smelt subsystem (raw_&lt;material&gt; first, ore fallback) sources it, instead of recursing into a
+    * not-held nugget/block compression craft. Absorbs all {@code RecipeType}/{@code RecipeHolder}/
+    * {@code getResultItem} version divergence; never surfaces them to this resolver.
+    */
+   private final CookingRecipeAccess cooking;
+
+   /**
+    * Chain-scoped reservation ledger (WS4): an ADDITIVE external floor read alongside the per-pass
+    * {@code reserved} map in {@link #freeCount}. {@code null} outside an agentic run (standalone
+    * {@code GetCommand} craft), in which case {@code freeCount} is byte-identical to today. Set by
+    * {@code CraftMacroResourceTask} at construction via {@link #setLedger}; the resolver's own per-pass
+    * rebuild and slot-narrowing are untouched — the ledger can only ever LOWER perceived free stock.
+    */
+   @Nullable
+   private MaterialReservationService ledger;
+
+   /**
     * Change-gate for the per-pass poolCredit/stepEmit arithmetic diag lines: a steady-state resolve
     * loop logs transitions instead of ~1000 identical lines per minute.
     */
    private String lastArithmeticDiagSig = "";
 
-   public MaterialResolver(IngredientInspector inspector, RecipeAccess recipes) {
+   public MaterialResolver(IngredientInspector inspector, RecipeAccess recipes, CookingRecipeAccess cooking) {
       this.inspector = inspector;
       this.recipes = recipes;
+      this.cooking = cooking;
+   }
+
+   /**
+    * Install the chain-scoped reservation ledger (WS4). Passing {@code null} (or never calling this)
+    * leaves {@link #freeCount} behaving exactly as before the ledger existed. The ledger is consulted
+    * as an additive floor only; it never replaces the resolver's per-pass {@code reserved} map.
+    */
+   public void setLedger(@Nullable MaterialReservationService ledger) {
+      this.ledger = ledger;
    }
 
    /**
@@ -126,10 +159,15 @@ public final class MaterialResolver {
       // Top-level target: no pooled output (the requested item is concrete/variant-locked upstream),
       // the satisfaction threshold defaults to `count`, and agnostic ancestry starts FALSE — it flips
       // true only inside a multi-variant agnostic pooled slot (e.g. a chest's #planks), so a
-      // variant-locked request (get oak_planks) emits NARROW per-species externals.
+      // variant-locked request (get oak_planks) emits NARROW per-species externals. `resolving` is the
+      // CYCLE GUARD: the set of items currently being resolved on this chain — a recipe whose every
+      // input variant is already an ancestor (iron_block <-> iron_ingot, the storage de-craft pair) is
+      // refused, so `want` falls through to a raw external at its TRUE requested count instead of a
+      // rounding-inflated impossible one. Fresh, empty per top-level resolve.
+      java.util.Set<Item> resolving = new java.util.HashSet<>();
       ResolverResult.Status status = resolveInto(
             controller, mgr, registries, target, count, null, 0, steps, external, externalCredited,
-            failures, reserved, plannedDelta, surplus, passDiag, false, 0);
+            failures, reserved, plannedDelta, surplus, passDiag, false, resolving, 0);
 
       CoalescedExternals merged = coalesceExternals(external, externalCredited);
 
@@ -241,9 +279,13 @@ public final class MaterialResolver {
             reserve(reserved, bt.item(), bt.count());
             continue;
          }
+         // Fresh cycle-guard ancestor set per requirement-set target (cycles are per-chain, not shared
+         // across sibling requirements). See resolve() for the rationale.
+         java.util.Set<Item> resolving = new java.util.HashSet<>();
          ResolverResult.Status sub = resolveInto(
                controller, mgr, registries, bt.item(), bt.count(), null, 0,
-               steps, external, externalCredited, failures, reserved, plannedDelta, surplus, passDiag, false, 0);
+               steps, external, externalCredited, failures, reserved, plannedDelta, surplus, passDiag,
+               false, resolving, 0);
          if (sub == ResolverResult.Status.UNOBTAINABLE) {
             worst = ResolverResult.Status.UNOBTAINABLE;
          } else if (worst != ResolverResult.Status.UNOBTAINABLE) {
@@ -456,6 +498,12 @@ public final class MaterialResolver {
     *                   externals are named NARROW by the slot's own raw NATURAL variant, so the
     *                   dispatched gather's match set is a subset of what the arithmetic credits —
     *                   membership coherence, the anti-escalation invariant.
+    * @param resolving  CYCLE-GUARD ancestor set: the items currently being resolved on this chain. A
+    *                   recipe whose every input variant is already in this set is refused (it would
+    *                   re-enter an ancestor — a de-crafting loop such as iron_block<->iron_ingot), so the
+    *                   item falls through to a raw external at its true requested shortfall instead of a
+    *                   ceilDiv-inflated impossible one. Mutated in place (add/remove around the slot
+    *                   recursion) — never copied — so it is cheap and correct across sibling slots.
     */
    private ResolverResult.Status resolveInto(
          PlayerEngineController controller,
@@ -474,6 +522,7 @@ public final class MaterialResolver {
          java.util.Map<Item, Integer> surplus,
          List<String> passDiag,
          boolean agnosticAncestry,
+         java.util.Set<Item> resolving,
          int depth) {
 
       int threshold = (satisfyThreshold > 0) ? satisfyThreshold : need;
@@ -496,12 +545,18 @@ public final class MaterialResolver {
 
       // FUNDING-AWARE recipe selection: among ALL recipes producing `want`, prefer one whose held free
       // raw inputs FULLY fund this shortfall (so `get stick` with no bamboo picks the planks recipe; a
-      // bamboo recipe can only win when held bamboo fully funds it). Emptiness is identical to the old
-      // selectRecipeForResult emptiness, so the raw-material branch below is preserved.
+      // bamboo recipe can only win when held bamboo fully funds it). CYCLE GUARD: any recipe that would
+      // re-enter an item already on the active resolve chain (`resolving`) — the reversible storage pair
+      // iron_block<->iron_ingot, nugget<->ingot, etc. — is filtered out, so a de-crafting loop can never
+      // fabricate an impossible over-counted external (the 24->27 iron_ingot bug). Empty iff EVERY recipe
+      // for `want` is either absent or circular: identical to the old selectRecipeForResult emptiness for
+      // genuinely-raw items, so the raw-material branch below is preserved and now also (correctly) catches
+      // an all-circular item, routing it to a raw external at the TRUE requested shortfall.
       Optional<CraftingRecipe> recipeOpt =
-            selectFundedRecipe(controller, reserved, mgr, registries, want, shortfall, passDiag);
+            selectFundedRecipe(controller, reserved, mgr, registries, want, shortfall, resolving, passDiag);
       if (recipeOpt.isEmpty()) {
-         // No recipe produces `want` -> it is a raw material. Route to external acquisition.
+         // No NON-CIRCULAR recipe produces `want` -> treat it as a raw material. Route to external
+         // acquisition at the exact shortfall (no ceilDiv yield-rounding inflation, since no craft is emitted).
          addExternal(controller, external, externalCredited,
                new Item[]{want}, externalNameFor(want, agnosticAncestry), shortfall);
          return ResolverResult.Status.NEEDS_WORK;
@@ -559,19 +614,30 @@ public final class MaterialResolver {
       // consumption and narrow the grid to exactly the allocated variants.
       java.util.LinkedHashMap<String, java.util.Map<Item, Integer>> slotConsumption =
             new java.util.LinkedHashMap<>();
-      for (java.util.Map.Entry<String, SlotDemand> e : distinct.entrySet()) {
-         SlotDemand slot = e.getValue();
-         java.util.Map<Item, Integer> consumed = new java.util.HashMap<>();
-         slotConsumption.put(e.getKey(), consumed);
-         // A multi-variant (AGNOSTIC) slot pools its variants for satisfaction; a single-variant slot is
-         // variant-locked (no pool). The pool flows to the produced sub-step's outputMatches.
-         Item[] pool = (slot.kind == SlotKind.AGNOSTIC && slot.matchSet.length > 1) ? slot.matchSet : null;
-         ResolverResult.Status sub = resolvePooledSlot(
-               controller, mgr, registries, slot.matchSet, pool, slot.demand,
-               steps, external, externalCredited, failures, reserved, plannedDelta, surplus, consumed,
-               passDiag, agnosticAncestry, depth + 1);
-         if (sub == ResolverResult.Status.UNOBTAINABLE) {
-            worst = ResolverResult.Status.UNOBTAINABLE;
+      // CYCLE GUARD: mark `want` as on the active resolve chain while we resolve its inputs, so any
+      // ingredient that would recurse back into `want` (a de-crafting recipe) is refused below and falls
+      // through to a raw external. Added only AFTER selectFundedRecipe above accepted a non-circular
+      // recipe for `want` itself; removed in the finally so sibling branches are unaffected.
+      boolean addedSelf = resolving.add(want);
+      try {
+         for (java.util.Map.Entry<String, SlotDemand> e : distinct.entrySet()) {
+            SlotDemand slot = e.getValue();
+            java.util.Map<Item, Integer> consumed = new java.util.HashMap<>();
+            slotConsumption.put(e.getKey(), consumed);
+            // A multi-variant (AGNOSTIC) slot pools its variants for satisfaction; a single-variant slot is
+            // variant-locked (no pool). The pool flows to the produced sub-step's outputMatches.
+            Item[] pool = (slot.kind == SlotKind.AGNOSTIC && slot.matchSet.length > 1) ? slot.matchSet : null;
+            ResolverResult.Status sub = resolvePooledSlot(
+                  controller, mgr, registries, slot.matchSet, pool, slot.demand,
+                  steps, external, externalCredited, failures, reserved, plannedDelta, surplus, consumed,
+                  passDiag, agnosticAncestry, resolving, depth + 1);
+            if (sub == ResolverResult.Status.UNOBTAINABLE) {
+               worst = ResolverResult.Status.UNOBTAINABLE;
+            }
+         }
+      } finally {
+         if (addedSelf) {
+            resolving.remove(want);
          }
       }
 
@@ -603,7 +669,7 @@ public final class MaterialResolver {
       //     e.g. all planks for a chest), NEVER an input slot; null keeps strict single-output counting.
       //   - the wrapper recipe still carries `yield` as its outputCount for performCrafts.
       CraftMacroStepKind stepKind = stepKindFor(want, recipe);
-      RecipeTarget recipeTarget = toRecipeTarget(want, threshold, yield, slotTargets, recipe);
+      RecipeTarget recipeTarget = toRecipeTarget(want, threshold, yield, slotTargets, recipe, registries);
       steps.add(new CraftMacroStep(stepKind, recipeTarget, crafts, debugLabel(want), outputPool));
       int produced = crafts * yield;
       // PLANNED-DELTA LEDGER (single write site): record this step's production and its attributed slot
@@ -751,6 +817,7 @@ public final class MaterialResolver {
          java.util.Map<Item, Integer> slotConsumed,
          List<String> passDiag,
          boolean agnosticAncestry,
+         java.util.Set<Item> resolving,
          int depth) {
 
       String poolName = poolLabel(accepted);
@@ -840,8 +907,31 @@ public final class MaterialResolver {
       // recipe produce this item" identically to recipesForResult.isEmpty(), and no arithmetic is
       // driven by WHICH recipe it returns.)
       for (Item it : accepted) {
-         if (recipes.selectRecipeForResult(mgr, it, registries).isEmpty()) {
-            // pooledFree already drained/credited by the hoist; route the surplus-netted residual externally.
+         if (!hasNonCircularRecipe(mgr, registries, it, resolving)) {
+            // Either a genuinely raw variant (no recipe), OR every recipe for it re-enters an ancestor on
+            // the active chain (a de-crafting loop, e.g. an #iron pool member whose only path is
+            // iron_block<->iron_ingot). Both mean the residual must be GATHERED, not crafted: route the
+            // surplus-netted residual to a raw external at its exact count. pooledFree already
+            // drained/credited by the hoist.
+            addExternal(controller, external, externalCredited,
+                  accepted, externalNameForPool(accepted, agnosticAncestry), shortfall);
+            return ResolverResult.Status.NEEDS_WORK;
+         }
+         // SMELT DIVERT (PRIMARY, load-bearing): a smeltable ingot whose every surviving (non-circular)
+         // craft candidate is an UNFUNDED single-ingredient craft (the 9-nugget->1-ingot / block->ingot
+         // compression family, none of whose inputs are on hand) is, for sourcing purposes, RAW — it must
+         // be SMELTED (raw_<material> first via TaskCatalogue, ore only as fallback), NOT fabricated by
+         // recursing into not-held nuggets. Without this, the low-yield 9-nugget->1-ingot candidate
+         // escapes the yield>=2 unfundedUnpack pre-filter, the credit loop recurses into the nugget slot
+         // (whose only recipe ingot->9-nugget is circular -> raw), and the resolver emits an impossible
+         // "need 45 iron_nugget" external. Routing here, BEFORE the credit loop, names the external by the
+         // ingot's own id so COLLECT dispatches the correct Collect*IngotTask / smelt(...) entry. The
+         // freeCount==0 gate inside the helper means a FUNDED compression (held nuggets / held block) is
+         // untouched and crafts normally; a multi-ingredient craft is untouched (singleConsumedIngredient
+         // empty). See Decision 2 of masterplan/ingot-smelt-sourcing-plan.md.
+         if (cooking.isSmeltingResult(mgr, it, registries)
+               && allCandidatesUnfundedSingleIngredient(controller, mgr, registries, reserved, it, resolving)) {
+            passDiag.add("rawProbe smeltDivert output=" + itemName(it));
             addExternal(controller, external, externalCredited,
                   accepted, externalNameForPool(accepted, agnosticAncestry), shortfall);
             return ResolverResult.Status.NEEDS_WORK;
@@ -877,9 +967,11 @@ public final class MaterialResolver {
             break;
          }
          Optional<CraftingRecipe> variantRecipe =
-               selectFundedRecipe(controller, reserved, mgr, registries, variant, residual, passDiag);
+               selectFundedRecipe(controller, reserved, mgr, registries, variant, residual, resolving, passDiag);
          if (variantRecipe.isEmpty()) {
-            continue; // unreachable in this branch (all craftable); defensive
+            continue; // no NON-CIRCULAR recipe for this variant on this chain; another variant or the
+                      // residual path handles it (the raw-detection probe above already routed an
+                      // all-circular/raw pool member to an external).
          }
          int yield = Math.max(1, recipes.outputCountOf(variantRecipe.get(), registries));
          int convertible = convertibleCrafts(controller, reserved, variantRecipe.get());
@@ -901,7 +993,7 @@ public final class MaterialResolver {
          ResolverResult.Status sub = resolveInto(
                controller, mgr, registries, variant, consumedHere, outputPool, threshold,
                steps, external, externalCredited, failures, reserved, plannedDelta, surplus, passDiag,
-               descentAncestry, depth);
+               descentAncestry, resolving, depth);
          if (sub == ResolverResult.Status.UNOBTAINABLE) {
             worst = ResolverResult.Status.UNOBTAINABLE;
          }
@@ -922,16 +1014,26 @@ public final class MaterialResolver {
       // is, by construction, net of every creditable held item of every species.
       Item producible = null;
       for (Item it : accepted) {
-         // Presence-only probe (selectRecipeForResult deliberately kept: same emptiness answer as
-         // recipesForResult; no arithmetic reads WHICH recipe it returns).
-         if (recipes.selectRecipeForResult(mgr, it, registries).isPresent()) {
+         // Presence probe, CYCLE-AWARE: a variant counts as producible only if it has a recipe that does
+         // NOT re-enter the active chain. An all-circular variant is not producible here (the raw-detection
+         // probe above already routed the pool to an external for exactly this case; this is defensive).
+         if (hasNonCircularRecipe(mgr, registries, it, resolving)) {
             producible = it;
             break;
          }
       }
       if (producible != null) {
          Optional<CraftingRecipe> producibleRecipe =
-               selectFundedRecipe(controller, reserved, mgr, registries, producible, residual, passDiag);
+               selectFundedRecipe(controller, reserved, mgr, registries, producible, residual, resolving, passDiag);
+         if (producibleRecipe.isEmpty()) {
+            // Defensive: the presence probe above and selectFundedRecipe share the same RecipeManager
+            // filter, so this cannot happen in practice — but a datapack reload mutating the recipe
+            // list mid-tick could make them disagree. Treat as a raw material rather than NPE
+            // (mirrors the isEmpty() guard at the funded-recipe selection above).
+            addExternal(controller, external, externalCredited,
+                  accepted, externalNameForPool(accepted, agnosticAncestry), residual);
+            return worst;
+         }
          int yield = Math.max(1, recipes.outputCountOf(producibleRecipe.get(), registries));
          int u = ceilDiv(residual, yield) * yield;
          // Unconditional predicted-held threshold: same LOCKED-pool symmetry rationale as the credit loop.
@@ -939,7 +1041,7 @@ public final class MaterialResolver {
          ResolverResult.Status sub = resolveInto(
                controller, mgr, registries, producible, residual, outputPool, threshold,
                steps, external, externalCredited, failures, reserved, plannedDelta, surplus, passDiag,
-               descentAncestry, depth);
+               descentAncestry, resolving, depth);
          if (sub == ResolverResult.Status.UNOBTAINABLE) {
             worst = ResolverResult.Status.UNOBTAINABLE;
          }
@@ -966,10 +1068,12 @@ public final class MaterialResolver {
     * yield (fewest crafts; a planks->4 stick recipe beats a bamboo->1 recipe), then registry order.
     * Deterministic: a bamboo stick recipe can only ever win when held bamboo fully funds the shortfall.
     *
-    * <p>Empty iff NO recipe produces {@code want} — interchangeable with
-    * {@code selectRecipeForResult.isEmpty()}, so callers' raw-material branches are unaffected.
-    * Coherence: the credit loop's {@code convertibleCrafts} floor and the inner {@code resolveInto}
-    * re-selection both evaluate this same funded choice under the same {@code reserved} state.
+    * <p>Empty iff NO recipe produces {@code want} OR every recipe for it is CIRCULAR relative to the
+    * active resolve chain ({@code resolving}) — a de-crafting loop such as iron_block<->iron_ingot. Both
+    * cases are interchangeable for callers' raw-material branches, which then route {@code want} to a
+    * gather at its exact shortfall. Coherence: the credit loop's {@code convertibleCrafts} floor and the
+    * inner {@code resolveInto} re-selection both evaluate this same funded, cycle-filtered choice under
+    * the same {@code reserved} state.
     */
    private Optional<CraftingRecipe> selectFundedRecipe(
          PlayerEngineController controller,
@@ -978,6 +1082,7 @@ public final class MaterialResolver {
          RegistryAccess registries,
          Item want,
          int shortfall,
+         java.util.Set<Item> resolving,
          List<String> passDiag) {
       List<CraftingRecipe> candidates = recipes.recipesForResult(mgr, want, registries);
       if (candidates.isEmpty()) {
@@ -992,6 +1097,44 @@ public final class MaterialResolver {
       int chosenFundable = 0;
       int chosenCraftsNeeded = 0;
       for (CraftingRecipe candidate : candidates) {
+         // CYCLE GUARD: skip a recipe that would re-enter an item already being resolved on this chain.
+         // Following it would loop (iron_block<->iron_ingot, nugget<->ingot) and ultimately fabricate an
+         // impossible over-counted external. When this filters out EVERY candidate the method returns
+         // empty, and the caller's raw-material branch routes `want` to a gather at its true shortfall.
+         if (recipeIsCircular(candidate, resolving)) {
+            continue;
+         }
+         // UNFUNDED STORAGE-UNPACK GUARD: skip a reversible pack/unpack recipe (iron_block->9 iron_ingot,
+         // 1 iron_ingot->9 iron_nugget) whose single consumed ingredient is NOT on hand. The SHAPE test
+         // lives in RecipeAccess.storageUnpackIngredient (availability-free); the availability term here is
+         // freeCount(...,I)==0 (ledger-aware, correct mid-resolve). Without this, an empty inventory would
+         // fabricate a bogus "still need N iron_block" external instead of routing iron_ingot to smelt/mine.
+         // When I IS held (freeCount>0) the candidate survives and funded decompression proceeds.
+         Optional<Item> unpackIng = recipes.storageUnpackIngredient(mgr, want, registries, candidate);
+         if (unpackIng.isPresent() && freeCount(controller, reserved, unpackIng.get()) == 0) {
+            passDiag.add("recipeSelect skip unfundedUnpack output=" + itemName(want)
+                  + " via=" + itemName(unpackIng.get()));
+            continue;
+         }
+         // SMELT-DIVERT GUARD (secondary, belt-and-suspenders; mirrors the resolvePooledSlot raw-probe
+         // divert): skip a NOT-HELD single-ingredient craft of a smelt-result ingot, so this ingot is
+         // never fabricated from nuggets/blocks via any credit-loop/residual selectFundedRecipe call.
+         // Catches the low-yield 9-nugget->1-ingot craft that escapes the yield>=2 unfundedUnpack
+         // pre-filter above (the iron_block->9-ingot candidate is already skipped by that guard). When
+         // this empties the candidate set, selectFundedRecipe returns empty and the caller's
+         // raw-material branch routes `want` to a smelt external named by its own id. freeCount==0 keeps
+         // funded compression (held inputs) intact; isSmeltingResult restricts it to smeltable ingots.
+         // The single consumed ingredient is resolved ONCE here and reused for both the funding test and
+         // the diag string (no second singleConsumedIngredient scan).
+         if (cooking.isSmeltingResult(mgr, want, registries)) {
+            Optional<Item> smeltDivertIng = recipes.singleConsumedIngredient(candidate);
+            if (smeltDivertIng.isPresent()
+                  && freeCount(controller, reserved, smeltDivertIng.get()) == 0) {
+               passDiag.add("recipeSelect skip smeltDivert output=" + itemName(want)
+                     + " via=" + itemName(smeltDivertIng.get()));
+               continue;
+            }
+         }
          int yield = Math.max(1, recipes.outputCountOf(candidate, registries));
          int craftsNeeded = ceilDiv(Math.max(1, shortfall), yield);
          int fundable = convertibleCrafts(controller, reserved, candidate);
@@ -1017,6 +1160,14 @@ public final class MaterialResolver {
          }
       }
       CraftingRecipe chosen = (bestT0 != null) ? bestT0 : bestAny;
+      if (chosen == null) {
+         // Every candidate was circular relative to the active chain -> no usable recipe. Empty here is
+         // interchangeable with "no recipe exists" for the caller: `want` is treated as a raw material and
+         // routed to a gather at its exact shortfall (the de-craft-loop fix).
+         passDiag.add("recipeSelect output=" + itemName(want) + " shortfall=" + shortfall
+               + " candidates=" + candidates.size() + " allCircular -> raw external");
+         return Optional.empty();
+      }
       if (candidates.size() > 1) {
          // Multi-recipe outputs (stick) log WHY a recipe won; single-recipe outputs stay quiet.
          passDiag.add("recipeSelect output=" + itemName(want) + " shortfall=" + shortfall
@@ -1026,6 +1177,51 @@ public final class MaterialResolver {
                + " fundable=" + chosenFundable + " craftsNeeded=" + chosenCraftsNeeded);
       }
       return Optional.of(chosen);
+   }
+
+   /**
+    * SMELT-DIVERT shape gate: true when {@code candidate} is a single-ingredient craft whose one
+    * distinct consumed ingredient is NOT on hand. Shape-only (see Decision 2 of
+    * masterplan/ingot-smelt-sourcing-plan.md): it deliberately fires on ANY not-held single-ingredient
+    * craft, not strictly a reversible compression — for the reachable vanilla smelt-result ingots that
+    * set is exactly the nugget/block compression family. Pairs with an {@code isSmeltingResult(want)}
+    * caller check and {@code freeCount==0} here so a FUNDED compression (held nuggets / held block)
+    * survives and a multi-ingredient craft ({@code singleConsumedIngredient} empty) is untouched.
+    */
+   private boolean isUnfundedSingleIngredientCraft(
+         PlayerEngineController controller, java.util.Map<Item, Integer> reserved, CraftingRecipe candidate) {
+      Optional<Item> single = recipes.singleConsumedIngredient(candidate);
+      return single.isPresent() && freeCount(controller, reserved, single.get()) == 0;
+   }
+
+   /**
+    * True iff {@code want} has at least one non-circular craft candidate AND every non-circular candidate
+    * is an unfunded single-ingredient craft ({@link #isUnfundedSingleIngredientCraft}). Drives the
+    * PRIMARY {@code resolvePooledSlot} smelt-divert: when this holds for a smelt-result ingot, the bot
+    * can only "craft" it from not-held nuggets/blocks, so it is treated as raw and smelted instead.
+    *
+    * <p>Circular candidates are skipped here (they are already handled by the {@code hasNonCircularRecipe}
+    * branch in the same loop). If ANY non-circular candidate is multi-ingredient or funded (its single
+    * ingredient IS held), this returns false and normal crafting proceeds — the divert does NOT fire.
+    */
+   private boolean allCandidatesUnfundedSingleIngredient(
+         PlayerEngineController controller,
+         RecipeManager mgr,
+         RegistryAccess registries,
+         java.util.Map<Item, Integer> reserved,
+         Item want,
+         java.util.Set<Item> resolving) {
+      boolean sawNonCircular = false;
+      for (CraftingRecipe candidate : recipes.recipesForResult(mgr, want, registries)) {
+         if (recipeIsCircular(candidate, resolving)) {
+            continue;
+         }
+         sawNonCircular = true;
+         if (!isUnfundedSingleIngredientCraft(controller, reserved, candidate)) {
+            return false;
+         }
+      }
+      return sawNonCircular;
    }
 
    /** Within-tier candidate ordering for {@link #selectFundedRecipe}: 2x2 first, then higher yield. */
@@ -1038,6 +1234,60 @@ public final class MaterialResolver {
          return fits;
       }
       return yield > incumbentYield;
+   }
+
+   /**
+    * True when {@code want} has at least one recipe that is NOT circular relative to the active resolve
+    * chain {@code resolving} — i.e. a recipe the resolver could actually follow without re-entering an
+    * ancestor item. Used as the cycle-aware replacement for the old
+    * {@code selectRecipeForResult(...).isPresent()} "is this craftable?" probe: an item whose every recipe
+    * de-crafts back into an ancestor (iron_block<->iron_ingot, nugget<->ingot) is, for THIS chain, raw —
+    * it must be gathered, not crafted. Returns false for a genuinely raw item too (no recipe at all), so
+    * both the no-recipe and all-circular cases route to a raw external at the true shortfall.
+    */
+   private boolean hasNonCircularRecipe(
+         RecipeManager mgr, RegistryAccess registries, Item want, java.util.Set<Item> resolving) {
+      for (CraftingRecipe candidate : recipes.recipesForResult(mgr, want, registries)) {
+         if (!recipeIsCircular(candidate, resolving)) {
+            return true;
+         }
+      }
+      return false;
+   }
+
+   /**
+    * A recipe is CIRCULAR (relative to the active chain) when at least one of its ingredient slots can
+    * ONLY be satisfied by an item already on the chain — every accepted item in that slot is an ancestor
+    * in {@code resolving}. Following such a recipe would loop straight back into an item we are already
+    * resolving (the reversible storage-block / nugget de-craft pairs), so the resolver refuses it. A slot
+    * with at least one NON-ancestor accepted item is fine (the resolver can satisfy it without re-entering
+    * the cycle), so e.g. a real chest recipe — whose #planks slots accept plank items that are NOT on the
+    * chain — is never mistaken for circular. Empty/unbound slots are ignored (they are handled elsewhere).
+    */
+   private boolean recipeIsCircular(CraftingRecipe recipe, java.util.Set<Item> resolving) {
+      if (resolving.isEmpty()) {
+         return false;
+      }
+      for (Ingredient ing : recipe.getIngredients()) {
+         if (ing == null || ing.isEmpty()) {
+            continue;
+         }
+         Set<Item> accepted = inspector.acceptedItems(ing);
+         if (accepted.isEmpty()) {
+            continue;
+         }
+         boolean allAncestors = true;
+         for (Item it : accepted) {
+            if (!resolving.contains(it)) {
+               allAncestors = false;
+               break;
+            }
+         }
+         if (allAncestors) {
+            return true; // this slot forces re-entry into an ancestor -> circular
+         }
+      }
+      return false;
    }
 
    /**
@@ -1105,10 +1355,20 @@ public final class MaterialResolver {
 
    // -- helpers ------------------------------------------------------------------------------------
 
-   private static int freeCount(PlayerEngineController controller, java.util.Map<Item, Integer> reserved, Item item) {
+   /**
+    * Free held stock of {@code item} for this resolve pass: live held minus the per-pass {@code reserved}
+    * earmark minus the chain-scoped {@code ledger} reservation (WS4). The ledger term is an ADDITIVE
+    * external floor — it can only ever LOWER the result, so a later agentic step's pre-seeded input is
+    * invisible here and cannot be cannibalized by this craft. When {@link #ledger} is {@code null}
+    * (standalone craft, no run) the ledger term is 0 and the result is byte-identical to the original
+    * {@code held - reserved} formula. Instance method (was {@code static}) solely so it can read the
+    * {@code ledger} field; the per-pass {@code reserved} map and slot-narrowing are unchanged.
+    */
+   private int freeCount(PlayerEngineController controller, java.util.Map<Item, Integer> reserved, Item item) {
       int held = controller.getItemStorage().getItemCount(item);
       int taken = reserved.getOrDefault(item, 0);
-      return Math.max(0, held - taken);
+      int ledgerReserved = (this.ledger != null) ? (held - this.ledger.free(controller, item)) : 0;
+      return Math.max(0, held - taken - ledgerReserved);
    }
 
    private static void reserve(java.util.Map<Item, Integer> reserved, Item item, int amount) {
@@ -1128,7 +1388,7 @@ public final class MaterialResolver {
     * (the parent craft will consume exactly this drained stock), feeding the planned-delta ledger and
     * the grid narrowing at step emission.
     */
-   private static void drainPooledReservation(
+   private void drainPooledReservation(
          PlayerEngineController controller, java.util.Map<Item, Integer> reserved, Item[] accepted,
          int amount, java.util.Map<Item, Integer> consumedOut) {
       int toReserve = amount;
@@ -1161,8 +1421,9 @@ public final class MaterialResolver {
       return ordered.toArray(new Item[0]);
    }
 
-   private static RecipeTarget toRecipeTarget(
-         Item output, int targetCount, int yield, List<ItemTarget> slotTargets, CraftingRecipe recipe) {
+   public static RecipeTarget toRecipeTarget(
+         Item output, int targetCount, int yield, List<ItemTarget> slotTargets,
+         CraftingRecipe recipe, RegistryAccess registries) {
       // The mod's CraftingInventoryOps consumes via getRecipe().getSlots()+ItemTarget.matches(); build a
       // mod-wrapper CraftingRecipe sized to a 4- or 9-slot grid. A 2x2-fitting recipe uses the 2x2 grid.
       ItemTarget[] grid;
@@ -1176,10 +1437,15 @@ public final class MaterialResolver {
       // inventoryStepSatisfied). These are deliberately decoupled: yield != demand.
       com.player2.playerengine.util.CraftingRecipe wrapper =
             com.player2.playerengine.util.CraftingRecipe.newShapedRecipe(grid, yield);
-      return new RecipeTarget(output, targetCount, wrapper);
+      // WS5 MC-recipe carrier: precompute the MC result stack to preserve NBT/DataComponents for modded
+      // recipes. Guard against null registries (legacy call sites that cannot supply RegistryAccess pass null;
+      // CraftingInventoryOps falls back to new ItemStack when the carrier is absent via hasMcRecipe()).
+      net.minecraft.world.item.ItemStack mcResult =
+            (registries != null) ? recipe.getResultItem(registries) : net.minecraft.world.item.ItemStack.EMPTY;
+      return new RecipeTarget(output, targetCount, wrapper, recipe, mcResult, registries);
    }
 
-   private static ItemTarget[] padTo(List<ItemTarget> slots, int size) {
+   public static ItemTarget[] padTo(List<ItemTarget> slots, int size) {
       ItemTarget[] out = new ItemTarget[size];
       for (int i = 0; i < size; i++) {
          out[i] = (i < slots.size() && slots.get(i) != null) ? slots.get(i) : ItemTarget.EMPTY;
@@ -1197,10 +1463,13 @@ public final class MaterialResolver {
       if (want == net.minecraft.world.item.Items.CRAFTING_TABLE) {
          return CraftMacroStepKind.CRAFT_CRAFTING_TABLE_IN_INVENTORY;
       }
-      // Anything else (chest, sign, ...) is the table-bound output craft if it does not fit a 2x2 grid;
-      // a 2x2-fitting non-plank output (e.g. crafting_table handled above) stays an inventory craft.
+      // Anything else (chest, sign, ...) is the table-bound output craft if it does not fit a 2x2 grid.
+      // A 2x2-fitting generic item uses CRAFT_2X2_IN_INVENTORY (not CRAFT_CRAFTING_TABLE_IN_INVENTORY) so
+      // that it is NOT skipped when a crafting table is nearby. The table-skip logic in
+      // CraftMacroResourceTask tests for CRAFT_CRAFTING_TABLE_IN_INVENTORY specifically (lines 1246, 1344);
+      // CRAFT_2X2_IN_INVENTORY does NOT match those sites and falls through to the generic held-count check.
       return recipe.canCraftInDimensions(2, 2)
-            ? CraftMacroStepKind.CRAFT_CRAFTING_TABLE_IN_INVENTORY
+            ? CraftMacroStepKind.CRAFT_2X2_IN_INVENTORY
             : CraftMacroStepKind.CRAFT_OUTPUT_IN_TABLE;
    }
 
@@ -1238,7 +1507,10 @@ public final class MaterialResolver {
       if (isBambooBlock(item)) {
          return "bamboo_block";
       }
-      return ItemHelper.trimItemName(item.getDescriptionId());
+      // Registry-id-aware name (vanilla bare path, modded full ns:path) — never the lang key, so a
+      // bounded-terminate naming an undispatchable modded external reports the real registry id, not
+      // a "block.iceandfire.foo" translation key the model/player cannot act on (DESIGN.md §3).
+      return ItemHelper.stripItemName(item);
    }
 
    /**
@@ -1280,7 +1552,7 @@ public final class MaterialResolver {
             return "bamboo_block";
          }
       }
-      return (accepted.length > 0) ? ItemHelper.trimItemName(accepted[0].getDescriptionId()) : "unknown";
+      return (accepted.length > 0) ? ItemHelper.stripItemName(accepted[0]) : "unknown";
    }
 
    /**
@@ -1295,7 +1567,9 @@ public final class MaterialResolver {
     * accepted/credit set and reintroduce dispatch drift.
     */
    private static String narrowCatalogueName(Item item) {
-      String candidate = ItemHelper.trimItemName(item.getDescriptionId());
+      // Registry-id-aware: vanilla -> bare path (catalogue-probeable); modded -> full ns:path (won't
+      // match the vanilla catalogue, so it bounded-terminates naming a clean registry id, not a lang key).
+      String candidate = ItemHelper.stripItemName(item);
       if (TaskCatalogue.taskExists(candidate)) {
          return candidate;
       }
@@ -1395,11 +1669,11 @@ public final class MaterialResolver {
    }
 
    private static String debugLabel(Item item) {
-      return ItemHelper.trimItemName(item.getDescriptionId());
+      return ItemHelper.stripItemName(item);
    }
 
    private static String itemName(Item item) {
-      return ItemHelper.trimItemName(item.getDescriptionId());
+      return ItemHelper.stripItemName(item);
    }
 
    // -- TEMPORARY DIAGNOSTIC (sentinel [[CRAFT-RESOLVER-DIAG]]) -------------------------------------

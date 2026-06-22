@@ -19,6 +19,27 @@ public class FuzzySearchHelper {
       return result.stream().min(closenessComp).orElse(null);
    }
 
+   /**
+    * Like {@link #getClosestMatchMinecraftItems} but returns {@code null} when the best candidate is
+    * not genuinely close to the input. The previous unconditional nearest-match behaviour always
+    * returned SOMETHING (e.g. "baked_potato" for "block.iceandfire.podium_oak"), which the model's
+    * feedback loop treated as evidence the item could not exist — a truthfulness bug (DESIGN.md §3).
+    *
+    * <p>Threshold: a candidate is accepted only if its edit distance is at most
+    * {@code max(len/2, 3)} — i.e. up to half the typed characters may differ for short names, with a
+    * floor of 3 so very short names still tolerate a small typo. A larger distance means the
+    * "suggestion" is unrelated noise and is suppressed.
+    */
+   public static String getClosestMatchWithinThreshold(String attemptedSearch, Collection<String> validValues) {
+      String normalized = attemptedSearch.toLowerCase().trim().replace(" ", "_");
+      String best = getClosestMatch(normalized, validValues);
+      if (best == null) {
+         return null;
+      }
+      int threshold = Math.max(normalized.length() / 2, 3);
+      return distance(normalized, best) <= threshold ? best : null;
+   }
+
    private static int distance(CharSequence lhs, CharSequence rhs) {
       return distance(lhs, rhs, 1, 1, 1, 1);
    }

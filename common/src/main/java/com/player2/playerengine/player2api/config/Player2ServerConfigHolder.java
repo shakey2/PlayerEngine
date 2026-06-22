@@ -37,6 +37,9 @@ public final class Player2ServerConfigHolder {
                 cached.isRagLiveEnabled(), cached.getRagTopKClamped(), cached.isRagFallbackToFullList(),
                 cached.getRagMinGoalCharsClamped());
         LOGGER.info("Player2 TTS pacing config: botTtsPlaybackAckEnabled={}", cached.isBotTtsPlaybackAckEnabled());
+        LOGGER.info("Player2 bot lifecycle config: serverOverridesPlayerConfig={} serverAutoRespawn={} serverBotPermadeath={}",
+                cached.isServerOverridesPlayerConfig(), cached.isServerAutoRespawn(),
+                cached.getServerBotPermadeath() == null ? "unset" : cached.getServerBotPermadeath());
         LOGGER.info("Player2 ModIntelligence config: enabled={} enrichmentEnabled={} maxEnrichmentCallsPerLaunch={} maxEnrichmentFailuresPerLaunch={}",
                 cached.isModIntelligenceEnabled(), cached.isModIntelligenceEnrichmentEnabled(),
                 cached.getModIntelligenceMaxEnrichmentCallsPerLaunch() <= 0

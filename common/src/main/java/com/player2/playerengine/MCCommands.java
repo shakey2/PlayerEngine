@@ -36,6 +36,7 @@ import com.player2.playerengine.modintelligence.enrich.ModIntelligenceEnrichment
 import com.player2.playerengine.modintelligence.enrich.ModIntelligenceSpendSafety;
 import com.player2.playerengine.modintelligence.enrich.ModelBlacklist;
 import com.player2.playerengine.agentic.elliegps.EllieGPSStore;
+import com.player2.playerengine.tasks.deferred.DeferredJobStore;
 import com.player2.playerengine.agentic.elliegps.EllieGPSWaypointCountingService;
 import com.player2.playerengine.agentic.elliegps.EllieGPSWaypointIndex;
 import com.player2.playerengine.util.helpers.MaterialAvailability;
@@ -48,6 +49,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.item.Item;
 
+import com.player2.playerengine.tasks.cooking.resolver.CookingRecipeAccessImpl;
 import com.player2.playerengine.tasks.crafting.CraftMacroStep;
 import com.player2.playerengine.tasks.crafting.resolver.IngredientInspectorImpl;
 import com.player2.playerengine.tasks.crafting.resolver.MaterialResolver;
@@ -107,6 +109,15 @@ public class MCCommands {
                 LOGGER.warn("EllieGPS startup wiring failed — waypoint features degrade to the stub: {}",
                         e.getMessage());
             }
+            // Deferred jobs (WS7): load the per-world deferred-smelt job registry so a job started
+            // before a restart can be reconciled against the live furnace BE when its owning bot is
+            // next active. Failures log WARN and start empty — never abort server start.
+            try {
+                DeferredJobStore.loadForServer(server);
+            } catch (Exception e) {
+                LOGGER.warn("DeferredJobStore startup load failed — deferred-smelt resume unavailable: {}",
+                        e.getMessage());
+            }
         });
         LifecycleEvent.SERVER_STOPPING.register(server -> {
             // On dedicated, drop queued AI work before tearing down executors so the next start
@@ -131,6 +142,16 @@ public class MCCommands {
                 EllieGPSWaypointIndex.setCurrent(null);
             } catch (Exception e) {
                 LOGGER.warn("SERVER_STOPPING EllieGPS cleanup failed: {}", e.getMessage());
+            }
+            // Deferred jobs (WS7): clear the per-world job store so it reloads fresh on the next
+            // SERVER_STARTING (mirrors the EllieGPS store lifecycle above).
+            try {
+                DeferredJobStore deferredStore = DeferredJobStore.get();
+                if (deferredStore != null) {
+                    deferredStore.clear();
+                }
+            } catch (Exception e) {
+                LOGGER.warn("SERVER_STOPPING DeferredJobStore cleanup failed: {}", e.getMessage());
             }
             PlayerEngine.shutdownBackgroundExecutors();
         });
@@ -865,7 +886,7 @@ public class MCCommands {
         PlayerEngineController controller = apiService.getController();
 
         // Deterministic resolver: zero model calls, no persistence.
-        MaterialResolver resolver = new MaterialResolver(new IngredientInspectorImpl(), new RecipeAccessImpl());
+        MaterialResolver resolver = new MaterialResolver(new IngredientInspectorImpl(), new RecipeAccessImpl(), new CookingRecipeAccessImpl());
         ResolverResult result = resolver.resolve(controller, target, count);
 
         StringBuilder sb = new StringBuilder();

@@ -5,12 +5,14 @@ import com.player2.playerengine.TaskCatalogue;
 import com.player2.playerengine.tasks.ResourceTask;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.tasks.construction.PlaceBlockNearbyTask;
+import com.player2.playerengine.tasks.cooking.resolver.CookingRecipeAccessImpl;
 import com.player2.playerengine.tasks.crafting.resolver.IngredientInspectorImpl;
 import com.player2.playerengine.tasks.crafting.resolver.MaterialResolver;
 import com.player2.playerengine.tasks.crafting.resolver.RecipeAccessImpl;
 import com.player2.playerengine.tasks.crafting.resolver.ResolverResult;
 import com.player2.playerengine.util.helpers.ItemHelper;
 import com.player2.playerengine.tasks.movement.GetWithinRangeOfBlockTask;
+import com.player2.playerengine.tasks.resources.MineAndCollectTask;
 import com.player2.playerengine.util.ItemTarget;
 import com.player2.playerengine.util.RecipeTarget;
 import com.player2.playerengine.util.Debug;
@@ -53,7 +55,7 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
     * inventory changes are always reflected and no stale target strands materials. Constructed once;
     * each {@code resolve} call recomputes from inventory (cheap), never a world block re-scan.
     */
-   private final MaterialResolver resolver = new MaterialResolver(new IngredientInspectorImpl(), new RecipeAccessImpl());
+   private final MaterialResolver resolver = new MaterialResolver(new IngredientInspectorImpl(), new RecipeAccessImpl(), new CookingRecipeAccessImpl());
 
    /**
     * Latest resolve result for the current tick, recomputed by {@link #resolveNow} as ONE
@@ -181,6 +183,14 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
    private int tableApproachStallTicks = 0;
    private static final int MAX_TABLE_APPROACH_STALL_TICKS = 300; // ~15s of failing to reach the table
 
+   // TABLE-REUSE (Issue #2): true while craftingTablePos points at a PRE-EXISTING table this macro adopted
+   // to walk to (within getCraftingTableReuseRadius, pathable) rather than one it placed itself. Used by
+   // the MOVE_TO_TABLE approach-stall guard: if an adopted FOREIGN table proves unreachable within the
+   // approach bound, the macro must NOT terminate — it falls back to placing/crafting its own table (the
+   // deterministic path), exactly as it would have if no nearby table had been found. Reset whenever we
+   // place our own table, adopt a freshly placed one, or clear the table pin.
+   private boolean adoptedForeignTable;
+
    /**
     * SPECIES PIN: the concrete output item the FIRST plan resolved (a bare multi-match "sign" request
     * is resolved to ONE species by {@code CraftMacroSupport.pickSignSpecies}). Every {@link #replan}
@@ -194,9 +204,22 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
    private final Item pinnedOutputItem;
 
    public CraftMacroResourceTask(CraftMacroPlan initialPlan) {
+      this(initialPlan, null);
+   }
+
+   /**
+    * WS4: construct with the chain-scoped reservation ledger so the resolver subtracts later agentic
+    * steps' pre-seeded reservations as an additive floor in {@code freeCount}. {@code ledger} is
+    * {@code null} for standalone crafts (no agentic run), in which case the resolver behaves exactly as
+    * before the ledger existed. The ledger is consulted only as a floor; the resolver's per-pass rebuild
+    * and slot-narrowing are untouched.
+    */
+   public CraftMacroResourceTask(CraftMacroPlan initialPlan,
+         @org.jetbrains.annotations.Nullable com.player2.playerengine.agentic.MaterialReservationService ledger) {
       super(initialPlan.requestedOutput());
       this.plan = initialPlan;
       this.pinnedOutputItem = initialPlan.outputItem();
+      this.resolver.setLedger(ledger);
    }
 
    @Override
@@ -215,6 +238,7 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
    protected void onResourceStart(PlayerEngineController mod) {
       this.phase = CraftMacroPhase.PLAN;
       this.tableApproachStallTicks = 0;
+      this.adoptedForeignTable = false;
       this.replan(mod);
       // Seed the requirement set OUTPUT-ONLY (materials on demand, not prediction of demand): the
       // crafting-table requirement is added at FIND_OR_PLACE_TABLE exactly when the macro actually
@@ -318,15 +342,42 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
             BlockPos ownPlaced = this.ownPlacedTableBlock(mod);
             if (ownPlaced != null) {
                this.craftingTablePos = ownPlaced;
+               this.adoptedForeignTable = false;
                this.setDebugState("Walking to placed crafting table " + ownPlaced.toShortString());
                Debug.logInternal("[[CRAFT-RESOLVER-DIAG]] FIND_OR_PLACE_TABLE: reusing own placed table at "
                      + ownPlaced.toShortString() + " (walk, do not place another)");
                this.phase = CraftMacroPhase.MOVE_TO_TABLE;
                return null;
             }
+            // ISSUE #2 (table-REUSE) fix: before placing/crafting a NEW table, REUSE a pre-existing,
+            // pathable crafting_table within the reuse radius (default 48 blocks = 3 chunks) by WALKING to
+            // it (MOVE_TO_TABLE) — the prior code only adopted a table within arm's-reach REACH=3.5, so a
+            // perfectly usable table ~3-5 blocks away was ignored and the bot provisioned a SECOND table
+            // (the player-observed "made another crafting table"). REACH=3.5 stays the arm's-reach
+            // can-I-craft-now gate; this is the wider REUSE decision. The pathability filter
+            // (CraftingTableLocator.findReusableNearby -> WorldHelper.canReach) keeps an unreachable /
+            // elevated table from being chosen, and the bounded MOVE_TO_TABLE approach
+            // (MAX_TABLE_APPROACH_STALL_TICKS) plus the adoptedForeignTable fallback below ensure that if a
+            // chosen nearby table turns out unreachable we place our own rather than chasing it forever.
+            BlockPos reusable = CraftingTableLocator
+                  .findReusableNearby(mod, mod.getModSettings().getCraftingTableReuseRadius())
+                  .orElse(null);
+            if (reusable != null) {
+               this.craftingTablePos = reusable;
+               this.tablePlacedByTask = false;
+               this.adoptedForeignTable = true;
+               this.tableApproachStallTicks = 0;
+               this.setDebugState("Walking to existing crafting table " + reusable.toShortString());
+               Debug.logInternal("[[CRAFT-RESOLVER-DIAG]] FIND_OR_PLACE_TABLE: reusing pre-existing table at "
+                     + reusable.toShortString() + " within "
+                     + mod.getModSettings().getCraftingTableReuseRadius() + " blocks (walk, do not place another)");
+               this.phase = CraftMacroPhase.MOVE_TO_TABLE;
+               return null;
+            }
             if (mod.getItemStorage().hasItem(Items.CRAFTING_TABLE)) {
                this.setDebugState("Placing crafting table");
                this.tablePlacedByTask = true;
+               this.adoptedForeignTable = false;
                Debug.logInternal("[[CRAFT-RESOLVER-DIAG]] FIND_OR_PLACE_TABLE: placing crafting table from inventory");
                // INSTANCE-CHURN fix: create the PlaceBlockNearbyTask ONCE and reuse the same instance every
                // tick. The task framework keeps the FIRST-returned instance running as Task.sub (isEqual
@@ -383,6 +434,27 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
                // human-meaningful reason that reaches both the player and the model (DESIGN.md §3) instead
                // of looping MOVE_TO_TABLE<->CRAFT_3X3 until the player quits.
                if (this.tableApproachStallTicks >= MAX_TABLE_APPROACH_STALL_TICKS) {
+                  // ISSUE #2 anti-wedge fallback: if the table we are approaching is a PRE-EXISTING one this
+                  // macro adopted for reuse (not one it placed), an unreachable-within-bound result must NOT
+                  // terminate the whole craft — fall back to placing its OWN table (the deterministic path),
+                  // exactly as if no nearby table had been found. Blacklist the unreachable table so the
+                  // scanner does not immediately re-adopt the same one, clear the pin, and re-enter
+                  // FIND_OR_PLACE_TABLE. The MAX_TABLE_REQUIREMENT_ADDS cap on the place path still bounds
+                  // this, so we cannot loop adopt->fail->adopt forever.
+                  if (this.adoptedForeignTable && this.craftingTablePos != null) {
+                     Debug.logInternal("[[CRAFT-RESOLVER-DIAG]] MOVE_TO_TABLE: adopted pre-existing table "
+                           + this.craftingTablePos.toShortString()
+                           + " unreachable within approach bound -> place own table instead");
+                     // allowedFailures=0 -> the single bounded-approach failure (~15s) marks it unreachable
+                     // immediately (unreachable() is numberOfFailures > allowed -> 1 > 0), so the scanner /
+                     // canReach filter won't re-adopt this same table on the next FIND_OR_PLACE_TABLE tick.
+                     mod.getBlockScanner().requestBlockUnreachable(this.craftingTablePos, 0);
+                     this.craftingTablePos = null;
+                     this.adoptedForeignTable = false;
+                     this.tableApproachStallTicks = 0;
+                     this.phase = CraftMacroPhase.FIND_OR_PLACE_TABLE;
+                     return null;
+                  }
                   this.terminateMacro("Cannot finish crafting " + this.outputName()
                         + ": the crafting table is unreachable (approach stalled).");
                   return null;
@@ -455,8 +527,14 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
             }
             this.delayActive = false;
             this.lookAtTable(mod);
+            // WS5/WS6: carry the MC-recipe carrier (mcRecipe / mcResultStack / registries) through to
+            // performSingleCraft so generic/modded table crafts preserve output NBT/DataComponents
+            // (copyWithCount) and return container-item remainders. Legacy null-carrier wrappers pass
+            // null through and keep the 3-arg `new ItemStack(outputItem, yield)` fallback. Mirrors
+            // CraftingInventoryOps.performCrafts.
             RecipeTarget single = new RecipeTarget(
-                  tableRecipe.getOutputItem(), tableRecipe.getRecipe().outputCount(), tableRecipe.getRecipe());
+                  tableRecipe.getOutputItem(), tableRecipe.getRecipe().outputCount(), tableRecipe.getRecipe(),
+                  tableRecipe.getMcRecipe(), tableRecipe.getMcResultStack(), tableRecipe.getRegistries());
             if (CraftingInventoryOps.performSingleCraft(mod, single)) {
                this.tableCraftsRemaining--;
             } else {
@@ -506,6 +584,19 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
          return null;
       }
       List<ItemTarget> externals = this.resolvedExternals();
+
+      // WS3 model channel: the gather subtree (MineAndCollectTask) breaks tool-requiring blocks and owns the
+      // bounded tool-acquisition guard + the player chat line. But the ONLY channel @get's onGetComplete
+      // reads for the MODEL is this macro's failureReason. So when the live gather has latched a terminal
+      // tool-acquisition failure (it cannot make the required pickaxe), propagate its machine reason into
+      // failureReason via the existing terminateMacro path, so the model is told truthfully instead of
+      // getting the generic "materials unreachable" stall reason (DESIGN.md §3 dual-audience). The running
+      // gather is this macro's sub (kept by the framework across ticks); walk the sub-chain to find it.
+      String toolReason = this.dispatchedGatherToolFailureReason();
+      if (toolReason != null) {
+         this.terminateMacro(toolReason);
+         return null;
+      }
 
       // Progress is measured by the strict HELD count of still-needed externals. A reachable ground drop
       // counted by the sufficiency axis is NOT progress until it is actually picked up: previously the
@@ -809,7 +900,7 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
          if (sb.length() > 0) {
             sb.append(',');
          }
-         sb.append(ItemHelper.trimItemName(bt.item().getDescriptionId())).append(':').append(bt.count());
+         sb.append(ItemHelper.stripItemName(bt.item())).append(':').append(bt.count());
       }
       return sb.toString();
    }
@@ -821,7 +912,7 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
          if (sb.length() > 1) {
             sb.append(", ");
          }
-         sb.append(ItemHelper.trimItemName(bt.item().getDescriptionId())).append(" x").append(bt.count());
+         sb.append(ItemHelper.stripItemName(bt.item())).append(" x").append(bt.count());
       }
       return sb.append(']').toString();
    }
@@ -840,7 +931,7 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
       Item[] matches = target.getMatches();
       String[] names = new String[matches.length];
       for (int i = 0; i < matches.length; i++) {
-         names[i] = matches[i] == null ? "null" : ItemHelper.trimItemName(matches[i].getDescriptionId());
+         names[i] = matches[i] == null ? "null" : ItemHelper.stripItemName(matches[i]);
       }
       Arrays.sort(names);
       return String.join(",", names);
@@ -852,7 +943,7 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
          return target.getCatalogueName();
       }
       Item[] m = target.getMatches();
-      return (m.length > 0 && m[0] != null) ? ItemHelper.trimItemName(m[0].getDescriptionId()) : "unknown";
+      return (m.length > 0 && m[0] != null) ? ItemHelper.stripItemName(m[0]) : "unknown";
    }
 
    /** The macro output's display name for reason strings. */
@@ -901,7 +992,7 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
             if (sb.length() > 0) {
                sb.append(", ");
             }
-            sb.append(ItemHelper.trimItemName(it.getDescriptionId())).append('=').append(held);
+            sb.append(ItemHelper.stripItemName(it)).append('=').append(held);
          }
       }
    }
@@ -959,6 +1050,7 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
       if (placed != null && mod.getWorld().getBlockState(placed).is(Blocks.CRAFTING_TABLE)) {
          this.craftingTablePos = placed;
          this.tablePlacedByTask = true;
+         this.adoptedForeignTable = false;
          this.pendingTablePlaceTask = null;
          Debug.logInternal("[[CRAFT-RESOLVER-DIAG]] adopted just-placed crafting table at " + placed.toShortString());
       }
@@ -1508,6 +1600,28 @@ public class CraftMacroResourceTask extends ResourceTask implements DescribesPro
     */
    private List<ItemTarget> resolvedExternals() {
       return this.lastResult == null ? List.of() : this.lastResult.externalNeeded();
+   }
+
+   /**
+    * WS3 model-channel observation: if the live gather subtree (this macro's running sub-chain) contains a
+    * {@link MineAndCollectTask} that has latched a terminal tool-acquisition failure, return its machine
+    * reason so the COLLECT loop can {@code terminateMacro(reason)} and {@code getFailureReason()} surfaces it
+    * to the model via {@code GetCommand.onGetComplete}. Returns {@code null} when no such failure is present.
+    * The gather already delivered the human chat line and stopped mining; this only adds the missing MODEL
+    * channel. Walks the {@link Task#thisOrChildSatisfies} sub-chain (the framework keeps the running gather
+    * as this macro's sub across ticks).
+    */
+   private String dispatchedGatherToolFailureReason() {
+      String[] holder = new String[1];
+      this.thisOrChildSatisfies(t -> {
+         if (t instanceof MineAndCollectTask gather && gather.toolAcquisitionFailed()) {
+            holder[0] = gather.toolAcquisitionMachineReason()
+               .orElse("could_not_acquire_tool");
+            return true;
+         }
+         return false;
+      });
+      return holder[0];
    }
 
    @Override

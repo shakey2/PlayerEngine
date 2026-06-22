@@ -100,7 +100,7 @@ public final class AgenticPlanValidator {
     }
 
     /**
-     * Accepts exactly the C3 ordered step sequences:
+     * Accepts exactly the ordered step sequences:
      * <pre>
      * [gather_loose_items]
      * [resolve_storage_chest]
@@ -109,10 +109,21 @@ public final class AgenticPlanValidator {
      * [gather_loose_items, resolve_storage_chest, deposit_items]
      * [resolve_storage_chest, deposit_items, label_chest]
      * [gather_loose_items, resolve_storage_chest, deposit_items, label_chest]
+     * [mine_block]
+     * [gather_loose_items, mine_block]
+     * [mine_block, gather_loose_items]
+     * [mine_block, resolve_storage_chest, deposit_items]
+     * [mine_block, resolve_storage_chest, deposit_items, label_chest]
      * </pre>
      * A lone [deposit_items] (no resolved target) and any label_chest that is
      * not last / not preceded by deposit_items are rejected. Duplicate kinds and
      * max-step caps are already enforced by the caller.
+     *
+     * <p>mine_block sequences: bare mine ([m]) and gather+mine (both orders) are valid
+     * terminal plans — mined materials stay in inventory, no auto-store is implied.
+     * Explicit-store chains ([m,r,d] and [m,r,d,l]) are admitted only when the plan
+     * explicitly requests storage. [m,r] (resolve-without-deposit) and any
+     * gather+mine+store quadruple are intentionally excluded to keep the matrix bounded.
      */
     private static String validateSequence(List<AgenticStepSpec> steps) {
         List<String> kinds = new ArrayList<>(steps.size());
@@ -123,6 +134,7 @@ public final class AgenticPlanValidator {
         String r = AgenticSchemas.STEP_RESOLVE_STORAGE_CHEST;
         String d = AgenticSchemas.STEP_DEPOSIT_ITEMS;
         String l = AgenticSchemas.STEP_LABEL_CHEST;
+        String m = AgenticSchemas.STEP_MINE_BLOCK;
         List<List<String>> allowed = List.of(
                 List.of(g),
                 List.of(r),
@@ -130,7 +142,12 @@ public final class AgenticPlanValidator {
                 List.of(r, d),
                 List.of(g, r, d),
                 List.of(r, d, l),
-                List.of(g, r, d, l));
+                List.of(g, r, d, l),
+                List.of(m),
+                List.of(g, m),
+                List.of(m, g),
+                List.of(m, r, d),
+                List.of(m, r, d, l));
         for (List<String> seq : allowed) {
             if (seq.equals(kinds)) {
                 return null;

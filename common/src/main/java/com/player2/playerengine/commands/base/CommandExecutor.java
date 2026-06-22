@@ -2,11 +2,31 @@ package com.player2.playerengine.commands.base;
 
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.util.Debug;
+import com.player2.playerengine.util.helpers.FuzzySearchHelper;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 public class CommandExecutor {
+   /**
+    * Deterministic command-name synonym table (single source of truth, shared with
+    * {@link #resolveName(String)} and {@code AgentSideEffects.firstCommandId}). Maps a model-emitted
+    * synonym to the real registered command name so it executes silently instead of looping on a
+    * non-existent command. Keys are lower-cased; lookups lower-case the raw name first.
+    *
+    * <p>Seeded with {@code drop -> give}: the 2-token {@code give <item> <count>} form defaults
+    * username=null -> owner, so a name-only swap drops the item at the owner's feet with no arg
+    * rewrite. Adding a new synonym is a one-line entry here; only add a synonym whose target binds the
+    * same arg shape (or whose target's first arg is an owner-defaulting username) — otherwise the alias
+    * needs arg rewriting, not just a name swap.
+    */
+   private static final Map<String, String> COMMAND_ALIASES = Map.of(
+         "drop", "give");
+
    private final HashMap<String, Command> commandSheet = new HashMap<>();
    private final PlayerEngineController mod;
 
@@ -160,6 +180,19 @@ public class CommandExecutor {
       this.execute(line);
    }
 
+   /**
+    * Pure, static alias lookup: returns the resolved command name when {@code raw} is a known synonym,
+    * the unchanged input otherwise. Lower-cases {@code raw} to match {@code firstCommandId}'s lowering,
+    * so the executor and the RAG-learning layer ({@code AliasLearningService}) resolve identically and
+    * a silently-aliased emission never records a phantom rejection. Needs no instance state.
+    */
+   public static String resolveName(String raw) {
+      if (raw == null) {
+         return null;
+      }
+      return COMMAND_ALIASES.getOrDefault(raw.toLowerCase(Locale.ROOT), raw);
+   }
+
    private Command getCommand(String line) throws CommandException {
       line = line.trim();
       if (line.length() != 0) {
@@ -169,14 +202,31 @@ public class CommandExecutor {
             command = line.substring(0, firstSpace);
          }
 
-         if (!this.commandSheet.containsKey(command)) {
-            throw new CommandException("Command " + command + " does not exist.");
-         } else {
-            return this.commandSheet.get(command);
+         // Resolve a known synonym (e.g. drop -> give) before the does-not-exist check so an aliased
+         // command runs silently; resolveName returns the input unchanged for a non-alias name.
+         String target = resolveName(command);
+         if (this.commandSheet.containsKey(target)) {
+            return this.commandSheet.get(target);
          }
+
+         // Not registered and not a (registered) alias: throw the typed UnknownCommandException so the
+         // error route can discriminate this case. Enrich with a threshold-gated fuzzy suggestion built
+         // from the registered command-name corpus; the bare message is kept when there is no close
+         // match (no false positive).
+         String suggestion = FuzzySearchHelper.getClosestMatchWithinThreshold(command, commandNames());
+         String message = "Command " + command + " does not exist.";
+         if (suggestion != null) {
+            message += " Did you mean \"" + suggestion + "\"?";
+         }
+         throw new UnknownCommandException(message);
       } else {
          return null;
       }
+   }
+
+   /** Registered command names — the corpus for the unknown-command "did you mean" suggestion. */
+   private List<String> commandNames() {
+      return this.commandSheet.values().stream().map(Command::getName).collect(Collectors.toList());
    }
 
    public Collection<Command> allCommands() {

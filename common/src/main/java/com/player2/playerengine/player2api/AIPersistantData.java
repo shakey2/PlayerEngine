@@ -63,9 +63,9 @@ public class AIPersistantData {
         }
         return lastEvent;
     }
-    public ConversationHistory getConversationHistoryWrappedWithStatus(String worldStatus, String agentStatus, String altoClefDebugMsgs, Player2APIService player2apiService, Optional<String> reminderString){
+    public ConversationHistory getConversationHistoryWrappedWithStatus(String worldStatus, String agentStatus, String altoClefDebugMsgs, Player2APIService player2apiService, Optional<String> reminderString, Optional<String> validCommandsBlock){
         return this.conversationHistory
-                .copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoClefDebugMsgs, player2apiService, reminderString);
+                .copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoClefDebugMsgs, player2apiService, reminderString, validCommandsBlock);
     }
     public void addAssistantMessage(String llmMessage, Player2APIService player2apiService){
         this.conversationHistory.addAssistantMessage(llmMessage, player2apiService);
@@ -94,6 +94,17 @@ public class AIPersistantData {
     public void updateSystemPromptWithBlock(String validCommandsBlock) {
         String block = validCommandsBlock != null ? validCommandsBlock : "";
         String systemPrompt = Prompts.getAINPCSystemPromptWithValidCommandsBlock(character, block, mod.getOwnerUsername());
+        conversationHistory.setBaseSystemPrompt(systemPrompt);
+    }
+
+    /**
+     * Live RAG path: sets message 0 to the byte-stable base prompt with NO command list/section, so the
+     * system message is byte-identical across turns. The per-turn retrieved command subset is delivered
+     * in the latest user turn under the {@code validCommands} key (see
+     * {@link ConversationHistory#copyThenWrapLatestWithStatus}), not in the system message.
+     */
+    public void updateSystemPromptStatic() {
+        String systemPrompt = Prompts.getAINPCSystemPromptNoCommandsBlock(character, mod.getOwnerUsername());
         conversationHistory.setBaseSystemPrompt(systemPrompt);
     }
 

@@ -33,4 +33,9 @@ public final class AgenticExecutionContext {
     public AgenticExecutionMemory memory() {
         return memory;
     }
+
+    /** Convenience accessor for the per-run material reservation ledger (WS1). */
+    public MaterialReservationService reservations() {
+        return memory.materialReservations();
+    }
 }

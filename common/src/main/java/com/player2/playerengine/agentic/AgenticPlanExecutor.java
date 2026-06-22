@@ -3,6 +3,7 @@ package com.player2.playerengine.agentic;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.agentic.AgenticRunRegistry.AgenticRunState;
 import com.player2.playerengine.agentic.elliegps.WaypointAutoRegistrar;
+import com.player2.playerengine.agentic.steps.SmeltStepFactory;
 import com.player2.playerengine.executor.RollbackPolicy;
 import com.player2.playerengine.executor.StepState;
 import com.player2.playerengine.executor.TaskStepExecutorAdapter;
@@ -32,8 +33,66 @@ public final class AgenticPlanExecutor {
         UUID botUuid = controller.getEntity().getUUID();
         AgenticRunRegistry.register(botUuid, state);
         AgenticExecutionContext context = new AgenticExecutionContext(controller, state);
+        // WS5 plan-time pre-seed (the load-bearing forward-reservation step): BEFORE any step runs,
+        // reserve every not-yet-run step's resolvable inputs into the chain ledger so an earlier
+        // step cannot cannibalize a later step's input (e.g. a smelt step's FuelPlanner burning an
+        // item a later step needs). Forward reservation is what keeps the reservation alive long
+        // enough for the earlier step to be blocked. Each step releases its OWN reservation at
+        // step-start (see runStep). Skipped-pre-seed steps degrade to "no forward protection for
+        // that one step", never crash.
+        preSeedReservations(plan, controller, context);
         runStep(0, plan, controller, context, onTerminal);
         return new AgenticRunHandle(runId, state);
+    }
+
+    /**
+     * Reserves every step's plan-time-resolvable inputs into the chain ledger, keyed by item.
+     * Per-kind derivation (resolves OQ#9):
+     * <ul>
+     *   <li><b>smelt</b> — the {@code smelt_items} input item + count, derived via
+     *       {@link SmeltStepFactory#forwardReservation} so the pre-seed and the actual draw never
+     *       drift. Reserves the INPUT only; fuel is chosen at load time by {@code FuelPlanner} and is
+     *       protected at consult time, never pre-seeded.</li>
+     *   <li><b>smith</b> — the template/base/addition roles are NOT enumerable at plan time (they
+     *       require a live recipe resolution that only happens inside {@code SmithDeferredTask}); only
+     *       the output item is known here. Pre-seed is SKIPPED for smith (documented residual bound,
+     *       OQ#10); WS3's reserve-at-removal belt-and-suspenders still protects the same-tick window.</li>
+     *   <li><b>craft</b> — there is no first-class {@code craft_*} agentic step kind; craft macros run
+     *       embedded inside resolve_storage_chest / label_chest steps and the resolver's own
+     *       {@code freeCount} ledger floor + per-pass enumeration self-correct at run time. Nothing to
+     *       pre-seed here.</li>
+     * </ul>
+     * The grant is clamped by {@code MaterialReservationService.reserve} to genuinely-free stock, so a
+     * pre-seed can only ever lower perceived free — never over-reserve beyond what is held.
+     */
+    private static void preSeedReservations(
+            AgenticPlan plan, PlayerEngineController controller, AgenticExecutionContext context) {
+        MaterialReservationService ledger = context.reservations();
+        for (AgenticStepSpec step : plan.steps()) {
+            if (step == null || step.kind() == null) {
+                continue;
+            }
+            if (AgenticSchemas.STEP_SMELT_ITEMS.equals(step.kind())) {
+                SmeltStepFactory.forwardReservation(step, context).ifPresent(
+                        res -> ledger.reserve(controller, res.input(), res.count()));
+            }
+            // smith / craft / non-material steps: no plan-time-enumerable input — skip (see Javadoc).
+        }
+    }
+
+    /**
+     * Releases step {@code index}'s OWN forward reservation just before it runs, so its consult sees
+     * its own inputs as free while steps {@code index+1..} stay reserved (and protected from this
+     * step's incidental draws). Mirrors the per-kind derivation in {@link #preSeedReservations};
+     * only smelt was pre-seeded, so only smelt has anything to release here.
+     */
+    private static void releaseOwnForwardReservation(
+            int index, AgenticPlan plan, AgenticExecutionContext context) {
+        AgenticStepSpec step = plan.steps().get(index);
+        if (AgenticSchemas.STEP_SMELT_ITEMS.equals(step.kind())) {
+            SmeltStepFactory.forwardReservation(step, context).ifPresent(
+                    res -> context.reservations().release(res.input(), res.count()));
+        }
     }
 
     private static void runStep(
@@ -46,16 +105,26 @@ public final class AgenticPlanExecutor {
             String summary = AgenticDegradationSummary.forModel(context.runState());
             context.runState().terminal("succeeded", "Plan complete.");
             LOGGER.info("[Agentic] run {} succeeded", context.runState().toSnapshot().runId());
+            // WS5 teardown: drop all chain reservations on the success terminal so none leaks into a
+            // later run. (finishOnServer takes mod, not context, so the clear is done here where
+            // context is in scope.)
+            context.memory().clearMaterialReservations();
             finishOnServer(mod, onTerminal, true, summary);
             return;
         }
         AgenticStepSpec step = plan.steps().get(index);
         context.runState().setActiveStep(index, step.kind());
+        // WS5 per-step self-release: release THIS step's own forward reservation before it runs, so
+        // its consult sees its own inputs as free; steps index+1.. stay reserved and protected from
+        // this step's incidental draws (the create-vs-release boundary that closes the cross-step bug).
+        releaseOwnForwardReservation(index, plan, context);
         Optional<Task> taskOpt = REGISTRY.createTask(step, context);
         if (taskOpt.isEmpty()) {
             String message = "Unknown or unsupported step: " + step.kind();
             context.runState().terminal("failed", message);
             LOGGER.warn("[Agentic] unknown step kind {}", step.kind());
+            // WS5 teardown: drop all chain reservations on the unknown-step terminal.
+            context.memory().clearMaterialReservations();
             finishOnServer(mod, onTerminal, false, message);
             return;
         }
@@ -82,6 +151,9 @@ public final class AgenticPlanExecutor {
                 mod.reportAgenticProgress(message, true);
                 context.runState().terminal("failed", message);
                 LOGGER.warn("[Agentic] step {} failed: {}", step.kind(), message);
+                // WS5 teardown: drop all chain reservations on the step-failure terminal so none
+                // leaks into a later run (covers mid-chain abort/fail, not just clean success).
+                context.memory().clearMaterialReservations();
                 finishOnServer(mod, onTerminal, false, message);
                 return;
             }

@@ -1,6 +1,7 @@
 package com.player2.playerengine.trackers;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.commands.base.ItemList;
 import com.player2.playerengine.multiversion.recipemanager.RecipeManagerWrapper;
 import com.player2.playerengine.multiversion.recipemanager.WrappedRecipeEntry;
 import com.player2.playerengine.util.CraftingRecipe;
@@ -87,28 +88,46 @@ public class CraftingRecipeTracker extends Tracker {
          if (PlayerEngineController.inGame()) {
             RecipeManagerWrapper recipeManager = RecipeManagerWrapper.of(this.mod.getWorld().getRecipeManager());
 
+            // Pass a real RegistryAccess to getResultItem: vanilla ShapedRecipe ignores it, but a
+            // modded recipe that dereferences the param would NPE on the old null-pass. The world's
+            // registryAccess() is available here (ServerLevel in both branches).
+            net.minecraft.core.RegistryAccess registries = this.mod.getWorld().registryAccess();
             for (WrappedRecipeEntry recipe : recipeManager.values()) {
                Recipe<?> recipe1 = recipe.value();
-               if (recipe1 instanceof CraftingRecipe) {
-                  net.minecraft.world.item.crafting.CraftingRecipe craftingRecipe = (net.minecraft.world.item.crafting.CraftingRecipe)recipe1;
+               // MUST test the Minecraft CraftingRecipe interface, not the project-internal POJO
+               // (com.player2.playerengine.util.CraftingRecipe) imported above — that name collision
+               // made this instanceof ALWAYS FALSE, so itemRecipeMap (and thus the "did you mean"
+               // corpus via updateCraftingCorpus) was never populated. Fully qualify to disambiguate.
+               if (recipe1 instanceof net.minecraft.world.item.crafting.CraftingRecipe craftingRecipe) {
                   if (!(craftingRecipe instanceof CustomRecipe)) {
-                     ItemStack result = new ItemStack(craftingRecipe.getResultItem(null).getItem(), craftingRecipe.getResultItem(null).getCount());
-                     Item[][] altoclefRecipeItems = getShapedCraftingRecipe(craftingRecipe.getIngredients());
-                     CraftingRecipe altoclefRecipe = CraftingRecipe.newShapedRecipe(altoclefRecipeItems, result.getCount());
-                     if (this.itemRecipeMap.containsKey(result.getItem())) {
-                        this.itemRecipeMap.get(result.getItem()).add(altoclefRecipe);
-                     } else {
-                        List<CraftingRecipe> recipes = new ArrayList<>();
-                        recipes.add(altoclefRecipe);
-                        this.itemRecipeMap.put(result.getItem(), recipes);
-                     }
+                     try {
+                        ItemStack resultStack = craftingRecipe.getResultItem(registries);
+                        ItemStack result = new ItemStack(resultStack.getItem(), resultStack.getCount());
+                        Item[][] altoclefRecipeItems = getShapedCraftingRecipe(craftingRecipe.getIngredients());
+                        CraftingRecipe altoclefRecipe = CraftingRecipe.newShapedRecipe(altoclefRecipeItems, result.getCount());
+                        if (this.itemRecipeMap.containsKey(result.getItem())) {
+                           this.itemRecipeMap.get(result.getItem()).add(altoclefRecipe);
+                        } else {
+                           List<CraftingRecipe> recipes = new ArrayList<>();
+                           recipes.add(altoclefRecipe);
+                           this.itemRecipeMap.put(result.getItem(), recipes);
+                        }
 
-                     this.recipeResultMap.put(altoclefRecipe, result);
+                        this.recipeResultMap.put(altoclefRecipe, result);
+                     } catch (Exception perRecipe) {
+                        // A single malformed/modded recipe must not abort the whole corpus rebuild —
+                        // skip it (the corpus stays best-effort) rather than leave the map empty.
+                        this.mod.logWarning("Skipping crafting recipe during corpus rebuild: " + perRecipe);
+                     }
                   }
                }
             }
 
             this.itemRecipeMap.replaceAll((k, v) -> Collections.unmodifiableList((List<? extends CraftingRecipe>)v));
+            // Notify ItemList of the curated recipe-output corpus so "did you mean" suggestions
+            // in parseRemainder are scoped to craftable items rather than all registry entries.
+            // Reuses this world-join seam; no second RecipeManager scan needed (WS1).
+            ItemList.updateCraftingCorpus(this.itemRecipeMap.keySet());
             this.shouldRebuild = false;
          }
       }

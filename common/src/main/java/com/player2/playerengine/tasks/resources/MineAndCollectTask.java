@@ -6,6 +6,7 @@ import com.player2.playerengine.multiversion.ToolMaterialVer;
 import com.player2.playerengine.multiversion.blockpos.BlockPosVer;
 import com.player2.playerengine.tasks.AbstractDoToClosestObjectTask;
 import com.player2.playerengine.tasks.ResourceTask;
+import com.player2.playerengine.automaton.api.process.IBuilderProcess;
 import com.player2.playerengine.tasks.construction.DestroyBlockTask;
 import com.player2.playerengine.tasks.movement.PickupDroppedItemTask;
 import com.player2.playerengine.tasks.movement.TimeoutWanderTask;
@@ -40,6 +41,16 @@ public class MineAndCollectTask extends ResourceTask {
    private final MiningRequirement requirement;
    private final TimerGame cursorStackTimer = new TimerGame(3.0);
    private final MineAndCollectTask.MineOrCollectTask subtask;
+   // WS3 tool-acquisition latch: the single live SatisfyMiningRequirementTask so we can read its bounded
+   // acquisition-failure terminal. Once it reports terminal failure we LATCH (the latch, not the
+   // miningRequirementMet predicate, is the authority) so a reachable-but-not-held pickaxe on a later tick
+   // can never un-fail the gate and fall through to bare-handed mining. The reasons are exposed to the
+   // enclosing CraftMacroResourceTask (the only model channel @get reads) and delivered to the player once.
+   private SatisfyMiningRequirementTask satisfyTask;
+   private boolean toolAcquisitionFailed;
+   private String toolFailureHuman;
+   private String toolFailureMachine;
+   private boolean toolFailureReportedToPlayer;
 
    public MineAndCollectTask(ItemTarget[] itemTargets, Block[] blocksToMine, MiningRequirement requirement) {
       super(itemTargets);
@@ -80,6 +91,12 @@ public class MineAndCollectTask extends ResourceTask {
       mod.getBehaviour().push();
       mod.getBehaviour().addProtectedItems(Items.WOODEN_PICKAXE, Items.STONE_PICKAXE, Items.IRON_PICKAXE, Items.DIAMOND_PICKAXE, Items.NETHERITE_PICKAXE);
       this.subtask.resetSearch();
+      this.subtask.resetBreakCancelGuard();
+      this.satisfyTask = null;
+      this.toolAcquisitionFailed = false;
+      this.toolFailureHuman = null;
+      this.toolFailureMachine = null;
+      this.toolFailureReportedToPlayer = false;
    }
 
    @Override
@@ -115,17 +132,101 @@ public class MineAndCollectTask extends ResourceTask {
          mod, mod.getPlayer().position(), mod.getModSettings().getAggregateCountDropRadius(), this.itemTargets);
       this.subtask.setCollectOnly(sufficiencyViaDrops);
 
+      // WS3 latch (authority over the predicate): once the bounded tool-acquisition guard has given up,
+      // NEVER fall through to mining (not even if miningRequirementMet later reads true off a
+      // reachable-but-not-held pickaxe). Terminate the gather; deliver the human reason to the player once;
+      // the machine reason is exposed to the enclosing CraftMacroResourceTask via the accessors below.
+      if (this.toolAcquisitionFailed) {
+         this.setDebugState(this.toolFailureHuman != null ? this.toolFailureHuman : "Could not acquire the required tool.");
+         if (!this.toolFailureReportedToPlayer && this.toolFailureHuman != null) {
+            mod.reportAgenticProgress(this.toolFailureHuman, true);
+            this.toolFailureReportedToPlayer = true;
+         }
+         // Self-terminate so STANDALONE (non-CraftMacroResourceTask) callers are not stranded: the strict
+         // ResourceTask.isFinished() item gate stays false on a tool-acquisition failure, so without an
+         // explicit stop() the gather would tick forever (active-but-paralyzed) and whatever SingleTaskChain
+         // submitted it would never release it (invariant 8: visible degradation, never a silent spin). The
+         // player line above is once-guarded and stop() is idempotent; the macro wrapper detects the failure
+         // via its own dispatchedGatherToolFailureReason -> terminateMacro -> stop() path independently, so
+         // this does not double-stop the macro.
+         this.stop();
+         return null;
+      }
+
       if (!StorageHelper.miningRequirementMet(mod, this.requirement)) {
-         return new SatisfyMiningRequirementTask(this.requirement);
+         // WS2 same-tick/first-tick race hardening: the framework already tears down an in-flight
+         // DestroyBlockTask next tick when we return a different sub-task, but a clearArea break can
+         // complete on the Baritone loop within THIS tick. Cancel the active builder + clear the in-flight
+         // mining target on the unmet transition (once per episode), so a leaked break cannot happen.
+         // (WS1 already makes any leaked break drop nothing, so this is hardening, not the guarantee.) We
+         // cancel the BUILDER PROCESS ONLY -- never pathing -- so the legitimate tool-acquisition travel
+         // (Satisfy -> Craft -> Collect Recipe Resources) is not stuttered.
+         this.subtask.cancelActiveBreakOnce(mod);
+         this.setDebugState("Need a " + this.requirement + " tool before mining; acquiring it first.");
+
+         // Reuse one live SatisfyMiningRequirementTask so its bounded acquisition-failure terminal is
+         // observable across ticks; latch on terminal failure (WS3).
+         if (this.satisfyTask == null) {
+            this.satisfyTask = new SatisfyMiningRequirementTask(this.requirement);
+         }
+         if (this.satisfyTask.acquisitionFailed()) {
+            this.toolAcquisitionFailed = true;
+            this.toolFailureHuman = this.satisfyTask.humanFailureReason().orElse(null);
+            this.toolFailureMachine = this.satisfyTask.machineFailureReason().orElse(null);
+            this.setDebugState(this.toolFailureHuman != null ? this.toolFailureHuman : "Could not acquire the required tool.");
+            return null;
+         }
+         return this.satisfyTask;
       } else {
+         // Requirement met: reset the WS2 once-guard so a later unmet episode (e.g. the pickaxe broke)
+         // re-arms the same-tick cancel.
+         this.subtask.resetBreakCancelGuard();
          if (this.subtask.isMining()) {
             this.makeSureToolIsEquipped(mod);
+            // FAULT-1 gather re-acquire: after the in-flight upgrade-equip swap has had its chance this
+            // tick, judge the tool that will actually be equipped against the block being mined. If the
+            // target requiresCorrectToolForDrops and the equipped tool cannot harvest it, STOP this break
+            // (cancelActiveBreakOnce -> builder.onLostControl, so no caller is stranded) rather than
+            // breaking it bare-/wrong-handed for zero drops. Next tick miningRequirementMet flips false ->
+            // SatisfyMiningRequirementTask re-acquires, and the existing toolAcquisitionFailed latch
+            // surfaces could_not_acquire_tool:<tier> to both player and model on terminal failure. The
+            // requiresCorrectToolForDrops() guard mirrors canHarvest's short-circuit so hand-breakable
+            // blocks (dirt, wood, wheat) never trip it.
+            BlockPos miningPos = this.subtask.miningPos();
+            if (miningPos != null) {
+               ItemStack equippedStack = StorageHelper.getItemStackInSlot(PlayerSlot.getEquipSlot(mod.getInventory()));
+               net.minecraft.world.level.block.state.BlockState state = mod.getWorld().getBlockState(miningPos);
+               if (state.requiresCorrectToolForDrops() && !equippedStack.isCorrectToolForDrops(state)) {
+                  this.subtask.cancelActiveBreakOnce(mod);
+               }
+            }
          }
 
          return (Task)(this.subtask.wasWandering() && this.isInWrongDimension(mod) && !mod.getBlockScanner().anyFound(this.blocksToMine)
             ? this.getToCorrectDimensionTask(mod)
             : this.subtask);
       }
+   }
+
+   /**
+    * WS3 model channel: the stable machine reason ({@code could_not_acquire_tool:<tier>}) once the gather
+    * has latched a terminal tool-acquisition failure, else empty. The enclosing
+    * {@link com.player2.playerengine.tasks.crafting.CraftMacroResourceTask} reads this from its dispatched
+    * gather and records it as its own {@code failureReason} so {@code GetCommand.onGetComplete} surfaces it
+    * to the model (DESIGN.md §3). When the gather runs WITHOUT a CraftMacroResourceTask wrapper (a direct
+    * catalogue gather), there is no model channel today — the player still gets the chat line and mining
+    * still stops, but the model sees only the generic outcome. That is a documented known gap (DESIGN.md §3
+    * model-channel coverage for un-wrapped gathers), not silently ignored.
+    */
+   public Optional<String> toolAcquisitionMachineReason() {
+      return this.toolAcquisitionFailed && this.toolFailureMachine != null
+         ? Optional.of(this.toolFailureMachine)
+         : Optional.empty();
+   }
+
+   /** True once the gather has latched a terminal tool-acquisition failure (bot will not mine bare-handed). */
+   public boolean toolAcquisitionFailed() {
+      return this.toolAcquisitionFailed;
    }
 
    @Override
@@ -186,6 +287,17 @@ public class MineAndCollectTask extends ResourceTask {
       // subtask must NOT target new blocks to mine -- it pursues drops only, so it collects the
       // already-counted drops instead of over-mining. Cleared again once inventory catches up.
       private boolean collectOnly;
+      // WS2 same-tick/first-tick race once-guard: cancelActiveBreakOnce fires the builder cancel exactly
+      // once per requirement-unmet episode (set here, reset via resetBreakCancelGuard in the parent's
+      // requirement-met branch / onResourceStart), so we do NOT stutter the tool-acquisition travel that
+      // runs every tick while the requirement is unmet.
+      private boolean breakCancelFired;
+      // FAULT-2 adoption-trap fix: a STABLE cached bounded-wander instance. getWanderTask returns this
+      // same object every tick so the framework's isEqual-adopt keeps ticking exactly the instance whose
+      // onStart-initialised clock we later reset (resetNoImprovementClock); a fresh-per-call instance was
+      // discarded by the framework, making the reset a no-op. Rebuilt when null or finished; cleared in
+      // onStart so a stale STARTED instance never leaks into a new wander episode.
+      private TimeoutWanderTask boundedWanderInstance;
 
       public MineOrCollectTask(Block[] blocks, ItemTarget[] targets) {
          this.blocks = blocks;
@@ -261,6 +373,15 @@ public class MineAndCollectTask extends ResourceTask {
             this.progressChecker.reset();
          }
 
+         // FAULT-2: while actively mining (miningPos still set after the blacklist block), keep the LIVE
+         // adopted bounded wander's no-improvement clock fresh so standing still to mine a vein does not
+         // falsely trip the no-improvement give-up. Placed AFTER the blacklist clear so a genuinely-wedged
+         // target (miningPos just nulled) does NOT reset -> the no-improvement arm correctly resumes. The
+         // wall-clock deadline arm is never touched, so a truly stuck session still gives up.
+         if (this.miningPos != null && this.boundedWanderInstance != null && !this.boundedWanderInstance.isFinished()) {
+            this.boundedWanderInstance.resetNoImprovementClock();
+         }
+
          return super.onTick();
       }
 
@@ -312,6 +433,9 @@ public class MineAndCollectTask extends ResourceTask {
       protected void onStart() {
          this.progressChecker.reset();
          this.miningPos = null;
+         this.breakCancelFired = false;
+         // FAULT-2: drop any stale started wander so a fresh episode adopts a clean instance.
+         this.boundedWanderInstance = null;
          this.settleTimer.setInterval(this.controller.getModSettings().getMineCollectSettleSeconds());
          // Start "settled" so an immediate first wander check (nothing mined yet) is not blocked.
          this.settleTimer.forceElapse();
@@ -339,7 +463,12 @@ public class MineAndCollectTask extends ResourceTask {
       protected Task getWanderTask(PlayerEngineController mod) {
          double deadlineSeconds = mod.getModSettings().getWanderBoundDefaultSeconds();
          long deadlineMs = (long)(deadlineSeconds * 1000.0);
-         Task boundedWander = deadlineMs > 0L ? TimeoutWanderTask.bounded(deadlineMs) : new TimeoutWanderTask(true);
+         // FAULT-2: return a STABLE cached instance so the framework adopts & keeps ticking the SAME
+         // wander object (defeats the isEqual-adopt no-op trap); rebuild only when absent or finished.
+         if (this.boundedWanderInstance == null || this.boundedWanderInstance.isFinished()) {
+            this.boundedWanderInstance = deadlineMs > 0L ? TimeoutWanderTask.bounded(deadlineMs) : new TimeoutWanderTask(true);
+         }
+         Task boundedWander = this.boundedWanderInstance;
 
          if (this.targets == null || this.targets.length == 0) {
             return boundedWander;
@@ -410,6 +539,33 @@ public class MineAndCollectTask extends ResourceTask {
 
       public boolean isMining() {
          return this.miningPos != null;
+      }
+
+      /**
+       * WS2 race-cancel: on the transition into the requirement-unmet state, stop a break that may have
+       * started on the Baritone loop within this/the first tick before the parent gate re-evaluated. Cancels
+       * the BUILDER PROCESS ONLY (mirrors {@link DestroyBlockTask#onStop}) and clears the in-flight mining
+       * target + progress so the next eligible tick re-pursues cleanly. Deliberately does NOT call
+       * {@code getPathingBehavior().forceCancel()} — while the requirement is unmet the bot is supposed to be
+       * pathing to acquire the tool, and a blanket pathing cancel would fight that travel. Idempotent per
+       * unmet episode via {@link #breakCancelFired}.
+       */
+      public void cancelActiveBreakOnce(PlayerEngineController mod) {
+         if (this.breakCancelFired) {
+            return;
+         }
+         this.breakCancelFired = true;
+         IBuilderProcess builder = mod.getBaritone().getBuilderProcess();
+         if (builder.isActive()) {
+            builder.onLostControl();
+         }
+         this.miningPos = null;
+         this.progressChecker.reset();
+      }
+
+      /** Re-arm the WS2 once-guard so a later requirement-unmet episode cancels its own first break. */
+      public void resetBreakCancelGuard() {
+         this.breakCancelFired = false;
       }
 
       /**

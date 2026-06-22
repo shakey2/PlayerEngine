@@ -5,6 +5,7 @@ import java.util.function.Consumer;
 
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.commands.base.CommandExecutor;
+import com.player2.playerengine.commands.base.UnknownCommandException;
 import com.player2.playerengine.retrieval.RagDeepSearchCommands;
 import com.player2.playerengine.retrieval.learning.AliasLearningService;
 import com.player2.playerengine.tasks.LookAtOwnerTask;
@@ -159,9 +160,36 @@ public class AgentSideEffects {
                                 () -> onFinishWithNote.accept(null),
                                 onFinishWithNote,
                                 (err) -> {
-                                    if (server != null && ownerUuid != null && acceptedCommandId != null) {
+                                    boolean unknownCommand = err instanceof UnknownCommandException;
+                                    // Keep the RAG-learning audit honest: an UnknownCommandException means the
+                                    // emitted name resolved to a command that is NOT registered (not a real
+                                    // alias hit), so feeding it to onCommandRejected would record a phantom
+                                    // SKIPPED_EXECUTION_ERROR against an unregistered tool id. For aliased
+                                    // commands (drop -> give) firstCommandId already returns the resolved name
+                                    // and this branch is never taken, so genuine rejections are still audited.
+                                    if (!unknownCommand
+                                            && server != null && ownerUuid != null && acceptedCommandId != null) {
                                         AliasLearningService.onCommandRejected(
                                                 server, ownerUuid, botUuid, acceptedCommandId, err.getMessage());
+                                    }
+                                    // Honest player-facing correction ONLY for an unknown command name.
+                                    // The pre-committed chat line was broadcast before the command ran and
+                                    // asserted an action the bot could not perform; add a concise retraction
+                                    // so the player is not left believing it happened (DESIGN.md §3). Gated on
+                                    // UnknownCommandException so item-arg rejections (already broadcast by
+                                    // GetCommand) and runtime errors are NOT double-broadcast / mis-corrected.
+                                    // The model already gets the enriched failure verbatim via the executor's
+                                    // error route -> onCommandFinish InfoMessage, so both audiences are served
+                                    // with audience-tailored wording (DESIGN.md §3): the model sees the raw
+                                    // enriched "... Did you mean ...?" string; the player gets a short, plain line.
+                                    if (unknownCommand && server != null && ownerUuid != null) {
+                                        ServerPlayer ownerPlayer = server.getPlayerList().getPlayer(ownerUuid);
+                                        if (ownerPlayer != null) {
+                                            broadcastChatToPlayer(server,
+                                                    playerCorrectionFor(processedCommandWithPrefix, cmdExecutor,
+                                                            err.getMessage()),
+                                                    ownerPlayer);
+                                        }
                                     }
                                     onStop.accept(
                                             new CommandExecutionStopReason.Error(commandWithPrefix, err.getMessage()));
@@ -212,10 +240,76 @@ public class AgentSideEffects {
             }
             int sp = first.indexOf(' ');
             String name = sp == -1 ? first : first.substring(0, sp);
-            return name.toLowerCase(Locale.ROOT);
+            // Lower-case first (prior behavior), then resolve a silent synonym (e.g. drop -> give) so the
+            // RAG-learning layer (AliasLearningService) audits the RESOLVED command, not the raw synonym —
+            // otherwise an aliased emission records a phantom rejection (drop is not in commandSheet).
+            return CommandExecutor.resolveName(name.toLowerCase(Locale.ROOT));
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Builds the short, plain, player-facing retraction for an unknown emitted command name. The
+     * model already receives the full enriched executor message ("Command drop does not exist. Did
+     * you mean \"give\"?") via the onCommandFinish InfoMessage path; the player gets an
+     * audience-tailored line (DESIGN.md §3) rather than that model-oriented string. When the enriched
+     * message carries a "Did you mean \"x\"?" suggestion, the player line names it ("trying 'x'");
+     * otherwise it degrades to a generic honest retraction. Best-effort: any parse failure falls back
+     * to the generic line, never throws.
+     */
+    private static String playerCorrectionFor(String commandWithPrefix, CommandExecutor cmdExecutor,
+                                              String enrichedMessage) {
+        String rawName = rawCommandName(commandWithPrefix, cmdExecutor);
+        String suggestion = extractSuggestion(enrichedMessage);
+        if (rawName != null && suggestion != null) {
+            return "(correction: I couldn't do that — there's no '" + rawName + "' command; trying '"
+                    + suggestion + "'.)";
+        }
+        if (rawName != null) {
+            return "(correction: I couldn't do that — there's no '" + rawName + "' command.)";
+        }
+        return "(correction: that action didn't go through.)";
+    }
+
+    /** Raw first command name as the model emitted it (no alias resolution — the player hears the
+     * word they actually triggered). Null on any parse failure. */
+    private static String rawCommandName(String commandWithPrefix, CommandExecutor cmdExecutor) {
+        if (commandWithPrefix == null || commandWithPrefix.isBlank()) {
+            return null;
+        }
+        try {
+            String line = commandWithPrefix;
+            if (cmdExecutor.isClientCommand(line)) {
+                line = line.substring(cmdExecutor.getCommandPrefix().length());
+            }
+            String first = line.split(";")[0].trim();
+            if (first.isEmpty()) {
+                return null;
+            }
+            int sp = first.indexOf(' ');
+            return (sp == -1 ? first : first.substring(0, sp)).toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Extracts the suggested command from the enriched executor message of the form
+     * {@code ... Did you mean "give"?}. Returns null when no suggestion is present. */
+    private static String extractSuggestion(String enrichedMessage) {
+        if (enrichedMessage == null) {
+            return null;
+        }
+        int idx = enrichedMessage.indexOf("Did you mean \"");
+        if (idx < 0) {
+            return null;
+        }
+        int start = idx + "Did you mean \"".length();
+        int end = enrichedMessage.indexOf('"', start);
+        if (end <= start) {
+            return null;
+        }
+        return enrichedMessage.substring(start, end);
     }
 
     public static void teleportOwnerTo(AgentConversationData data){

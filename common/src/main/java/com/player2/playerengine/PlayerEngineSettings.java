@@ -57,6 +57,12 @@ public class PlayerEngineSettings implements IFailableConfigFile {
    private float craftDelaySeconds = 0.5F;
    private float craftTableLookHoldSeconds = 0.25F;
    private boolean preferLocalCraftingTable = true;
+   // Table-REUSE search range (blocks) for CraftMacroResourceTask's FIND_OR_PLACE_TABLE phase. Before
+   // placing/crafting a NEW crafting table the macro adopts a pre-existing, pathable crafting_table within
+   // this radius and WALKS to it (MOVE_TO_TABLE) rather than provisioning its own. This is the REUSE
+   // decision and is intentionally far wider than CraftingTableLocator.REACH (3.5), which stays the
+   // arm's-reach "can I craft right NOW" gate. 48 blocks = 3 chunks (16 x 3) measured from the bot.
+   private double craftingTableReuseRadius = 48.0;
    private boolean enableAgenticPlanner = false;
    // ISSUE 1 (temporary, user request): gate LookAtOwnerTask scheduling. When false the bot does NOT set
    // LookAtOwner after a command finishes/errors or on @idle — it simply holds with no user task (idles).
@@ -88,9 +94,22 @@ public class PlayerEngineSettings implements IFailableConfigFile {
    private boolean agenticEnableLabelChest = true;
    private float agenticLabelTimeoutSeconds = 60.0F;
    private boolean agenticLabelUseModelText = false;
+   private boolean enableDeferredSmelt = true;
+   private int deferredSmeltMaxBatch = 64;
+   private boolean enableSmithing = true;
+   private int smithMaxBatch = 64;
+   private int deferredSmeltStallPolls = 200;
+   private int deferredSmeltTimeoutSeconds = 600;
    private float aggregateCountDropRadius = 16.0F;
    private float aggregateLocalSourceBlockRadius = 32.0F;
    private float mineCollectSettleSeconds = 1.0F;
+   // Generic agentic block-mining (mine_block step) settings. Defaults/clamps from the
+   // block-mining plan config table. Getters clamp on read (mirrors the gather/storage settings).
+   private double mineBlockRadius = 32.0;
+   private int mineBlockMaxBlocks = 16;
+   private double mineBlockTimeoutSeconds = 120.0;
+   private int toolAcquireMaxContainers = 8;
+   private int toolAcquireClimbBudget = 6;
    private int wanderBoundDefaultSeconds = 90;
    private int wanderNoImprovementSeconds = 30;
    // EllieGPS (Part C5) settings — pinned field names match the config key table exactly.
@@ -370,6 +389,16 @@ public class PlayerEngineSettings implements IFailableConfigFile {
       return this.preferLocalCraftingTable;
    }
 
+   /**
+    * Table-REUSE search radius (blocks) used by the crafting macro to adopt and walk to a pre-existing,
+    * pathable crafting table instead of placing a new one. Clamped to a sane band: never below the
+    * arm's-reach REACH (so reuse is at least as wide as "use right now") and capped so the search never
+    * exceeds the agentic travel radius. Default 48 (3 chunks).
+    */
+   public double getCraftingTableReuseRadius() {
+      return clamp((float) this.craftingTableReuseRadius, 3.5F, 128.0F);
+   }
+
    public boolean isEnableAgenticPlanner() {
       return this.enableAgenticPlanner;
    }
@@ -405,6 +434,31 @@ public class PlayerEngineSettings implements IFailableConfigFile {
 
    public double getGatherLooseItemsSettleSeconds() {
       return clamp(this.gatherLooseItemsSettleSeconds, 0.5F, 20.0F);
+   }
+
+   /** Search radius (blocks) for target blocks and for chest/waypoint tool search. Default 32, clamp 4..128. */
+   public double getMineBlockRadius() {
+      return clamp((float) this.mineBlockRadius, 4.0F, 128.0F);
+   }
+
+   /** Max blocks one mine_block step will break. Default 16, clamp 1..256. */
+   public int getMineBlockMaxBlocks() {
+      return (int) clamp(this.mineBlockMaxBlocks, 1, 256);
+   }
+
+   /** Overall mine_block step timeout in seconds (partial success on expiry). Default 120, clamp 10..600. */
+   public double getMineBlockTimeoutSeconds() {
+      return clamp((float) this.mineBlockTimeoutSeconds, 10.0F, 600.0F);
+   }
+
+   /** Max chest withdraw attempts across the marked+unmarked tool-acquire stages. Default 8, clamp 1..32. */
+   public int getToolAcquireMaxContainers() {
+      return (int) clamp(this.toolAcquireMaxContainers, 1, 32);
+   }
+
+   /** Max material-climb attempts (cycle guard) before definitive tool-acquire failure. Default 6, clamp 1..16. */
+   public int getToolAcquireClimbBudget() {
+      return (int) clamp(this.toolAcquireClimbBudget, 1, 16);
    }
 
    public double getAgenticStorageSearchRadius() {
@@ -462,6 +516,30 @@ public class PlayerEngineSettings implements IFailableConfigFile {
 
    public boolean isAgenticLabelUseModelText() {
       return this.agenticLabelUseModelText;
+   }
+
+   public boolean isEnableDeferredSmelt() {
+      return this.enableDeferredSmelt;
+   }
+
+   public int getDeferredSmeltMaxBatch() {
+      return (int) clamp(this.deferredSmeltMaxBatch, 1, 512);
+   }
+
+   public boolean isEnableSmithing() {
+      return this.enableSmithing;
+   }
+
+   public int getSmithMaxBatch() {
+      return (int) clamp(this.smithMaxBatch, 1, 512);
+   }
+
+   public int getDeferredSmeltStallPolls() {
+      return (int) clamp(this.deferredSmeltStallPolls, 20, 2000);
+   }
+
+   public int getDeferredSmeltTimeoutSeconds() {
+      return (int) clamp(this.deferredSmeltTimeoutSeconds, 60, 3600);
    }
 
    public double getAggregateCountDropRadius() {

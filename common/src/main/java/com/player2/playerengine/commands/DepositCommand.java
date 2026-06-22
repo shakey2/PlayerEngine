@@ -76,29 +76,35 @@ public class DepositCommand extends Command {
    protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
       ItemList itemList = parser.get(ItemList.class);
       if (itemList != null) {
-         Map<String, Integer> countsLeftover = new HashMap<>();
-
+         // Build a count-by-Item map (Item identity, never getCatalogueName, so Item-based
+         // ItemTargets from the new registry-existence gate work correctly).
+         Map<Item, Integer> countsLeftover = new HashMap<>();
          for (ItemTarget itemTarget : itemList.items) {
-            String name = itemTarget.getCatalogueName();
-            countsLeftover.put(name, countsLeftover.getOrDefault(name, 0) + itemTarget.getTargetCount());
+            for (Item matchItem : itemTarget.getMatches()) {
+               if (matchItem != null) {
+                  countsLeftover.merge(matchItem, itemTarget.getTargetCount(), Integer::sum);
+               }
+            }
          }
 
          for (int i = 0; i < mod.getInventory().getContainerSize(); i++) {
             ItemStack stack = mod.getInventory().getItem(i);
             if (!stack.isEmpty()) {
-               String name = ItemHelper.stripItemName(stack.getItem());
+               Item heldItem = stack.getItem();
                int count = stack.getCount();
-               if (countsLeftover.containsKey(name)) {
-                  countsLeftover.put(name, countsLeftover.get(name) - count);
-                  if (countsLeftover.get(name) <= 0) {
-                     countsLeftover.remove(name);
+               if (countsLeftover.containsKey(heldItem)) {
+                  countsLeftover.merge(heldItem, -count, Integer::sum);
+                  if (countsLeftover.get(heldItem) <= 0) {
+                     countsLeftover.remove(heldItem);
                   }
                }
             }
          }
 
-         if (countsLeftover.size() != 0) {
-            String leftover = String.join(",", countsLeftover.entrySet().stream().map(e -> e.getKey() + " x " + e.getValue().toString()).toList());
+         if (!countsLeftover.isEmpty()) {
+            String leftover = String.join(",", countsLeftover.entrySet().stream()
+                  .map(e -> ItemHelper.stripItemName(e.getKey()) + " x " + e.getValue().toString())
+                  .toList());
             mod.log("Insuffucient items in inventory to deposit. We still need: " + leftover + ".");
             this.finishWithError("insufficient_items: still need " + leftover);
             return;

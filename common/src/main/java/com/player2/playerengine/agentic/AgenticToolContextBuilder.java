@@ -117,6 +117,12 @@ public final class AgenticToolContextBuilder {
                 - label_chest: optional, best-effort. Place and write a sign on or near the labeled chest; crafts a sign first when none is held (if wood is obtainable).
                   args: lines (comma separated) OR line0..line3, autoLabel, signItemId, timeoutSeconds
                   Must be the LAST step and only directly after deposit_items. Never fails the run.
+                - smelt_items: smelt, blast, or smoke a raw item into a processed output (e.g. raw_iron -> iron_ingot). Resolves furnace type and fuel automatically.
+                  args: item (required, registry id of the INPUT item), count (optional, default 1)
+                - smith_items: upgrade an item at a smithing table using the recipe registry. The bot gathers the required template, base, and addition items automatically and performs the upgrade. Use for netherite upgrades and any registered SmithingTransformRecipe. The item arg is the desired OUTPUT (e.g. netherite_pickaxe). Modded upgrades resolve automatically via the registry.
+                  args: item (required, registry id of the OUTPUT item, e.g. "netherite_pickaxe" or "minecraft:netherite_chestplate"), count (optional, default 1)
+                - mine_block: break the nearest matching block of a named type within a radius and collect its drops. The bot deterministically resolves the required pickaxe tier and acquires a sufficient pickaxe automatically (inventory, then marked/nearby chests, then crafting one up the chain) before digging — do NOT add a separate get/craft step for the tool. v1 mines ONLY the nearest matching block within the radius (no coordinate, area, or vein mining). The mined materials stay in the bot's inventory; mine_block NEVER stores or deposits them, so it does NOT imply a resolve_storage_chest/deposit_items step. Add storage steps only if the player explicitly asked to store the result.
+                  args: blockId (required, registry id or tag token, e.g. "minecraft:iron_ore" or "cobblestone"), maxBlocks (optional, default 16), radius (optional), timeoutSeconds (optional)
                 Allowed sequences only:
                   gather_loose_items
                   resolve_storage_chest
@@ -125,7 +131,15 @@ public final class AgenticToolContextBuilder {
                   gather_loose_items then resolve_storage_chest then deposit_items
                   resolve_storage_chest then deposit_items then label_chest
                   gather_loose_items then resolve_storage_chest then deposit_items then label_chest
+                  smelt_items
+                  smith_items
+                  mine_block
+                  gather_loose_items then mine_block
+                  mine_block then gather_loose_items
+                  mine_block then resolve_storage_chest then deposit_items
+                  mine_block then resolve_storage_chest then deposit_items then label_chest
                 Plans may have at most four steps. label_chest is optional and may be omitted.
+                Bare "mine_block" is a complete plan (mined materials simply stay in inventory). Pair mine_block with gather_loose_items (either order) to also sweep up drops that auto-pickup missed. Use the mine_block-then-store sequences ONLY when storage was explicitly requested.
                 Waypoints are managed automatically after deposits and via the create/delete/audit/compare/locate waypoint bot commands — never output waypoint plan steps (no register_waypoint or elliegps step kinds).
                 """;
     }
@@ -165,7 +179,7 @@ public final class AgenticToolContextBuilder {
                 .orElse("none");
         boolean hasChest = mod.getItemStorage().hasItem(net.minecraft.world.item.Items.CHEST);
         boolean macroChest = CraftMacroSupport.isMacroEnabled(mod)
-                && CraftMacroSupport.isSupportedTarget(new ItemTarget(net.minecraft.world.item.Items.CHEST, 1));
+                && CraftMacroSupport.isSupportedTarget(mod, new ItemTarget(net.minecraft.world.item.Items.CHEST, 1));
         boolean canPlace = ChestPlacementSelector.select(mod, pos, settings.getAgenticStoragePlacementRadius())
                 .best().isPresent();
         boolean hasDepositableItems = hasDepositableItems(mod);
