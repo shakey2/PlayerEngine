@@ -320,6 +320,11 @@ public final class ReflectionService {
             }
             if (summary != null && !summary.isEmpty()) {
                 store.setRelationshipSummary(summary.text()); // resets counter + bumps summaryVersion
+                // Bounded INFO (disk/console only — never model-facing): record that a reflection fired
+                // and updated the relationship summary. No summary text/insight content is logged (egress).
+                PlayerEngine.LOGGER.info(
+                        "Memory: reflection updated relationship summary (v{}, {} chars) for {}.",
+                        store.summaryVersion(), store.relationshipSummary().length(), store.scope());
                 if (onSummaryUpdated != null) {
                     onSummaryUpdated.accept(store.relationshipSummary());
                 }

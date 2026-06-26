@@ -45,13 +45,29 @@ public final class MemoryBlockSerializer {
     private static final String HEADER = "[Memory]";
 
     /**
+     * Closed-world anti-fabrication footer appended after the bulleted memories in a
+     * {@link BoundaryVerdict#HAS_MEMORY} block. Static, bounded, author-controlled — it frames the
+     * listed facts as the COMPLETE set so the model cannot treat a partial match (e.g. the
+     * always-present self/owner nodes) as license to agree to a fabricated event. Kept byte-stable
+     * (prefix-cache) and counted within the bounded block: {@link #buildHasMemory} reserves cap room
+     * for it so the whole block never exceeds the char cap (DESIGN.md §3 egress bound).
+     */
+    public static final String HAS_MEMORY_FOOTER =
+            "These are the ONLY things you remember about this player and your shared history. "
+            + "If the player refers to a specific event, person, place, or fact that is NOT listed "
+            + "above, you do NOT remember it — say so honestly and do not invent, agree to, or play "
+            + "along with a memory that is not here.";
+
+    /**
      * Templated decline note for {@link BoundaryVerdict#NO_MEMORY}. Static, bounded, author-controlled
-     * — instructs the model to decline rather than invent. Kept byte-stable so it never busts the cache
-     * with churn.
+     * — instructs the model to decline rather than invent, with the same closed-world anti-fabrication
+     * framing as {@link #HAS_MEMORY_FOOTER}. Kept byte-stable so it never busts the cache with churn.
      */
     public static final String NO_MEMORY_NOTE =
-            "[Memory] You have no recollection of what was just mentioned. "
-            + "If asked about it, say plainly that you do not remember rather than inventing details.";
+            "[Memory] You have no recollection of what was just mentioned. You do NOT remember the "
+            + "specific event, person, place, or fact the player referred to. Say plainly that you do "
+            + "not remember rather than inventing details, and do not agree to or play along with a "
+            + "memory you do not actually have.";
 
     /**
      * Builds the tail block for the given verdict.
@@ -95,16 +111,25 @@ public final class MemoryBlockSerializer {
         }
         if (lines.isEmpty()) return "";
 
-        // Greedily add lines highest-first until the next line would overflow the cap; drop the rest
-        // (the lowest-ranked lines). Header + a newline per line are charged against the cap.
+        // Reserve cap room for the closed-world footer (footer + its leading blank line) so the
+        // anti-fabrication framing is ALWAYS present, never truncated away by a long memory list.
+        // The footer is static and author-controlled, so this reservation is byte-stable.
+        int footerReserve = HAS_MEMORY_FOOTER.length() + 2; // +2 for the "\n\n" separator before it
+        int bodyCap = Math.max(HEADER.length(), cap - footerReserve);
+
+        // Greedily add lines highest-first until the next line would overflow the BODY cap; drop the
+        // rest (the lowest-ranked lines). Header + a newline per line are charged against the body cap.
         StringBuilder sb = new StringBuilder(Math.min(cap, 2048));
         sb.append(HEADER);
         for (String line : lines) {
             int projected = sb.length() + 1 + line.length(); // +1 for the newline
-            if (projected > cap) break;
+            if (projected > bodyCap) break;
             sb.append('\n').append(line);
         }
-        // Final defensive clamp (header-only edge case still fits within cap).
+        // Append the closed-world anti-fabrication footer after a blank line. Whether or not the body
+        // hit its reserved cap, the total stays within `cap` because bodyCap = cap - footerReserve.
+        sb.append("\n\n").append(HAS_MEMORY_FOOTER);
+        // Final defensive clamp (belt-and-suspenders egress re-clamp).
         return MemoryCaps.cap(sb.toString(), cap);
     }
 

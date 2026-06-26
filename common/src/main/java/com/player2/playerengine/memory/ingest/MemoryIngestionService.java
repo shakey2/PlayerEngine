@@ -267,6 +267,17 @@ public final class MemoryIngestionService {
                         }
                         store.mergeCandidates(plan); // applies plan, marks dirty, republishes (token bump)
 
+                        // Bounded INFO (disk/console only — never model-facing): record the merge size +
+                        // resulting graph dimensions. Only counts and the scope token are logged; no
+                        // entity/relation content or reply text (egress hard rule).
+                        com.player2.playerengine.memory.MemoryStore.Snapshot snap = store.snapshot();
+                        int nodes = (snap != null && snap.graph() != null) ? snap.graph().nodeCount() : 0;
+                        int edges = (snap != null && snap.graph() != null) ? snap.graph().edgeCount() : 0;
+                        PlayerEngine.LOGGER.info(
+                                "Memory: merged {} entities / {} relations; nodes={} edges={} cumImportance={} for {}.",
+                                plan.upserts().size(), plan.edges().size(), nodes, edges,
+                                store.cumulativeImportanceSinceLastReflection(), scope);
+
                         // (W6) Mid-session reflection dispatch. On the SERVER THREAD, the owner was
                         // already patron-confirmed for this batch, and the merge just bumped the
                         // cumulative-importance counter. If it crossed the configured threshold, fire
