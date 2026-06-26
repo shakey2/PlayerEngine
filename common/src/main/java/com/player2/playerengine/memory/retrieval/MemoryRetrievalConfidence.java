@@ -15,10 +15,15 @@ package com.player2.playerengine.memory.retrieval;
  *              + W_HITS·min(1, hits / HIT_TARGET)
  *              + W_SEED·min(1, seedMatches / SEED_TARGET)
  * </pre>
- * with two hard overrides that force {@link BoundaryVerdict#NO_MEMORY} regardless of the score:
+ * with three hard overrides that force {@link BoundaryVerdict#NO_MEMORY} regardless of the score:
  * <ul>
  *   <li>{@code seedNodeMatches == 0} — the turn linked to nothing in the graph; the companion has
  *       no memory of the subject, so it must decline rather than fabricate.</li>
+ *   <li>{@code specificSeedMatches == 0} — the turn linked ONLY to the always-present self/owner
+ *       anchor nodes (the companion's own name and/or its owner's name) and to no event/episodic
+ *       node. A turn that merely names the companion is not a specific recallable claim, so a
+ *       fabricated event "remember when…" must NOT be confirmed as remembered (knowledge-boundary
+ *       hallucination fix). A matched EVENT/episodic node always counts as specific.</li>
  *   <li>{@code confidence < MIN_CONFIDENCE} ({@value #MIN_CONFIDENCE}) — too weak to trust.</li>
  * </ul>
  *
@@ -73,23 +78,44 @@ public final class MemoryRetrievalConfidence {
     }
 
     /**
-     * Maps a confidence + signal counts to a {@link BoundaryVerdict}, applying the two hard
+     * Maps a confidence + signal counts to a {@link BoundaryVerdict}, applying the three hard
      * overrides. {@code storeAbsent} short-circuits to {@link BoundaryVerdict#STORE_ABSENT}.
      *
-     * @param minConfidence the threshold below which the verdict is {@code NO_MEMORY}
-     *                      (config {@code memoryMinConfidence}; falls back to {@link #MIN_CONFIDENCE}
-     *                      when non-positive)
+     * @param seedNodeMatches     total distinct seed nodes the turn linked to (0 → NO_MEMORY)
+     * @param specificSeedMatches seed nodes BEYOND the always-present self/owner anchors, plus any
+     *                            matched EVENT/episodic node (0 → NO_MEMORY: only the self/owner
+     *                            anchors matched, which is not a specific recallable claim)
+     * @param minConfidence       the threshold below which the verdict is {@code NO_MEMORY}
+     *                            (config {@code memoryMinConfidence}; falls back to
+     *                            {@link #MIN_CONFIDENCE} when non-positive)
      */
     public static BoundaryVerdict verdict(boolean storeAbsent, double confidence,
-                                          int seedNodeMatches, double minConfidence) {
+                                          int seedNodeMatches, int specificSeedMatches,
+                                          double minConfidence) {
         if (storeAbsent) {
             return BoundaryVerdict.STORE_ABSENT;
         }
         if (seedNodeMatches <= 0) {
             return BoundaryVerdict.NO_MEMORY;
         }
+        if (specificSeedMatches <= 0) {
+            // Only the always-present self/owner anchor(s) matched and no episodic node — the turn
+            // named the companion but referenced nothing specific the graph actually holds. Decline
+            // rather than confirm a fabricated event/person/place/fact.
+            return BoundaryVerdict.NO_MEMORY;
+        }
         double floor = minConfidence > 0.0 ? minConfidence : MIN_CONFIDENCE;
         return confidence < floor ? BoundaryVerdict.NO_MEMORY : BoundaryVerdict.HAS_MEMORY;
+    }
+
+    /**
+     * Backward-compatible overload: when no self/owner anchor information is available, every seed
+     * match is treated as specific (the pre-fix behavior). Used by call sites that do not carry the
+     * companion/owner names (e.g. the raw {@link MemoryRetriever#query} fusion adapter).
+     */
+    public static BoundaryVerdict verdict(boolean storeAbsent, double confidence,
+                                          int seedNodeMatches, double minConfidence) {
+        return verdict(storeAbsent, confidence, seedNodeMatches, seedNodeMatches, minConfidence);
     }
 
     private static double clamp01(double v) {

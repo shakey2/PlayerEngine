@@ -28,6 +28,7 @@ import com.player2.playerengine.automaton.pathing.movement.CalculationContext;
 import com.player2.playerengine.automaton.pathing.movement.Movement;
 import com.player2.playerengine.automaton.pathing.movement.MovementHelper;
 import com.player2.playerengine.automaton.pathing.movement.MovementState;
+import com.player2.playerengine.automaton.pathing.movement.OpenedDoorTracker;
 import com.player2.playerengine.automaton.utils.BlockStateInterface;
 import com.player2.playerengine.automaton.utils.pathing.MutableMoveResult;
 import com.google.common.collect.ImmutableSet;
@@ -274,6 +275,16 @@ public class MovementTraverse extends Movement {
          }
       } else {
          state.setInput(Input.SNEAK, false);
+         // Best-effort: close any wooden door this bot opened earlier once it has cleared it. The
+         // positions this movement still needs (src, dest, and the bot's current feet) are excluded so
+         // we never close the door we are currently walking through.
+         if (this.baritone.settings().closeDoorsBehindBot.get()) {
+            java.util.Set<net.minecraft.core.BlockPos> stillNeeded = new java.util.HashSet<>();
+            stillNeeded.add(this.src);
+            stillNeeded.add(this.dest);
+            stillNeeded.add(this.ctx.feetPos());
+            OpenedDoorTracker.forBaritone(this.baritone).closeClearedDoors(this.ctx, stillNeeded);
+         }
          BlockState fd = BlockStateInterface.get(this.ctx, this.src.down());
          boolean ladder = fd.is(BlockTags.CLIMBABLE);
 
@@ -430,6 +441,12 @@ public class MovementTraverse extends Movement {
          boolean notPassable = bs.getBlock() instanceof DoorBlock && !MovementHelper.isDoorPassable(this.ctx, dest, src);
          boolean canOpen = DoorBlock.isWoodenDoor(bs);
          if (notPassable && canOpen) {
+            // The bot is the opener: this door is a closed/blocking wooden door it is about to right-click.
+            // Record it so we can close it again once we've moved beyond (player-left-open doors are
+            // already passable and never reach this branch). Gated by the close-behind setting.
+            if (this.baritone.settings().closeDoorsBehindBot.get()) {
+               OpenedDoorTracker.forBaritone(this.baritone).recordOpened(this.ctx.world(), dest);
+            }
             state.setTarget(
                   new MovementState.MovementTarget(
                      RotationUtils.calcRotationFromVec3d(

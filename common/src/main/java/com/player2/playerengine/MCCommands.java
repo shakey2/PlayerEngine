@@ -61,7 +61,13 @@ import com.player2.playerengine.util.ItemTarget;
 import dev.architectury.event.events.common.LifecycleEvent;
 import dev.architectury.event.events.common.TickEvent;
 import com.player2.playerengine.memory.MemoryStoreRegistry;
+import com.player2.playerengine.memory.MemoryScope;
+import com.player2.playerengine.memory.MemoryStore;
+import com.player2.playerengine.memory.budget.MemoryGate;
+import com.player2.playerengine.memory.budget.MemoryGateDecision;
+import com.player2.playerengine.memory.reflection.ReflectionTrigger;
 import com.player2.playerengine.memory.ingest.MemoryIngestionService;
+import com.player2.playerengine.player2api.Character;
 import net.minecraft.world.entity.player.Player;
 import com.player2.playerengine.player2api.AgentSideEffects;
 import net.minecraft.server.level.ServerPlayer;
@@ -242,6 +248,7 @@ public class MCCommands {
                          .then(registerRouting())
                          .then(registerCapability())
                          .then(registerResolve())
+                         .then(registerMemory())
                         .then(registerHelp()));
     }
     private static LiteralArgumentBuilder<CommandSourceStack> registerHelp() {
@@ -262,6 +269,97 @@ public class MCCommands {
                     AgentSideEffects.broadcastChatToPlayer(player.level().getServer(), message, (ServerPlayer) player);
                     return 1;
                 });
+    }
+
+    /**
+     * {@code /playerengine memory status} — OP-only diagnostics for the Phase D graph-RAG memory
+     * subsystem. Makes ZERO LLM / Player2 calls on every path: the patron check is a READ-ONLY
+     * {@link MemoryGate#preflight} (cache PEEK only, never {@code maybeRefresh}), and all graph stats
+     * come from the already-published immutable store snapshots. Prints the master flag, the invoking
+     * player's owner patron/gate status, and per-companion node/edge counts, cumulative reflection
+     * importance, and whether a relationship summary is set.
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> registerMemory() {
+        return Commands.literal("memory")
+                .requires(src -> src.hasPermission(2))
+                .then(Commands.literal("status")
+                        .executes(MCCommands::executeMemoryStatus));
+    }
+
+    private static int executeMemoryStatus(CommandContext<CommandSourceStack> ctx) {
+        CommandSourceStack src = ctx.getSource();
+        MinecraftServer server = src.getServer();
+        Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Memory (Phase D graph-RAG) status\n");
+        sb.append("  enableGraphRagMemory: ").append(cfg.isEnableGraphRagMemory()).append('\n');
+
+        // Resolve the invoking player as the OWNER and run a READ-ONLY gate check (no LLM, cache PEEK).
+        ServerPlayer ownerPlayer = null;
+        try {
+            ownerPlayer = src.getPlayerOrException();
+        } catch (Exception ignored) {
+            // console / non-player source — owner-scoped patron check is not applicable
+        }
+
+        if (ownerPlayer != null && server != null) {
+            String clientId = cfg.getHeartbeatClientId();
+            // Owner billing context for the invoking op player (owner == prompter here).
+            Player2PayerResolution.ApiBillingContext ownerBilling =
+                    new Player2PayerResolution.ApiBillingContext(ownerPlayer, null);
+            MemoryGateDecision decision = MemoryGate.preflight(server, ownerBilling); // READ-ONLY, no LLM
+            sb.append("  owner: ").append(ownerPlayer.getName().getString()).append('\n');
+            sb.append("  owner patron/gate: ")
+                    .append(decision.allowed() ? "allowed (confirmed patron, within budget)"
+                            : ("blocked — " + decision.reason().name()))
+                    .append('\n');
+
+            // Per-companion stats for THIS owner's loaded stores (no disk hit; snapshot reads only).
+            UUID ownerUuid = ownerPlayer.getUUID();
+            long threshold = cfg.getReflectionImportanceThresholdClamped();
+            int shown = 0;
+            for (PlayerEngineController controller : PlayerEngineController.staticControllers.values()) {
+                if (controller == null || controller.getOwner() == null) continue;
+                if (!ownerUuid.equals(controller.getOwner().getUUID())) continue;
+                Character character = controller.getAIPersistantData() != null
+                        ? controller.getAIPersistantData().getCharacter() : null;
+                String companionId = character != null ? character.id() : null;
+                if (companionId == null || companionId.isBlank()) continue;
+
+                MemoryScope scope = MemoryScope.of(ownerUuid, companionId);
+                MemoryStore store = MemoryStoreRegistry.peek(scope); // already-loaded only (no disk I/O)
+                String companionName = character.name() != null ? character.name() : companionId;
+                sb.append("  companion '").append(companionName).append("':");
+                if (store == null || store.snapshot() == null || store.snapshot().graph() == null) {
+                    sb.append(" no memory store loaded\n");
+                    continue;
+                }
+                MemoryStore.Snapshot snap = store.snapshot();
+                long cumImportance = store.cumulativeImportanceSinceLastReflection();
+                boolean summarySet = store.relationshipSummary() != null
+                        && !store.relationshipSummary().isBlank();
+                sb.append('\n');
+                sb.append("    nodes=").append(snap.graph().nodeCount())
+                        .append(" edges=").append(snap.graph().edgeCount()).append('\n');
+                sb.append("    cumulativeImportanceSinceLastReflection=").append(cumImportance)
+                        .append(" (reflection threshold=").append(threshold)
+                        .append(ReflectionTrigger.shouldReflect(store, threshold) ? ", DUE)" : ")")
+                        .append('\n');
+                sb.append("    relationshipSummary set: ").append(summarySet)
+                        .append(" (summaryVersion=").append(store.summaryVersion()).append(")\n");
+                shown++;
+            }
+            if (shown == 0) {
+                sb.append("  (no active companions for this owner)\n");
+            }
+        } else {
+            sb.append("  (run as a player to see owner patron/gate + per-companion stats)\n");
+        }
+
+        final String body = sb.toString();
+        src.sendSuccess(() -> Component.literal(body), false);
+        return 1;
     }
 
     /**

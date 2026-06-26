@@ -551,8 +551,14 @@ public class AgentConversationData {
                             cfg.getMemoryRetrievalTopKClamped());
             com.player2.playerengine.memory.retrieval.MemoryRetriever retriever =
                     new com.player2.playerengine.memory.retrieval.MemoryRetriever(store);
+            // Pass the self/owner anchor names so the knowledge-boundary discriminator
+            // (specificSeedMatches) can fire — without these, the 6-arg overload nulls both
+            // anchors and the hallucination-boundary verdict override is inert.
+            String companionName = (character != null) ? character.name() : null;
+            String ownerName = mod.getOwnerUsername();
             com.player2.playerengine.memory.retrieval.MemoryRetrievalResult result =
-                    retriever.retrieve(turnText, ownerUuid, companionId, gameTime, thresholds, true);
+                    retriever.retrieve(turnText, ownerUuid, companionId, companionName, ownerName,
+                            gameTime, thresholds, true);
             return result != null ? result.memoryBlock() : Optional.empty();
         } catch (Exception e) {
             LOGGER.warn("[Memory] retrieval failed; degrading to no memory block ({})",

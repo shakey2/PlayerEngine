@@ -59,6 +59,11 @@ public final class Settings {
    public final Settings.Setting<Double> respectStructuresBreakPenalty = new Settings.Setting<>(500.0);
    // Hard cap on tracked player-placed positions; oldest whole-chunk eviction past this.
    public final Settings.Setting<Integer> respectStructuresStoreMaxBlocks = new Settings.Setting<>(200000);
+   // Close wooden doors the bot itself opened while pathing, once it has moved through and beyond them.
+   // Only doors the bot found closed and opened are tracked (never player-left-open doors); the bot
+   // never closes a door a player/mob is standing in, nor one held open by redstone, nor one the player
+   // has re-opened. When false the bot opens doors but never closes them (legacy behavior).
+   public final Settings.Setting<Boolean> closeDoorsBehindBot = new Settings.Setting<>(true);
    public final Settings.Setting<Double> jumpPenalty = new Settings.Setting<>(2.0);
    public final Settings.Setting<Double> walkOnWaterOnePenalty = new Settings.Setting<>(3.0);
    public final Settings.Setting<Boolean> allowWaterBucketFall = new Settings.Setting<>(true);

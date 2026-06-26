@@ -254,8 +254,41 @@ public final class MemoryStore {
      */
     public void mergeCandidates(MergePlan plan) {
         if (plan == null || plan.isEmpty()) return;
+        // Accumulate the reflection-trigger counter from each NEWLY-minted episodic (EVENT) vertex's
+        // importance BEFORE applying the plan, so we can tell a fresh episode from a re-merge of an
+        // existing one (episodic ids are batch-unique; a node already present means it was counted on a
+        // prior merge — skip it to avoid double-counting). Entity nodes are excluded: only the episodic
+        // provenance vertex carries the batch importance the reflection cadence is meant to track.
+        long episodicImportance = newlyMintedEpisodicImportance(plan);
         graph.apply(plan);
+        if (episodicImportance > 0L) {
+            // Inline the accumulation (addCumulativeImportance would publish a second snapshot).
+            this.cumulativeImportanceSinceLastReflection += episodicImportance;
+        }
         markDirtyAndPublish();
+    }
+
+    /**
+     * Sums the importance of every EVENT-typed upsert in the plan whose id is NOT already a resident
+     * node — i.e. the freshly-minted episodic provenance vertices from this batch. A re-merge of an
+     * already-present episode contributes 0 (guards against double-counting the reflection-trigger
+     * counter). Reflection-written REFLECTION nodes are unscored (importance 0) and never count.
+     */
+    private long newlyMintedEpisodicImportance(MergePlan plan) {
+        long sum = 0L;
+        // Guard against two upserts in the same plan sharing an id: the graph isn't updated until
+        // graph.apply(plan), so a duplicate id would not be seen as resident on the second pass and
+        // would be scored twice. Count each fresh id at most once.
+        java.util.Set<String> countedThisBatch = null;
+        for (MergePlan.NodeUpsert u : plan.upserts()) {
+            if (u == null || u.importance <= 0) continue;
+            if (!MemoryNodeType.EVENT.wire().equalsIgnoreCase(u.type)) continue;
+            if (graph.node(u.id) != null) continue; // already present → counted on a prior merge
+            if (countedThisBatch == null) countedThisBatch = new java.util.HashSet<>();
+            if (!countedThisBatch.add(u.id)) continue; // duplicate id within this same plan
+            sum += u.importance;
+        }
+        return sum;
     }
 
     /** Records a mention on an existing node id (recency + mentionCount). Marks dirty. */

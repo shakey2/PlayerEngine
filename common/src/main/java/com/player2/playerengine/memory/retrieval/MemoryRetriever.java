@@ -114,6 +114,29 @@ public final class MemoryRetriever implements Retriever {
                                           long currentGameTime,
                                           Thresholds thresholds,
                                           boolean patronEnabled) {
+        return retrieve(currentTurnText, ownerUuid, companionId, null, null,
+                currentGameTime, thresholds, patronEnabled);
+    }
+
+    /**
+     * Full retrieval entry point, knowledge-boundary aware. The {@code companionName} / {@code ownerName}
+     * are the graph canonical names of the companion-self node and owner node — the two anchors that are
+     * ALWAYS present in the graph. They are used ONLY to compute the "specific seed match" signal that
+     * stops a turn which merely names the companion/owner (and links to nothing episodic) from confirming
+     * a fabricated memory (knowledge-boundary hallucination fix). Either may be null/blank when unknown,
+     * in which case no anchor is excluded (every seed counts as specific — pre-fix behavior).
+     *
+     * @param companionName the companion's display name (self-anchor canonical name); nullable
+     * @param ownerName     the owner's display name (owner-anchor canonical name); nullable
+     */
+    public MemoryRetrievalResult retrieve(String currentTurnText,
+                                          java.util.UUID ownerUuid,
+                                          String companionId,
+                                          String companionName,
+                                          String ownerName,
+                                          long currentGameTime,
+                                          Thresholds thresholds,
+                                          boolean patronEnabled) {
         final long deadline = System.nanoTime() + BUDGET_NANOS;
         Thresholds t = thresholds != null ? thresholds : Thresholds.defaults();
 
@@ -133,6 +156,10 @@ public final class MemoryRetriever implements Retriever {
         // (3) Entity-link: rebuild the lexical+minhash index in-memory from the snapshot, then fuse.
         List<String> seedIds = entityLinkSeeds(graph, currentTurnText, deadline);
         int seedMatches = seedIds.size();
+        // Specific-seed signal: seeds BEYOND the always-present self/owner anchors, plus any matched
+        // EVENT/episodic node. If this is 0, the turn only named the companion/owner and referenced
+        // nothing the graph actually holds — the verdict must be NO_MEMORY (knowledge-boundary fix).
+        int specificSeedMatches = countSpecificSeedMatches(graph, seedIds, companionName, ownerName);
 
         // (4) Bounded ego-graph BFS (deadline-aware).
         List<EgoNode> ego = EgoGraphTraversal.traverse(
@@ -146,7 +173,7 @@ public final class MemoryRetriever implements Retriever {
         double normTop = normalizedTopScore(ranked);
         double confidence = MemoryRetrievalConfidence.confidence(normTop, ranked.size(), seedMatches);
         BoundaryVerdict verdict = MemoryRetrievalConfidence.verdict(
-                /*storeAbsent*/ false, confidence, seedMatches, t.minConfidence);
+                /*storeAbsent*/ false, confidence, seedMatches, specificSeedMatches, t.minConfidence);
 
         // (8) Serialize the bounded tail block.
         Optional<String> block = MemoryBlockSerializer.serialize(verdict, ranked, graph, t.blockCharCap);
@@ -225,6 +252,53 @@ public final class MemoryRetriever implements Retriever {
             if (hit.id() != null) seeds.add(hit.id());
         }
         return new ArrayList<>(seeds);
+    }
+
+    /**
+     * Counts the "specific" seed matches: seed nodes that are NOT one of the always-present self/owner
+     * anchor nodes (matched by canonical name == companionName / ownerName, case-insensitive), PLUS any
+     * matched EVENT/episodic node (which is always specific even if it shares a name). This is the
+     * knowledge-boundary discriminator: a turn whose only seed matches are the self/owner anchors and
+     * no episodic node referenced nothing the graph actually holds, so it must yield NO_MEMORY.
+     *
+     * <p>When neither anchor name is supplied, no node is excluded and the count equals the total seed
+     * count (pre-fix behavior — fail-open to HAS_MEMORY paths so the existing seedMatches gate governs).
+     */
+    static int countSpecificSeedMatches(MemoryGraph graph, List<String> seedIds,
+                                        String companionName, String ownerName) {
+        if (graph == null || seedIds == null || seedIds.isEmpty()) {
+            return 0;
+        }
+        String companionKey = anchorKey(companionName);
+        String ownerKey = anchorKey(ownerName);
+        if (companionKey == null && ownerKey == null) {
+            return seedIds.size(); // no anchors known → every seed counts (fail-open)
+        }
+        int specific = 0;
+        for (String id : seedIds) {
+            MemoryNode node = graph.node(id);
+            if (node == null) continue;
+            // EVENT/episodic nodes are always specific (the actual shared-history provenance vertices).
+            if (com.player2.playerengine.memory.MemoryNodeType.EVENT
+                    == com.player2.playerengine.memory.MemoryNodeType.fromWire(node.type())) {
+                specific++;
+                continue;
+            }
+            String nameKey = anchorKey(node.canonicalName());
+            boolean isAnchor = nameKey != null
+                    && (nameKey.equals(companionKey) || nameKey.equals(ownerKey));
+            if (!isAnchor) {
+                specific++;
+            }
+        }
+        return specific;
+    }
+
+    /** Normalizes an anchor name to a trimmed lower-case key, or null when blank. */
+    private static String anchorKey(String name) {
+        if (name == null) return null;
+        String t = name.trim().toLowerCase(java.util.Locale.ROOT);
+        return t.isEmpty() ? null : t;
     }
 
     /** Maps a node to a retrieval document: id = node id; indexed text = name + aliases + tags + content. */
