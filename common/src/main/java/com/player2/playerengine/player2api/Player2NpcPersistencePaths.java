@@ -195,4 +195,46 @@ public final class Player2NpcPersistencePaths {
     public static Path deferredJobsFile(MinecraftServer server) {
         return deferredJobsFile(server.getWorldPath(LevelResource.ROOT));
     }
+
+    // -------------------------------------------------------------------------
+    // Player-placed-block store paths (respect player structures)
+    // -------------------------------------------------------------------------
+
+    /** Directory name for the per-world player-placed-block store. */
+    public static final String PLAYER_PLACED_DIR_NAME = "playerplaced";
+
+    /** Filename for each dimension's player-placed-block data. */
+    public static final String PLAYER_PLACED_FILE_NAME = "blocks.json";
+
+    /**
+     * Root player-placed directory:
+     * {@code <worldRoot>/player2npc/persistentdata/playerplaced/}.
+     *
+     * <p>Holds one {@code <dimension-sanitized>/blocks.json} per loaded dimension.
+     */
+    public static Path playerPlacedRoot(Path worldRoot) {
+        return persistentDataRoot(worldRoot).resolve(PLAYER_PLACED_DIR_NAME);
+    }
+
+    public static Path playerPlacedRoot(MinecraftServer server) {
+        return playerPlacedRoot(server.getWorldPath(LevelResource.ROOT));
+    }
+
+    /**
+     * Per-dimension player-placed-block file:
+     * {@code <worldRoot>/player2npc/persistentdata/playerplaced/<dimension-sanitized>/blocks.json}.
+     * The dimension id (e.g. {@code minecraft:overworld}) is sanitized into a single safe path segment.
+     */
+    public static Path playerPlacedFile(Path worldRoot, String dimensionId) {
+        return playerPlacedRoot(worldRoot).resolve(sanitizeDimensionId(dimensionId)).resolve(PLAYER_PLACED_FILE_NAME);
+    }
+
+    public static Path playerPlacedFile(MinecraftServer server, String dimensionId) {
+        return playerPlacedFile(server.getWorldPath(LevelResource.ROOT), dimensionId);
+    }
+
+    /** Sanitizes a dimension id (e.g. {@code minecraft:the_nether}) into a single filesystem path segment. */
+    private static String sanitizeDimensionId(String dimensionId) {
+        return dimensionId.replaceAll("[^a-zA-Z0-9._-]", "_");
+    }
 }

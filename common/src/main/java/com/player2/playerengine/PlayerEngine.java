@@ -3,6 +3,7 @@ package com.player2.playerengine;
 import com.player2.playerengine.player2api.AgentConversationData;
 import com.player2.playerengine.player2api.AgentSideEffects;
 import com.player2.playerengine.retrieval.RagIndex;
+import com.player2.playerengine.structureprotection.StructureProtectionEvents;
 import com.google.common.base.Suppliers;
 import com.player2.playerengine.automaton.KeepName;
 import com.player2.playerengine.automaton.command.defaults.DefaultCommands;
@@ -138,6 +139,10 @@ public final class PlayerEngine {
       Player2ServerConfigHolder.load();
       PlayerEvent.PLAYER_QUIT.register(Player2DisconnectHandler::onPlayerQuit);
       PlayerEvent.PLAYER_JOIN.register(Player2ServerNetworking::sendConfigSync);
+      // Respect-player-structures (WS2): record real-player block placements and prune them on
+      // break, common-side via Architectury BlockEvent.PLACE/BREAK. No-op when the
+      // respectStructuresEnabled toggle is off; never cancels placement/break.
+      StructureProtectionEvents.register();
       DefaultCommands.registerAll();
       ENTITY_TYPES.register();
       PlayerEngineStorageMigration.runOnce();
