@@ -26,6 +26,20 @@ public class AudioUtils {
     private static final int HTTP_READ_TIMEOUT_MS = 120_000;
 
     /**
+     * Count of WAV clips currently being played through {@link #playAudioBytes}. Read-only diagnostic
+     * signal so STT can record whether the bot's own TTS was playing at push-to-talk press (a candidate
+     * aggravator of STT start latency — both hit the same local Player2 app). Bounded counter; never
+     * model-facing.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger activePlaybackCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** True if at least one TTS clip is currently being played (diagnostic signal for STT). */
+    public static boolean isPlaybackActive() {
+        return activePlaybackCount.get() > 0;
+    }
+
+    /**
      * Synthesize {@code text} to speech and play it synchronously (returns when playback finishes).
      * Convenience wrapper around {@link #fetchAudioBytes} + {@link #playAudioBytes} for single-shot
      * callers that do not need to prefetch.
@@ -62,6 +76,7 @@ public class AudioUtils {
         if (wavBytes == null || wavBytes.length == 0) {
             return;
         }
+        activePlaybackCount.incrementAndGet();
         try (AudioInputStream audioStream = AudioSystem.getAudioInputStream(
                 new BufferedInputStream(new ByteArrayInputStream(wavBytes)))) {
 
@@ -83,6 +98,8 @@ public class AudioUtils {
             }
         } catch (Exception e) {
             System.err.println("Error playing TTS audio: " + e.getMessage());
+        } finally {
+            activePlaybackCount.decrementAndGet();
         }
     }
 
