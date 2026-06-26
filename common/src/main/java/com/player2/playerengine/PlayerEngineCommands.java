@@ -1,7 +1,6 @@
 package com.player2.playerengine;
 
 import com.player2.playerengine.commands.*;
-import com.player2.playerengine.commands.*;
 import com.player2.playerengine.commands.random.*;
 import com.player2.playerengine.commands.base.CommandException;
 
@@ -44,6 +43,7 @@ public class PlayerEngineCommands {
                   new PickupDropsCommand(),
                   new AgenticCommand(),
                   new SetHostileAttackCommand(),
+                  new SetFollowModeCommand(),
                   new FishCommand(),
                   new ReadNearbySignsCommand(),
                   new PlaceSignCommand(),

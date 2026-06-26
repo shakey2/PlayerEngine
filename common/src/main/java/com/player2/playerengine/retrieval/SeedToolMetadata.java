@@ -411,6 +411,15 @@ public final class SeedToolMetadata {
                      "aggressive mode", "attack mobs automatically"),
                 list("combat", "utility")),
 
+            doc("set_follow_mode",
+                "set_follow_mode",
+                "Set how this companion behaves while following: NORMAL (default combat), COWARD (avoids monsters, won't fight hostile mobs, flees danger while staying close), or DEFENDER (fights off hostile mobs to protect you and itself while staying near you).",
+                "Use when the owner wants to change the companion's follow-time stance toward danger. COWARD when they want it to stay safe and not pick fights with monsters; DEFENDER when they want it to actively protect them; NORMAL to return to default behavior. The agent should only call this when the owner explicitly asks.",
+                list("set_follow_mode COWARD", "set_follow_mode DEFENDER", "set_follow_mode NORMAL"),
+                list("be careful", "protect me", "defend me", "don't fight", "coward",
+                     "run away", "stay safe", "guard me", "act normal"),
+                list("combat", "utility")),
+
             doc("stash",
                 "stash",
                 "Store items in a chest or container within a specified coordinate bounding box. Deposits all non-equipped items if no item list is given.",

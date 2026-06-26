@@ -56,6 +56,8 @@ import com.player2.playerengine.executor.StopReason;
 import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.util.Playground;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -105,6 +107,10 @@ public class PlayerEngineController {
    /** Registry of all active PlayerEngineController instances by bot entity UUID. Used by server admin commands. */
    public static final ConcurrentHashMap<UUID, PlayerEngineController> staticControllers = new ConcurrentHashMap<>();
    private boolean shouldDefendFromHostiles = false;
+   /** FollowDiag beta logging (state-change-only); mirrors the LOGGER field on the other FollowDiag classes. */
+   private static final Logger LOGGER = LogManager.getLogger();
+   /** Per-companion follow behavior. Default NORMAL; setter drives shouldDefendFromHostiles as a derived side-effect. */
+   private FollowMode followMode = FollowMode.NORMAL;
 
    /**
     * Throttle floor (ms) for non-milestone agentic progress lines. Identical across branches so a
@@ -703,5 +709,18 @@ public class PlayerEngineController {
 
    public void setShouldDefendFromHostiles(boolean toSet){
       this.shouldDefendFromHostiles = toSet;
+   }
+
+   public FollowMode getFollowMode() { return this.followMode; }
+
+   public void setFollowMode(FollowMode mode) {
+      FollowMode resolved = (mode == null) ? FollowMode.NORMAL : mode;
+      if (resolved != this.followMode) {
+         LOGGER.info("[FollowDiag] MODE-CHANGE: {} -> {}", this.followMode, resolved);
+      }
+      this.followMode = resolved;
+      // Derived side-effect: COWARD suppresses MobDefenseChain; NORMAL/DEFENDER keep it active.
+      // Keep shouldDefendFromHostiles independently settable; this is the driver, not the store.
+      this.setShouldDefendFromHostiles(this.followMode == FollowMode.COWARD);
    }
 }

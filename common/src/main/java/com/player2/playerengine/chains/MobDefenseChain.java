@@ -635,6 +635,22 @@ public class MobDefenseChain extends SingleTaskChain {
       return false;
    }
 
+   /**
+    * Read-only danger accessor for the follow-mode COWARD evasion ({@code FollowPlayerTask}), which
+    * lives in a different package and therefore cannot reach the private {@link #isInDanger} /
+    * {@link #getUniversallyDangerousMob} predicates. Reuses this chain's existing danger scan rather
+    * than duplicating it (combines the proximity-hostile check with the always-dangerous-mob check).
+    * Does NOT mutate combat/target state. Returns {@code false} defensively when the controller or its
+    * player is not available.
+    */
+   public boolean isInDangerNow() {
+      PlayerEngineController mod = this.controller;
+      if (mod == null || mod.getPlayer() == null) {
+         return false;
+      }
+      return this.isInDanger(mod) || this.getUniversallyDangerousMob(mod).isPresent();
+   }
+
    public void setTargetEntity(Entity entity) {
       this.targetEntity = entity;
    }
