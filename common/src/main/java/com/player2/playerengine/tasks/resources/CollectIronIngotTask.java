@@ -28,6 +28,23 @@ public class CollectIronIngotTask extends ResourceTask {
 
    @Override
    protected Task onResourceTick(PlayerEngineController mod) {
+      // Wrapper terminal propagation: if the cached SmeltInFurnaceTask child has self-stopped with a
+      // fuel-shortfall reason, copy it onto THIS wrapper and stop, rather than re-spawning a fresh leaf
+      // that would immediately re-stall (and never let onGetComplete fire). The child handle is reached
+      // read-only via the framework's cached `sub` walk (thisOrChildSatisfies).
+      String[] childReason = new String[1];
+      this.thisOrChildSatisfies(task -> {
+         if (task instanceof SmeltInFurnaceTask leaf && leaf.stopped()) {
+            leaf.getAggregatedFailureReason().ifPresent(r -> childReason[0] = r);
+            return childReason[0] != null;
+         }
+         return false;
+      });
+      if (childReason[0] != null) {
+         this.recordFailureReason(childReason[0]);
+         this.stop(this);
+         return null;
+      }
       return new SmeltInFurnaceTask(new SmeltTarget(new ItemTarget(Items.IRON_INGOT, this.count), new ItemTarget(Items.RAW_IRON, this.count)));
    }
 

@@ -22,6 +22,9 @@ public final class Player2ServerNetworking {
         buf.writeUtf(cfg.getPayerMode().name());
         buf.writeBoolean(cfg.isOwnerOfflineServerContinuation());
         buf.writeUtf(cfg.getHeartbeatClientId());
+        // Bodylang gesture playback tuning (append-only — never reorder existing fields).
+        buf.writeVarInt(cfg.getBodylangMarkerPauseMs());
+        buf.writeBoolean(cfg.isBodylangGaplessPrefetch());
         player.connection.send(NetworkManager.toPacket(NetworkManager.Side.S2C, SYNC_SERVER_PLAYER2, buf));
     }
 }

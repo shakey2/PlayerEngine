@@ -1,7 +1,9 @@
 package com.player2.playerengine.tasks.cooking;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.TaskCatalogue;
 import com.player2.playerengine.agentic.MaterialReservationService;
+import com.player2.playerengine.tasks.ResourceTask;
 import com.player2.playerengine.util.MiningRequirement;
 import com.player2.playerengine.util.helpers.ItemHelper;
 import com.player2.playerengine.util.helpers.StorageHelper;
@@ -231,6 +233,91 @@ public final class FuelPlanner {
         if (a == null) return b;
         if (b == null) return a;
         return b.deficit() < a.deficit() ? b : a;
+    }
+
+    /**
+     * Resolves a {@link DeficitCandidate} into the actual gather {@link ResourceTask} to spawn, gathering
+     * {@code cand.needed()} units.
+     *
+     * <p><b>Why this exists (silent-gather-skip guard):</b> {@link #deficitFor} walks {@link ItemHelper#LOG}
+     * and {@link ItemHelper#PLANKS}, but {@link TaskCatalogue} does NOT register an {@code Item}-keyed task
+     * for every member of those arrays. {@code ItemHelper.LOG} includes {@code *_wood}, all {@code stripped_*}
+     * variants and {@code *_hyphae}, which the catalogue registers only under the generic {@code "log"}
+     * string key (a multi-species MineAndCollect over natural logs), never under their concrete {@code Item}
+     * key. Calling {@link TaskCatalogue#getItemTask(Item, int)} for such an item hits the not-registered
+     * branch and returns {@code null}; the caller would then latch {@code fuelGatherAttempted} and fall
+     * straight through to the terminal shortfall WITHOUT ever spawning a gather — a silent skip that wrongly
+     * reports "no logs/planks found" while logs exist in the world.
+     *
+     * <p>This resolver therefore prefers the concrete {@code Item}-keyed task when one is registered, and
+     * otherwise falls back to the generic {@code "log"} / {@code "planks"} string catalogue entry (both of
+     * which always exist). Coal always resolves by item key. Returns {@code null} only when nothing resolves
+     * — the caller treats that the same as a no-op gather (and the terminal shortfall path still fires).
+     *
+     * @param cand the chosen acquirable fuel candidate (never charcoal / lava bucket — see {@link #deficitFor}).
+     * @return the gather task for {@code cand.needed()} units, or {@code null} if no catalogue entry resolves.
+     */
+    @Nullable
+    public static ResourceTask gatherTaskFor(DeficitCandidate cand) {
+        if (cand == null) {
+            return null;
+        }
+        Item item = cand.item();
+        // count = needed() (full batch requirement), NOT deficit(): the spawned gather tasks
+        // (CollectPlanksTask and the generic "log"/"planks" MineAndCollect) check current inventory
+        // against the target and self-terminate early once it is reached, so passing the total never
+        // over-gathers. Do NOT switch to deficit() — these tasks target an absolute inventory count,
+        // not an increment, and a deficit target would under-gather when the bot already holds some.
+        int count = cand.needed();
+        // Zero-held: no species preference to honor. Route to the nearest-available generic
+        // multi-species task instead of the alphabetically-first concrete species. deficitFor()
+        // walks PLANKS[]/LOG[] in array order and pickSmaller() keeps the first on a deficit tie,
+        // so a fully-zero inventory always selects PLANKS[0] == acacia_planks. Spawning the concrete
+        // acacia task in (e.g.) a desert with no acacia bounded-wanders forever; the generic
+        // "planks"/"log" catalogue task targets NATURAL_LOG and chops the nearest available species
+        // (the adjacent oak). When held > 0 we fall through to the concrete task to finish the
+        // species already in inventory (top-up case).
+        //
+        // Known latent case (held > 0, that species unavailable in the biome): the concrete gather's
+        // MineAndCollectTask falls back to an unbounded wander, so give-up is slow (minutes) rather
+        // than immediate. This is an accepted PRE-EXISTING constraint, not a regression — it does NOT
+        // spin at ~10 Hz, and Fix B's failure propagation still unwinds the chain truthfully once the
+        // wander exhausts. We deliberately do NOT divert a held>0 species to the generic task: that
+        // would abandon partial inventory the bot already gathered. Narrowing the unbounded wander is
+        // tracked separately as a MineAndCollectTask concern, not a FuelPlanner one.
+        if (cand.held() == 0) {
+            if (contains(ItemHelper.PLANKS, item) && TaskCatalogue.taskExists("planks")) {
+                return TaskCatalogue.getItemTask("planks", count);
+            }
+            if (contains(ItemHelper.LOG, item) && TaskCatalogue.taskExists("log")) {
+                return TaskCatalogue.getItemTask("log", count);
+            }
+            // Coal or unexpected species: not in PLANKS[]/LOG[], fall through to the concrete key.
+        }
+        // Concrete item key first (coal, plank species, natural-log species are all registered this way).
+        if (TaskCatalogue.taskExists(item)) {
+            return TaskCatalogue.getItemTask(item, count);
+        }
+        // Item key absent (e.g. *_wood / stripped_* / *_hyphae logs) -> generic string catalogue.
+        if (contains(ItemHelper.LOG, item) && TaskCatalogue.taskExists("log")) {
+            return TaskCatalogue.getItemTask("log", count);
+        }
+        if (contains(ItemHelper.PLANKS, item) && TaskCatalogue.taskExists("planks")) {
+            return TaskCatalogue.getItemTask("planks", count);
+        }
+        // Last resort: let the item-keyed call log its own diagnostic and return null.
+        return TaskCatalogue.getItemTask(item, count);
+    }
+
+    private static boolean contains(Item[] arr, Item item) {
+        // Identity comparison is correct: registered Item instances are singletons. Avoids the
+        // per-call ArrayList wrapper that Arrays.asList(arr).contains(item) allocates.
+        for (Item candidate : arr) {
+            if (candidate == item) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // -------------------------------------------------------------------------

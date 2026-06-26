@@ -131,6 +131,14 @@ public class AgentConversationData {
     private static final int MAX_PARSE_RETRY = 2;
 
     /**
+     * Transient (no NBT): how many consecutive non-silent replies this bot has made to peer
+     * (CharacterMessage) turns without an intervening human/owner turn. Drives the count-aware
+     * peer-talk reminder ({@link #getReminderStringFromLastEvent}). Reset on human activity; credited
+     * (reset) when the bot chooses silence. See masterplan/peer-talk-restraint-plan.md.
+     */
+    private int consecutivePeerReplies = 0;
+
+    /**
      * Per-bot TTS pacing: nanoTime() after which this specific bot is allowed to start a new
      * LLM/conversation round. Replaces the previous server-wide TTS lock so other bots can be
      * processed while this one is still "speaking" client-side.
@@ -140,12 +148,85 @@ public class AgentConversationData {
     /** Approx TTS characters/second (matches TTSManager). */
     private static final int TTS_CHARS_PER_SECOND = 25;
 
+    // --- Bodylang TTS-timed gestures: per-message marker state ---
+    /**
+     * Ordered, VALID-ONLY body-language boundaries for THIS bot's most recent message. Built by
+     * {@link MarkerParser} in {@link #handleLlmResponse} and overwritten each message. This is the
+     * authoritative server-side list the {@code segment_done} handler indexes into (by the same
+     * valid-only numbering used on the wire), and that the fallback timer fires from. Invalid markers
+     * are NOT stored here — they are reported to both audiences at parse time and never fire.
+     */
+    private volatile List<MarkerParser.SegmentBoundary> pendingSegmentActions = List.of();
+    /**
+     * The stripped text split at marker positions for THIS bot's most recent message (the wire chunk
+     * list). Read by {@link AgentSideEffects#onEntityMessage} to build the {@code stream_tts} payload.
+     */
+    private volatile List<String> pendingChunks = List.of();
+    /**
+     * Raw tokens of INVALID markers from the most recent message (e.g. {@code "wave"}). Reported to
+     * the model here at parse time (InfoMessage) and to the player in {@code onEntityMessage}
+     * (Workstream 6 player-facing line). Overwritten each message; empty when all markers were valid.
+     */
+    private volatile List<String> pendingInvalidMarkers = List.of();
+    /**
+     * Per-bot fallback-timer cancel hook. Set by the WS4 dispatch path (server-side) when the safety
+     * timer is scheduled; invoked by {@link #cancelFallbackTimer()} when {@code message_done} arrives so
+     * a late prompter ACK does not double-clear / double-fire. {@code null} when no timer is pending.
+     */
+    private volatile Runnable fallbackTimerCancel = null;
+
     public AgentConversationData(PlayerEngineController mod) {
         this.mod = mod;
     }
 
     public String getChainInitiatorUsername() {
         return chainInitiatorUsername;
+    }
+
+    /** Valid-only ordered boundaries for the most recent message (segment_done indexes into this). */
+    public List<MarkerParser.SegmentBoundary> getPendingSegmentActions() {
+        return pendingSegmentActions;
+    }
+
+    /** Wire chunk list for the most recent message (read by onEntityMessage for the stream_tts payload). */
+    public List<String> getPendingChunks() {
+        return pendingChunks;
+    }
+
+    /** Invalid marker tokens from the most recent message (player-facing reporting in onEntityMessage). */
+    public List<String> getPendingInvalidMarkers() {
+        return pendingInvalidMarkers;
+    }
+
+    /**
+     * Register a cancel hook for the WS4 server-side fallback timer (keyed by this bot). Replaces any
+     * previously pending hook (a new dispatch supersedes the old timer).
+     */
+    public void setFallbackTimerCancel(Runnable cancel) {
+        this.fallbackTimerCancel = cancel;
+    }
+
+    /**
+     * Cancel the pending fallback timer if one is registered (idempotent). Called from the
+     * {@code message_done} handler so the prompter ACK pre-empts the liveness backstop.
+     */
+    public void cancelFallbackTimer() {
+        Runnable c = this.fallbackTimerCancel;
+        this.fallbackTimerCancel = null;
+        if (c != null) {
+            c.run();
+        }
+    }
+
+    /**
+     * Workstream 6: reflect a partial-speech (degraded {@code message_done}) outcome into the MODEL's
+     * feedback channel so the AI knows some of its speech did not play and cannot claim full success
+     * (DESIGN.md §3). The player-facing line is broadcast separately at the {@code message_done} site.
+     */
+    public void reportPartialSpeechToModel() {
+        addEventToQueue(new InfoMessage(
+                "Note: part of your spoken reply did not play for the listener (a TTS chunk failed). "
+                + "Do not claim you said everything; if it matters, you may briefly restate the key point."));
     }
 
     // ## Processing
@@ -157,6 +238,25 @@ public class AgentConversationData {
         return ttsCooldownUntilNanos;
     }
 
+    // --- Peer-talk restraint: deterministic fallback gate (Workstream 3) — NOT WIRED (future work) ---
+    // STUB ONLY. The primary peer-talk mechanism is model-driven (the transient consecutivePeerReplies
+    // counter + count-aware reminder, above/below). This block documents the planned deterministic
+    // safety floor that is deliberately NOT implemented this run — no field, no config, no behavior here.
+    //
+    // When a future session is explicitly asked to enable the fallback (see
+    // masterplan/peer-talk-restraint-plan.md Workstream 3), implement Option A (softest, recommended):
+    //   - Add a transient `private long peerReplyCooldownUntilNanos = 0L;` mirroring ttsCooldownUntilNanos.
+    //   - When the gate is enabled AND consecutivePeerReplies >= threshold, set the cooldown and have
+    //     getPriority() return 0 (defer, NEVER discard) until it lifts — the peer message stays queued so
+    //     the model still sees it (no model-unseen drop; preserves DESIGN.md §3 truthfulness).
+    //   - Escalation rungs B (drop-after-expiry) and C (queue-injection block in onAICharacterMessage)
+    //     are documented in the plan and carry a stronger truthfulness obligation; do not wire by default.
+    // Config keys (define in Player2ServerRuntimeConfig / Player2ServerConfigHolder, ALL default OFF;
+    // do NOT add them this run):
+    //   - peerTalkRestraintHardGateEnabled = false   (boolean; master switch, off = model-driven only)
+    //   - peerTalkRestraintGateThreshold   = 4       (clamp 2..20; streak at which the gate engages)
+    //   - peerTalkRestraintCooldownSeconds = 8.0     (clamp 1.0..60.0; Option-A defer window)
+    // Until then getPriority() below is unchanged (no peer-talk behavior).
     public long getPriority() {
         if (!enabled || isProcessing || eventQueue.isEmpty()) {
             return 0;
@@ -227,6 +327,7 @@ public class AgentConversationData {
         resetB5TurnState();
         commandAwaitingFinishAck = null;
         consecutiveParseFailures = 0;
+        consecutivePeerReplies = 0;
     }
 
     private void resetB5TurnState() {
@@ -414,7 +515,13 @@ public class AgentConversationData {
                     : Prompts.reminderOnOtherUSerMsg) + " " + Prompts.generalConversationReminder);
         }
         if (lastEvent instanceof Event.CharacterMessage) {
-            return Optional.of(Prompts.reminderOnAIMsg + " " + Prompts.generalConversationReminder);
+            // This plan (masterplan/peer-talk-restraint-plan.md) OWNS the CharacterMessage reminder text
+            // (the single per-turn reminder slot for a peer head event). Do NOT overwrite this slot from
+            // another track — extend Prompts.reminderOnAIMsg(int) instead. The streak read here reflects
+            // the START-OF-TURN value: this method is called at process() (~:424) BEFORE handleLlmResponse
+            // increments/resets consecutivePeerReplies for this turn, so the reminder count is correct.
+            return Optional.of(Prompts.reminderOnAIMsg(getConsecutivePeerReplies())
+                    + " " + Prompts.generalConversationReminder);
         }
         return Optional.of(Prompts.generalConversationReminder);
     }
@@ -598,6 +705,10 @@ public class AgentConversationData {
         if (RagDeepSearchCommands.isMetaCommandId(cmdId)) {
             LOGGER.debug("[B5] model_deepsearch_skipped bot={} (not handled)", getName());
             command = "idle";
+            // Keep cmdId in sync with the rewritten command (mirrors the isModelDeepSearchFollowUp
+            // guard above). Otherwise the stale meta-command cmdId leaks into the peer-talk
+            // substantiveReply predicate below and would inflate the streak on an effectively-idle turn.
+            cmdId = "idle";
         }
 
         String previousAssistant = mod.getAIPersistantData().getLastAssistantContent().orElse("");
@@ -611,13 +722,67 @@ public class AgentConversationData {
         if (llmMessage == null) {
             llmMessage = "";
         }
+        // --- Bodylang TTS-timed gestures: deterministic marker parse (Workstream 1) ---
+        // Strip inline [bl:<action>] markers from the message ONCE here (decision 2 — the single
+        // choke-point) and build the ordered chunk + boundary lists. The CharacterMessage is then
+        // constructed with the STRIPPED text in its message field, so chat (AgentSideEffects:55), TTS
+        // (:58), and markSpeakingFor (:63) all operate on stripped text with no second strip.
+        MarkerParser.ParsedMessage parsed = MarkerParser.parse(llmMessage);
+        String strippedMessage = parsed.strippedText();
+        // Store the valid-only boundary list (segment_done / fallback timer index into this) and the
+        // wire chunk list (read by onEntityMessage). Invalid markers are reported below, not stored.
+        List<MarkerParser.SegmentBoundary> validBoundaries = new java.util.ArrayList<>();
+        List<String> invalidTokens = new java.util.ArrayList<>();
+        for (MarkerParser.SegmentBoundary b : parsed.boundaries()) {
+            if (b.valid()) {
+                validBoundaries.add(b);
+            } else {
+                invalidTokens.add(b.rawToken());
+            }
+        }
+        this.pendingSegmentActions = List.copyOf(validBoundaries);
+        this.pendingChunks = List.copyOf(parsed.chunks());
+        this.pendingInvalidMarkers = List.copyOf(invalidTokens);
+        // DESIGN.md §3 (truthfulness): an unknown marker is NOT silently dropped. Report it to the
+        // MODEL here via an InfoMessage so the AI knows that gesture did not fire and cannot claim it
+        // did. (The player-facing chat line is emitted in AgentSideEffects — Workstream 6.) Do NOT
+        // call markSpeakingFor here (decision 4 — it stays at AgentSideEffects:63).
+        if (!invalidTokens.isEmpty()) {
+            LOGGER.warn("[Bodylang] bot={} emitted unknown gesture marker(s): {}", getName(), invalidTokens);
+            addEventToQueue(new InfoMessage(String.format(
+                    "Note: the gesture marker(s) %s are not valid and were NOT performed. "
+                    + "Valid gestures are: greeting, nod_head, shake_head, victory. "
+                    + "Do not claim you performed an invalid gesture.",
+                    String.join(", ", invalidTokens))));
+        }
+
         LOGGER.info("[AICommandBridge/processCharWithAPI]: Processed LLM response: message={} command={}",
-                llmMessage, command);
+                strippedMessage, command);
+        // --- Peer-talk restraint (masterplan/peer-talk-restraint-plan.md), Workstreams 1 & 4 ---
+        // Compute the "substantive peer reply" predicate ONCE here, at the dispatch site. Both the
+        // increment and the silence-credit derive from this single predicate (the same notion of
+        // substance the relay/TTS guard at AgentSideEffects:69 and the command guard at :102 use). The
+        // discriminators (strippedMessage / cmdId / validBoundaries) are already in scope. NOTE: the
+        // start-of-turn streak the model saw was already baked into the reminder back in process()
+        // (getReminderStringFromLastEvent) BEFORE this point, so mutating the counter now is correct.
+        boolean isPeerTurn = lastEvent instanceof Event.CharacterMessage;
+        boolean substantiveReply = !strippedMessage.isEmpty()
+                || (cmdId != null && !"idle".equals(cmdId))   // a real, non-idle command counts
+                || !validBoundaries.isEmpty();                 // a valid gesture counts
         try {
-            if (!llmMessage.isEmpty() || command != null) {
+            // Fire the CharacterMessage when there is stripped text, a command, OR at least one valid
+            // gesture boundary — a marker-only message ("[bl:greeting]") strips to empty text but must
+            // still dispatch so its gesture fires via the TTS/segment path.
+            if (!strippedMessage.isEmpty() || command != null || !validBoundaries.isEmpty()) {
                 registerPendingLearnCandidate();
-                mod.getAIPersistantData().addAssistantMessage(llmMessage, mod.getPlayer2APIService());
-                onCharacterEvent.accept(new Event.CharacterMessage(llmMessage, command, this, relayInitiator));
+                mod.getAIPersistantData().addAssistantMessage(strippedMessage, mod.getPlayer2APIService());
+                onCharacterEvent.accept(new Event.CharacterMessage(strippedMessage, command, this, relayInitiator));
+                // Substantive reply to a peer turn: grow the peer-reply streak. (The dispatch condition
+                // above is intentionally BROADER than substantiveReply — it lets marker-only/blank-command
+                // turns through — so the counter is gated on substantiveReply, not on dispatch.)
+                if (isPeerTurn && substantiveReply) {
+                    this.consecutivePeerReplies++;
+                }
             } else {
                 LOGGER.warn(
                         "[AICommandBridge/processChatWithAPI/onLLMResponse]: Generated null llm message and command");
@@ -626,6 +791,21 @@ public class AgentConversationData {
             LOGGER.error("[AICommandBridge/processChatWithAPI/onLLMResponse]: ERROR RUNNING SIDE EFFECTS, errMsg={}",
                     e.getMessage());
         } finally {
+            // Peer-talk counter reset/credit — evaluated AFTER the if/else so it covers BOTH branches
+            // (genuine silence {message:"",command:""} takes the DISPATCH branch because `command` is a
+            // raw "" not null at :648-649; the else fires only for rare all-null). Never key silence on
+            // the else.
+            if (!isPeerTurn) {
+                // Any non-CharacterMessage head (a UserMessage or a command-finish InfoMessage) is
+                // human-driven activity and breaks the peer-reply streak.
+                this.consecutivePeerReplies = 0;
+            } else if (!substantiveReply) {
+                // The bot chose silence (empty text AND idle/blank cmdId AND no gesture) — the desired
+                // outcome (no chat/TTS/relay downstream at AgentSideEffects:69). Credit it and stop
+                // nagging. DESIGN.md §3: silence is not a failure — debug log only, no player/model report.
+                LOGGER.debug("peer_talk_silence bot={} streak_before={}", getName(), this.consecutivePeerReplies);
+                this.consecutivePeerReplies = 0;
+            }
             acknowledgeCommandFinishRoundIfComplete(lastEvent, command);
             this.isProcessing = false;
         }
@@ -924,6 +1104,14 @@ public class AgentConversationData {
         addEventToQueue(mod.getAIPersistantData().getGreetingEvent());
     }
 
+    public void onReturn(String ownerName) {
+        addEventToQueue(mod.getAIPersistantData().getReturnEvent(ownerName));
+    }
+
+    public void onDeathRevival(String deathCause) {
+        addEventToQueue(mod.getAIPersistantData().getDeathRevivalEvent(deathCause));
+    }
+
     private static boolean isCommandFinishPromptMessage(String message) {
         return message != null
                 && message.startsWith("Command feedback:")
@@ -1085,6 +1273,11 @@ public class AgentConversationData {
 
     public String getName() {
         return getCharacter().shortName();
+    }
+
+    /** Transient peer-reply streak (consecutive non-silent replies to peer turns); read by the reminder builder. */
+    int getConsecutivePeerReplies() {
+        return consecutivePeerReplies;
     }
 
 }

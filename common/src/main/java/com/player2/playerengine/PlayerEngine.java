@@ -42,6 +42,7 @@ import com.player2.playerengine.player2api.manager.TTSManager;
 import com.player2.playerengine.util.ExecutorShutdown;
 import com.player2.playerengine.player2api.Event;
 import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
 import dev.architectury.networking.NetworkManager;
@@ -59,8 +60,21 @@ public final class PlayerEngine {
          .fromNamespaceAndPath(MOD_ID, "client_player2_proxy_response");
    public static final ResourceLocation TTS_PREFERENCE_PACKET_ID = ResourceLocation.fromNamespaceAndPath(MOD_ID,
          "tts_preference");
-   public static final ResourceLocation TTS_PLAYBACK_DONE_PACKET_ID = ResourceLocation.fromNamespaceAndPath(MOD_ID,
-         "tts_playback_done");
+   /**
+    * C2S: per-boundary gesture signal. Payload (FROZEN — the client mirrors this): {@code writeUtf(botUuid)}
+    * then {@code writeVarInt(segIndex)}, where {@code segIndex} indexes the VALID-ONLY wire boundary list
+    * (the {@code stream_tts} boundary list, invalid markers omitted). Honored only from the PROMPTER's
+    * client; fires the boundary's BodyLanguageTask once. NEVER clears the cooldown. Declared via id(...)
+    * so the per-version ResourceLocation factory is encapsulated (parity-safe).
+    */
+   public static final ResourceLocation TTS_SEGMENT_DONE_PACKET_ID = id("segment_done");
+   /**
+    * C2S: end-of-message signal (replaces the retired {@code tts_playback_done}). Payload (FROZEN):
+    * {@code writeUtf(botUuid)} then ONE trailing {@code writeBoolean(degraded)} (partial-speech flag).
+    * Honored only from the PROMPTER's client (was owner); gated by {@code isBotTtsPlaybackAckEnabled()};
+    * clears the turn-taking cooldown (idempotent) and cancels the fallback timer.
+    */
+   public static final ResourceLocation TTS_MESSAGE_DONE_PACKET_ID = id("message_done");
    public static final TagKey<Item> EMPTY_BUCKETS = TagKey.create(Registries.ITEM, id("empty_buckets"));
    public static final TagKey<Item> WATER_BUCKETS = TagKey.create(Registries.ITEM, id("water_buckets"));
    private static ThreadPoolExecutor threadPool;
@@ -135,6 +149,10 @@ public final class PlayerEngine {
       RagIndex.initialize();
       MCCommands.onInit();
       TickEvent.SERVER_POST.register(PlayerEngineController::staticServerTick);
+      // Bodylang TTS-timed gestures: drive the per-bot fallback timers on the server tick thread so a
+      // missing prompter ACK (bot-to-bot / ambient / prompter-moved-away / client-crash) still fires
+      // unfired gestures and clears the cooldown (Workstream 4).
+      TickEvent.SERVER_POST.register(PlayerEngine::tickTtsFallbackTimers);
       ConversationManager.init();
       ModIntelligenceService.registerEventHandlers();
       if (dev.architectury.platform.Platform.getEnvironment() == dev.architectury.utils.Env.SERVER) {
@@ -185,33 +203,226 @@ public final class PlayerEngine {
                boolean enabled = buf.readBoolean();
                TtsClientPreferenceStore.setTtsEnabled(context.getPlayer().getUUID(), enabled);
             });
+      // segment_done (C2S): per-boundary gesture trigger. Honored ONLY from the bot's PROMPTER client.
+      // Payload: readUtf(botUuid), readVarInt(segIndex). segIndex indexes the VALID-ONLY boundary list.
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
-            TTS_PLAYBACK_DONE_PACKET_ID,
+            TTS_SEGMENT_DONE_PACKET_ID,
             (buf, context) -> {
-               if (!Player2ServerConfigHolder.get().isBotTtsPlaybackAckEnabled()) {
-                  return;
-               }
                ServerPlayer sender = (ServerPlayer) context.getPlayer();
                String botUuidStr = buf.readUtf();
+               int segIndex = buf.readVarInt();
                UUID botUuid;
                try {
                   botUuid = UUID.fromString(botUuidStr);
                } catch (IllegalArgumentException e) {
-                  LOGGER.warn("PlayerEngine: tts_playback_done invalid bot UUID: {}", botUuidStr);
+                  LOGGER.warn("PlayerEngine: segment_done invalid bot UUID: {}", botUuidStr);
                   return;
                }
                AgentConversationData botData = ConversationManager.queueData.get(botUuid);
                if (botData == null) {
                   return;
                }
-               Player owner = botData.getMod().getOwner();
-               if (owner == null || !owner.getUUID().equals(sender.getUUID())) {
+               // Prompter identity guard (replaces the old owner check): only the player the bot is
+               // talking to this turn may drive its gestures (decision 10). Payer/owner signals ignored.
+               ServerPlayer prompter = resolvePrompter(botData);
+               if (prompter == null || !prompter.getUUID().equals(sender.getUUID())) {
                   return;
                }
-               LOGGER.info("PlayerEngine: tts_playback_done ACK for bot={} from owner={}",
-                     botData.getName(), sender.getName().getString());
-               botData.clearTtsCooldown();
+               fireSegment(botUuid, botData, segIndex, false);
+               // NEVER clearTtsCooldown here (decision 3/4 — cooldown is cleared only by message_done
+               // or the fallback timer).
             });
+
+      // message_done (C2S): end-of-message. Honored ONLY from the PROMPTER client; gated by ack-enabled.
+      // Payload: readUtf(botUuid), then ONE trailing readBoolean(degraded). Replaces tts_playback_done.
+      NetworkManager.registerReceiver(NetworkManager.Side.C2S,
+            TTS_MESSAGE_DONE_PACKET_ID,
+            (buf, context) -> {
+               if (!Player2ServerConfigHolder.get().isBotTtsPlaybackAckEnabled()) {
+                  return;
+               }
+               ServerPlayer sender = (ServerPlayer) context.getPlayer();
+               String botUuidStr = buf.readUtf();
+               boolean degraded = buf.readBoolean();
+               UUID botUuid;
+               try {
+                  botUuid = UUID.fromString(botUuidStr);
+               } catch (IllegalArgumentException e) {
+                  LOGGER.warn("PlayerEngine: message_done invalid bot UUID: {}", botUuidStr);
+                  return;
+               }
+               AgentConversationData botData = ConversationManager.queueData.get(botUuid);
+               if (botData == null) {
+                  return;
+               }
+               ServerPlayer prompter = resolvePrompter(botData);
+               if (prompter == null || !prompter.getUUID().equals(sender.getUUID())) {
+                  return;
+               }
+               LOGGER.info("PlayerEngine: message_done ACK for bot={} from prompter={} degraded={}",
+                     botData.getName(), sender.getName().getString(), degraded);
+               botData.clearTtsCooldown(); // idempotent — no-op if the fallback timer already cleared it
+               botData.cancelFallbackTimer(); // runs the registered hook -> clearFallbackTimer(botUuid)
+               if (degraded) {
+                  // Workstream 6: partial speech. Tell BOTH audiences truthfully (DESIGN.md §3).
+                  MinecraftServer server = sender.getServer();
+                  if (server != null) {
+                     AgentSideEffects.broadcastChatToAllPlayers(server,
+                           String.format("Some of %s's speech didn't play.", botData.getName()));
+                  }
+                  botData.reportPartialSpeechToModel();
+               }
+            });
+   }
+
+   // --- Bodylang TTS-timed gestures: prompter resolution + fallback timer (Workstream 4) ---
+
+   /**
+    * Resolve a bot's PROMPTER (chain initiator) to a present {@link ServerPlayer}. Reuses the
+    * package-private {@code Player2PayerResolution.findByName} scan (do NOT duplicate it). Returns
+    * {@code null} when the prompter is null (ambient/proactive), a bot, or not online — in which case
+    * there is no authoritative client and the fallback timer is the sole driver (decision 10).
+    * NEVER routes through {@code Player2PayerResolution.resolve}/{@code ApiBillingContext} (payer is
+    * billing only — decision 9).
+    */
+   private static ServerPlayer resolvePrompter(AgentConversationData botData) {
+      String prompterName = botData.getChainInitiatorUsername();
+      if (prompterName == null || prompterName.isBlank()) {
+         return null;
+      }
+      net.minecraft.world.entity.LivingEntity bot = botData.getMod().getPlayer();
+      MinecraftServer server = bot != null ? bot.getServer() : null;
+      if (server == null) {
+         return null;
+      }
+      return com.player2.playerengine.player2api.Player2PayerResolution.findByName(server, prompterName);
+   }
+
+   /**
+    * Per-bot fallback-timer + fired-segment state. {@code deadlineNanos} is a GENEROUS liveness deadline
+    * (NOT the exact speech estimate) so a slow-but-present prompter ACK is not pre-empted.
+    * {@code firedSegments} tracks which valid boundary indices already fired (segment_done OR timer),
+    * giving idempotency BOTH ways — a duplicate/late {@code segment_done} after the timer is a no-op,
+    * and the timer never re-fires what a prompter ACK already fired. {@code cleared} guards a single
+    * cooldown clear. {@code active} is set false by {@code message_done} so the deadline never fires the
+    * liveness path, but the entry (and its dedup set) is KEPT until the NEXT dispatch overwrites it — so
+    * a late duplicate {@code segment_done} arriving AFTER {@code message_done} is still de-duplicated.
+    */
+   private static final class TtsFallbackState {
+      final long deadlineNanos;
+      final java.util.Set<Integer> firedSegments = java.util.concurrent.ConcurrentHashMap.newKeySet();
+      volatile boolean cleared = false;
+      volatile boolean active = true;
+
+      TtsFallbackState(long deadlineNanos) {
+         this.deadlineNanos = deadlineNanos;
+      }
+   }
+
+   private static final java.util.Map<UUID, TtsFallbackState> TTS_FALLBACK_TIMERS =
+         new java.util.concurrent.ConcurrentHashMap<>();
+
+   /**
+    * Schedule (or replace) the server-side fallback timer for a bot at TTS dispatch. Deadline =
+    * markSpeakingFor-style estimate ({@code ceil(len/25)+1}s) PLUS a fixed slack so it is purely a
+    * liveness backstop, never precise timing. A new dispatch REPLACES the entry, resetting the
+    * fired-segment set for the new message.
+    */
+   public static void scheduleTtsFallbackTimer(MinecraftServer server, UUID botUuid, int messageLength) {
+      int estimateSec = (int) Math.ceil(messageLength / 25.0) + 1;
+      int slackSec = 5; // generous; must not pre-empt a slow-but-present prompter ACK
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos((long) estimateSec + slackSec);
+      TTS_FALLBACK_TIMERS.put(botUuid, new TtsFallbackState(deadline));
+      // Register a cancel hook so message_done can pre-empt the timer's liveness firing (idempotent).
+      AgentConversationData botData = ConversationManager.queueData.get(botUuid);
+      if (botData != null) {
+         botData.setFallbackTimerCancel(() -> clearFallbackTimer(botUuid));
+      }
+   }
+
+   /**
+    * Deactivate a bot's fallback timer's liveness firing (idempotent). Called from {@code message_done}.
+    * The entry is intentionally KEPT (not removed) so the fired-segment dedup set still rejects a late
+    * duplicate {@code segment_done}; the next dispatch overwrites it. The tick driver garbage-collects
+    * inactive entries once past their deadline.
+    */
+   public static void clearFallbackTimer(UUID botUuid) {
+      TtsFallbackState state = TTS_FALLBACK_TIMERS.get(botUuid);
+      if (state != null) {
+         state.active = false;
+         state.cleared = true; // message_done already cleared the cooldown
+      }
+   }
+
+   /**
+    * Drive the fallback timers. Called every server tick (SERVER_POST). When an ACTIVE bot's deadline
+    * passes before {@code message_done}, fire any UNFIRED valid boundaries in order, then clear the
+    * cooldown — the liveness backstop for bot-to-bot / ambient / prompter-moved-away / client-crash
+    * cases. Runs on the server tick thread, so the gesture dispatch is on the correct thread. Inactive
+    * (message_done'd) entries are garbage-collected once their deadline passes.
+    */
+   public static void tickTtsFallbackTimers(MinecraftServer server) {
+      if (TTS_FALLBACK_TIMERS.isEmpty()) {
+         return;
+      }
+      long now = System.nanoTime();
+      for (java.util.Map.Entry<UUID, TtsFallbackState> e : TTS_FALLBACK_TIMERS.entrySet()) {
+         TtsFallbackState state = e.getValue();
+         if (now < state.deadlineNanos) {
+            continue;
+         }
+         UUID botUuid = e.getKey();
+         if (state.active) {
+            AgentConversationData botData = ConversationManager.queueData.get(botUuid);
+            if (botData != null) {
+               java.util.List<com.player2.playerengine.player2api.MarkerParser.SegmentBoundary> boundaries =
+                     botData.getPendingSegmentActions();
+               for (int i = 0; i < boundaries.size(); i++) {
+                  fireSegment(botUuid, botData, i, true);
+               }
+               if (!state.cleared) {
+                  state.cleared = true;
+                  botData.clearTtsCooldown();
+               }
+               LOGGER.info("PlayerEngine: TTS fallback timer fired for bot={} (no prompter ACK)", botData.getName());
+            }
+         }
+         // Past deadline (whether it just fired or was already message_done'd): drop the entry.
+         TTS_FALLBACK_TIMERS.remove(botUuid);
+      }
+   }
+
+   /**
+    * Fire the valid boundary at {@code segIndex} exactly once for {@code botData}. Idempotent across
+    * duplicate {@code segment_done} packets AND across the timer/ACK race (whichever marks the index
+    * first wins; the other is a no-op). Dispatches via the existing command path; onCommandListGenerated
+    * already hops to the server tick thread via {@code server.execute}.
+    */
+   private static void fireSegment(UUID botUuid, AgentConversationData botData, int segIndex, boolean fromTimer) {
+      java.util.List<com.player2.playerengine.player2api.MarkerParser.SegmentBoundary> boundaries =
+            botData.getPendingSegmentActions();
+      if (segIndex < 0 || segIndex >= boundaries.size()) {
+         return;
+      }
+      // Get-or-create the dedup state so idempotency holds even if the timer entry was already GC'd
+      // (e.g. a very late duplicate segment_done). A bare new state has an immediate-past deadline but
+      // is inactive-by-omission: the tick driver only fires ACTIVE entries, so a dedup-only state never
+      // triggers the liveness path; it is dropped on the next tick after its (already-past) deadline.
+      TtsFallbackState state = TTS_FALLBACK_TIMERS.computeIfAbsent(botUuid, k -> {
+         TtsFallbackState s = new TtsFallbackState(System.nanoTime());
+         s.active = false;
+         s.cleared = true;
+         return s;
+      });
+      if (!state.firedSegments.add(segIndex)) {
+         return; // already fired
+      }
+      com.player2.playerengine.player2api.MarkerParser.SegmentBoundary b = boundaries.get(segIndex);
+      String action = b.action().name().toLowerCase(java.util.Locale.ROOT);
+      LOGGER.info("PlayerEngine: firing bodylang segment bot={} seg={} action={} fromTimer={}",
+            botData.getName(), segIndex, action, fromTimer);
+      AgentSideEffects.onCommandListGenerated(botData.getMod(), "bodylang " + action,
+            botData::onCommandFinish);
    }
 
    private static void copyToolOverridesReadmeIfAbsent() {

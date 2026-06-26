@@ -52,6 +52,10 @@ public abstract class SingleTaskChain extends TaskChain {
    }
 
    public void setTask(Task task) {
+      if (this.mainTask != null && this.mainTask.controller == null) {
+         this.mainTask.controller = this.controller;
+      }
+
       boolean replace =
             this.mainTask == null
                   || this.mainTask.isFinished()
@@ -64,6 +68,7 @@ public abstract class SingleTaskChain extends TaskChain {
 
          this.mainTask = task;
          if (task != null) {
+            task.controller = this.controller;
             task.reset();
          }
       }

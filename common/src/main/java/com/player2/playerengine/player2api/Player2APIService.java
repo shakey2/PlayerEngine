@@ -32,6 +32,7 @@ import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
 
@@ -293,22 +294,70 @@ public class Player2APIService {
       return api("POST", "/v1/chat/completions", requestBody);
    }
 
+   /**
+    * Single-string TTS path (no inline markers): one chunk, no boundaries. Backward-compatible
+    * entry point used by callers that have no parsed marker data.
+    */
    public void textToSpeech(String message, Character character, UUID botUuid,
          Consumer<Map<String, JsonElement>> onFinish) {
+      textToSpeech(message, java.util.List.of(message), java.util.List.of(), character, botUuid, onFinish);
+   }
+
+   /**
+    * TTS dispatch with TTS-timed gesture chunks/boundaries (Workstream 2 + 4).
+    *
+    * <p><strong>FROZEN stream_tts S2C wire field order (the client mirrors this exact order):</strong>
+    * <pre>
+    *   writeUtf(clientId)
+    *   writeUtf("")                       // reserved (unused web-stream field)
+    *   writeUtf(message)                  // STRIPPED text (no [bl:...] markers) — full message
+    *   writeDouble(1)                     // speed
+    *   writeVarInt(voiceIds.length); per id: writeUtf(id)
+    *   writeUtf(botUuid)                  // ---- end of the LEGACY trailing field ----
+    *   // ==== appended bodylang-gesture fields (FROZEN — append-only, never reorder) ====
+    *   writeVarInt(chunkCount); per chunk: writeUtf(chunkText)        // ordered, stripped chunks
+    *   writeVarInt(boundaryCount);                                    // VALID boundaries only
+    *   per boundary: writeVarInt(chunkIndexAfter); writeUtf(actionName)  // actionName = lowercase enum
+    * </pre>
+    * Invalid markers are omitted from the wire entirely (reported to both audiences at parse time), so
+    * {@code segIndex} in the {@code segment_done} C2S packet indexes into this VALID-ONLY boundary list.
+    *
+    * @param message        full stripped text (chat + log + markSpeakingFor length all use this)
+    * @param chunks         ordered stripped chunks (split at marker positions; never null/empty)
+    * @param validBoundaries ordered VALID-only gesture boundaries (invalid ones already filtered out)
+    */
+   public void textToSpeech(String message, java.util.List<String> chunks,
+         java.util.List<MarkerParser.SegmentBoundary> validBoundaries, Character character, UUID botUuid,
+         Consumer<Map<String, JsonElement>> onFinish) {
       try {
-         ServerPlayer owner = (ServerPlayer) controller.getOwner();
-         MinecraftServer server = owner.getServer();
+         // WS4 re-center: the audible radius AND the same-dimension check anchor on the BOT ENTITY
+         // (controller.getPlayer(), a LivingEntity — NOT a ServerPlayer) so the bot's voice follows
+         // the bot, symmetric with bot-centered AI hearing. NEVER cast controller.getPlayer() to
+         // ServerPlayer (a bot is not a player — it would ClassCastException). The old
+         // "ServerPlayer owner = (ServerPlayer) controller.getOwner();" anchor was removed.
+         Entity botEntity = controller.getPlayer();
+         if (botEntity == null) return;
+         MinecraftServer server = botEntity.getServer();
          if (server == null) return;
 
          double TTS_RANGE = 64.0;
+
+         if (chunks == null || chunks.isEmpty()) {
+            chunks = java.util.List.of(message);
+         }
+         if (validBoundaries == null) {
+            validBoundaries = java.util.List.of();
+         }
 
          for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             if (!TtsClientPreferenceStore.isTtsEnabled(player.getUUID())) {
                continue;
             }
-            if (player.level() == owner.level() && player.distanceTo(owner) <= TTS_RANGE) {
+            if (player.level() == botEntity.level()
+                  && player.distanceTo((Entity) botEntity) <= TTS_RANGE) {
                RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(),
                      player.registryAccess());
+               // ---- legacy stream_tts fields (unchanged order) ----
                buf.writeUtf(clientId);
                buf.writeUtf("");
                buf.writeUtf(message);
@@ -318,11 +367,30 @@ public class Player2APIService {
                   buf.writeUtf(id);
                }
                buf.writeUtf(botUuid.toString());
+               // ---- appended bodylang-gesture fields (REUSE this per-loader buf — do NOT make a
+               //      new buffer; the RegistryFriendlyByteBuf class is the 1.21.1 loader delta) ----
+               buf.writeVarInt(chunks.size());
+               for (String chunkText : chunks) {
+                  buf.writeUtf(chunkText);
+               }
+               buf.writeVarInt(validBoundaries.size());
+               for (MarkerParser.SegmentBoundary b : validBoundaries) {
+                  buf.writeVarInt(b.chunkIndexAfter());
+                  buf.writeUtf(b.action().name().toLowerCase(java.util.Locale.ROOT));
+               }
 
                player.connection.send(NetworkManager.toPacket(NetworkManager.Side.S2C,
                      ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"), buf));
             }
          }
+
+         // WS4 server-side fallback timer (liveness backstop): keyed by botUuid, generous deadline =
+         // markSpeakingFor estimate + slack. Fires unfired VALID boundaries in order then clears the
+         // cooldown if no prompter message_done arrives (client crash / bot-to-bot / ambient / prompter
+         // moved away). Idempotent vs. late ACKs; dispatch runs on the server tick thread.
+         com.player2.playerengine.PlayerEngine.scheduleTtsFallbackTimer(server, botUuid,
+               message == null ? 0 : message.length());
+
          onFinish.accept(null);
       } catch (Exception var9) {
          LOGGER.error("Error broadcasting TTS", var9);

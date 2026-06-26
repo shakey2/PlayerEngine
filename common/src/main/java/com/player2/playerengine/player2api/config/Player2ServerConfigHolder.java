@@ -36,7 +36,8 @@ public final class Player2ServerConfigHolder {
         LOGGER.info("Player2 RAG config: ragLiveEnabled={} ragTopK={} ragFallbackToFullList={} ragMinGoalChars={}",
                 cached.isRagLiveEnabled(), cached.getRagTopKClamped(), cached.isRagFallbackToFullList(),
                 cached.getRagMinGoalCharsClamped());
-        LOGGER.info("Player2 TTS pacing config: botTtsPlaybackAckEnabled={}", cached.isBotTtsPlaybackAckEnabled());
+        LOGGER.info("Player2 TTS pacing config: botTtsPlaybackAckEnabled={} bodylangMarkerPauseMs={} bodylangGaplessPrefetch={}",
+                cached.isBotTtsPlaybackAckEnabled(), cached.getBodylangMarkerPauseMs(), cached.isBodylangGaplessPrefetch());
         LOGGER.info("Player2 bot lifecycle config: serverOverridesPlayerConfig={} serverAutoRespawn={} serverBotPermadeath={}",
                 cached.isServerOverridesPlayerConfig(), cached.isServerAutoRespawn(),
                 cached.getServerBotPermadeath() == null ? "unset" : cached.getServerBotPermadeath());
@@ -137,6 +138,12 @@ public final class Player2ServerConfigHolder {
         if (obsCap < 0 || obsCap > 50) {
             LOGGER.warn("Player2 config: modIntelligenceMaxObservedSamplesPerSubject out of range 0–50 (got {}); using 5.", obsCap);
             c.setModIntelligenceMaxObservedSamplesPerSubject(5);
+        }
+
+        int markerPause = c.getBodylangMarkerPauseMs();
+        if (markerPause < 0 || markerPause > 2000) {
+            LOGGER.warn("Player2 config: bodylangMarkerPauseMs out of range 0–2000 (got {}); clamping.", markerPause);
+            c.setBodylangMarkerPauseMs(markerPause); // setter clamps to [0, 2000]
         }
     }
 

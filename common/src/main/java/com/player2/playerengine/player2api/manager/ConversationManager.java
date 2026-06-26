@@ -347,16 +347,24 @@ public class ConversationManager {
         data.onGreeting();
     }
 
+    public static void sendReturnMessage(PlayerEngineController mod, Character character, String ownerName) {
+        LOGGER.info("Sending return message character={} owner={}", character, ownerName);
+        AgentConversationData data = getOrCreateEventQueueData(mod);
+        data.onReturn(ownerName);
+    }
+
+    public static void sendDeathRevival(PlayerEngineController mod, Character character, String deathCause) {
+        LOGGER.info("Sending death revival character={} cause={}", character, deathCause);
+        AgentConversationData data = getOrCreateEventQueueData(mod);
+        data.onDeathRevival(deathCause);
+    }
+
     public static void resetMemory(PlayerEngineController mod) {
         mod.getAIPersistantData().clearHistory();
     }
 
     private static boolean isCloseToPlayer(AgentConversationData data, String userName) {
-        LOGGER.info("Passing msg btw {} <-> {}, owner {}", data.getName(), userName, data.getMod().getOwnerUsername());
-        if(data.getMod().getOwnerUsername().equals(userName)){
-            LOGGER.info("is owner", data.getName(), userName);
-            return true;
-        }
+        LOGGER.info("Passing msg btw {} <-> {}", data.getName(), userName);
         return StatusUtils.getDistanceToUsername(data.getMod(), userName) < messagePassingMaxDistance;
     }
 

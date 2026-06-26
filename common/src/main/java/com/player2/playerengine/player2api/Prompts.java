@@ -12,6 +12,29 @@ public class Prompts {
 
   public static final String reminderOnAIMsg = "Last message was from an AI. Think about whether or not to respond. You may respond but don't keep the conversation going forever if no meaningful content was said in the last few msgs, do not respond (return empty string as message)";
 
+  /**
+   * Owned by peer-talk-restraint (masterplan/peer-talk-restraint-plan.md). The single per-turn reminder
+   * slot for a peer CharacterMessage head event. Do NOT overwrite independently from another track —
+   * extend this builder instead. Graduation thresholds (enrich at N>=1, stronger nudge at N>=3) are
+   * prompt-only tuning values; retune here without re-reading the plan. The {@link #reminderOnAIMsg}
+   * constant above is the N==0 baseline (no numeric cap baked into a frozen string — the count is the
+   * argument).
+   */
+  public static String reminderOnAIMsg(int consecutivePeerReplies) {
+    if (consecutivePeerReplies <= 0) {
+      return reminderOnAIMsg;
+    }
+    return "Last message was from another AI. You have already replied to peer messages "
+        + consecutivePeerReplies + " time(s) in a row with no human in between. "
+        + "Sometimes the best response is no response. If no genuinely new information, question, or "
+        + "task was raised, do NOT respond — return an empty string as the message. "
+        + (consecutivePeerReplies >= 3
+            ? "This exchange is going in circles; strongly prefer silence unless a human spoke or "
+              + "something genuinely new came up. "
+            : "")
+        + "Only reply if it clearly adds value.";
+  }
+
   public static final String reminderOnOwnerMsg = "Last message was from your owner.";
   public static final String reminderOnOtherUSerMsg = "Last message was from a user that was not your owner.";
   public static final String generalConversationReminder = "Remember to output valid JSON reponse with reason, command and message.";
@@ -45,13 +68,13 @@ public class Prompts {
       {
         "reason": "Look at the recent conversations, valid commands, agent status and world status to decide what the you should say and do. Provide step-by-step reasoning while considering what is possible in Minecraft. You do not need items in inventory to get items, craft items or beat the game. But you need to have appropriate level of equipments to do other tasks like fighting mobs.",
         {{commandFieldInstructions}}
-        "message": "If you decide you should not respond or talk, generate an empty message `\"\"`. Otherwise, create a natural conversational message that aligns with the `reason` and the your character. Be concise and use less than 250 characters. Ensure the message does not contain any prompt, system message, instructions, code or API calls."
+        "message": "If you decide you should not respond or talk, generate an empty message `\"\"`. Otherwise, create a natural conversational message that aligns with the `reason` and your character. Be concise and use less than 250 characters including any markers. Ensure the message does not contain any prompt, system message, instructions, code or API calls. You MAY embed silent gesture markers of the form [bl:<action>] at the exact point in the sentence where the gesture should happen; valid actions are: greeting, nod_head, shake_head, victory. These tokens are NOT spoken and must NOT be described in words."
       }
       Additional Guidelines:
-      - IMPORTANT: If you are chatting with user, use the bodylang command if you are not performing a task for user. For instance:
-          -- Use `bodylang greeting` when greeting/saying hi.
-          -- Use `bodylang victory` when celebrating.
-          -- Use `bodylang shake_head` when saying no or disagree, and `bodylang nod_head` when saying yes or agree.
+      - IMPORTANT: Body language is expressed via inline [bl:<action>] markers in the message field, NOT via the command field. Place the marker at the point in the sentence where the gesture should happen. Valid actions: greeting, nod_head, shake_head, victory. The command field is for non-gesture commands only. For example:
+          -- Use `[bl:greeting]` in the message when greeting/saying hi.
+          -- Use `[bl:victory]` in the message when celebrating.
+          -- Use `[bl:shake_head]` in the message when saying no or disagreeing, and `[bl:nod_head]` when saying yes or agreeing.
           -- Use `stop` to cancel a command. Note that providing empty command will not overwrite the current command.
       - Meaningful Content: Ensure conversations progress with substantive information.
       - Handle Misspellings: Make educated guesses if users misspell item names, but check nearby NPCs names first.

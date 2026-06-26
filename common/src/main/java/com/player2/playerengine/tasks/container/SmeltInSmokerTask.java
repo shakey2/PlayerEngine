@@ -8,11 +8,12 @@ import com.player2.playerengine.tasks.ResourceTask;
 import com.player2.playerengine.tasks.construction.PlaceBlockNearbyTask;
 import com.player2.playerengine.tasks.movement.GetCloseToBlockTask;
 import com.player2.playerengine.tasks.movement.TimeoutWanderTask;
-import com.player2.playerengine.tasks.resources.CollectFuelTask;
+import com.player2.playerengine.tasks.cooking.FuelPlanner;
+import com.player2.playerengine.tasks.cooking.FuelPlanner.DeficitCandidate;
+import com.player2.playerengine.tasks.cooking.FuelPlanner.FuelPlan;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.util.ItemTarget;
 import com.player2.playerengine.util.SmeltTarget;
-import com.player2.playerengine.util.helpers.StorageHelper;
 import com.player2.playerengine.util.time.TimerGame;
 import com.player2.playerengine.automaton.api.entity.IInventoryProvider;
 import com.player2.playerengine.automaton.api.entity.LivingEntityInventory;
@@ -29,11 +30,24 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 
 public class SmeltInSmokerTask extends ResourceTask {
+   /** Vanilla smoker cook duration per item, in game ticks (100, NOT 200 — handed RAW to {@link FuelPlanner}). */
+   private static final int SMOKER_COOK_TICKS = 100;
+   private static final FuelPlanner FUEL_PLANNER = new FuelPlanner();
+
    private final SmeltTarget[] targets;
    private final TimerGame smeltTimer = new TimerGame(5.0);
    private BlockPos smokerPos = null;
    private boolean isSmelting = false;
    private SmeltInSmokerTask.SmokerCache cache;
+   // CACHED-INSTANCE CONTRACT: isEqualResource compares only `targets`, so the Task framework keeps ONE
+   // cached SmeltInSmokerTask while a food wrapper re-constructs an equal candidate every tick. The
+   // mutable state below (single fuel-gather latch + chosen plan) persists for the whole batch on that
+   // cached instance. isEqualResource MUST NOT start comparing these fields (would reset the latch -> re-spiral).
+   private boolean fuelGatherAttempted = false;
+   // Whether a fuel gather actually ran (candidate found AND resolved to a real task). Drives the
+   // truthful terminal message: "gathered but still short" vs "no fuel type available to gather".
+   private boolean fuelGatherRan = false;
+   private FuelPlan currentPlan = null;
 
    public SmeltInSmokerTask(SmeltTarget... targets) {
       super(extractItemTargets(targets));
@@ -85,16 +99,58 @@ public class SmeltInSmokerTask extends ResourceTask {
             return null;
          } else {
             this.smeltTimer.setInterval(10 * currentTarget.getItem().getTargetCount());
-            int fuelNeeded = (int)Math.ceil(currentTarget.getItem().getTargetCount() / 8.0);
+            int batchCount = currentTarget.getItem().getTargetCount();
             if (!this.isSmelting) {
                if (!controller.getItemStorage().hasItem(currentTarget.getMaterial())) {
                   this.setDebugState("Collecting raw food: " + currentTarget.getMaterial());
                   return TaskCatalogue.getItemTask(currentTarget.getMaterial());
                }
 
-               if (StorageHelper.calculateInventoryFuelCount(controller) < fuelNeeded) {
-                  this.setDebugState("Collecting fuel.");
-                  return new CollectFuelTask(fuelNeeded);
+               // Fuel gate in SMELT-OPERATIONS via FuelPlanner using the RAW 100-tick smoker value (the
+               // exact case the old /200 shortcut got wrong). A present plan covers the WHOLE batch from
+               // one fuel type and names the chosen fuel item + exact unit count for the LOAD step.
+               Optional<FuelPlan> plan = FUEL_PLANNER.plan(batchCount, SMOKER_COOK_TICKS, controller, null);
+               if (plan.isPresent()) {
+                  this.currentPlan = plan.get();
+               } else {
+                  // Plan empty: try ONE gather pass for the smallest-deficit acquirable fuel (deficitFor
+                  // encodes the no-spiral policy). The fuelGatherAttempted latch on the cached instance
+                  // makes this run exactly once per batch. fuelGatherRan records whether a gather actually
+                  // ran (candidate found AND resolved) so the terminal message is truthful per subcase.
+                  if (!this.fuelGatherAttempted) {
+                     this.fuelGatherAttempted = true;
+                     Optional<DeficitCandidate> deficit = FUEL_PLANNER.deficitFor(batchCount, SMOKER_COOK_TICKS, controller, null);
+                     if (deficit.isPresent()) {
+                        DeficitCandidate cand = deficit.get();
+                        // Resolve via FuelPlanner so log species with no Item-keyed task fall back to the
+                        // generic "log"/"planks" catalogue entry instead of silently returning null.
+                        Task gather = FuelPlanner.gatherTaskFor(cand);
+                        if (gather != null) {
+                           this.fuelGatherRan = true;
+                           this.setDebugState("Collecting fuel: " + cand.item());
+                           return gather;
+                        }
+                     }
+                  }
+                  // Single gather attempt spent (or no acquirable fuel) and plan STILL empty -> terminal
+                  // fuel shortfall. Report truthfully to BOTH audiences and self-stop so the wrapper
+                  // completes the get-step (never idle-spin on unsourceable fuel).
+                  int smelted = controller.getItemStorage().getItemCount(currentTarget.getItem());
+                  String itemName = currentTarget.getItem().getMatches()[0].getDescription().getString();
+                  // Distinguish "gathered but still short" from "no acquirable fuel type to even try" so
+                  // the model is never told we tried to gather when no gather ran (truthfulness).
+                  String playerTail = this.fuelGatherRan
+                     ? " — gathered more fuel but it still wasn't enough."
+                     : " — out of fuel and no fuel was available to gather.";
+                  String modelTail = this.fuelGatherRan
+                     ? ", gathered fuel but still short"
+                     : ", no acquirable fuel type (coal needs a pickaxe; no logs/planks reachable)";
+                  controller.reportAgenticProgress(
+                     "Cooked " + smelted + " of " + batchCount + " " + itemName + playerTail, true);
+                  this.recordFailureReason(
+                     "smoke incomplete: cooked " + smelted + "/" + batchCount + " " + itemName + modelTail);
+                  this.stop(this);
+                  return null;
                }
             }
 
@@ -142,12 +198,35 @@ public class SmeltInSmokerTask extends ResourceTask {
                   return null;
                } else {
                   LivingEntityInventory playerInv = ((IInventoryProvider)controller.getEntity()).getLivingInventory();
-                  if (((MixinAbstractFurnaceBlockEntity)smoker).getPropertyDelegate().get(0) <= 1 && smoker.getItem(1).isEmpty()) {
-                     this.setDebugState("Adding fuel.");
-                     Item fuelItem = controller.getModSettings().getSupportedFuelItems()[0];
-                     int fuelSlotIndex = playerInv.getSlotWithStack(new ItemStack(fuelItem));
-                     if (fuelSlotIndex != -1) {
-                        smoker.setItem(1, playerInv.removeItem(fuelSlotIndex, fuelNeeded));
+                  // Refuel whenever the fuel slot is empty (drop the litTime AND-clause) so larger batches
+                  // refuel mid-batch. Load the PLAN-chosen fuel item, accumulating up to the planned unit
+                  // count across ALL inventory slots holding it.
+                  // INCREMENTAL BY DESIGN: the fuel slot holds at most one stack (64), so we cap at 64. When
+                  // the plan needs more than a stack, the empty-slot guard re-enters next cycle to top up
+                  // from the SAME currentPlan.fuelCount(). Do NOT raise this cap to load >64 into one slot.
+                  if (smoker.getItem(1).isEmpty() && this.currentPlan != null) {
+                     this.setDebugState("Adding fuel: " + this.currentPlan.fuelItem());
+                     Item fuelItem = this.currentPlan.fuelItem();
+                     int want = Math.min(this.currentPlan.fuelCount(), 64);
+                     ItemStack loaded = ItemStack.EMPTY;
+                     while (want > 0) {
+                        int fuelSlotIndex = playerInv.getSlotWithStack(new ItemStack(fuelItem));
+                        if (fuelSlotIndex == -1) {
+                           break;
+                        }
+                        ItemStack pulled = playerInv.removeItem(fuelSlotIndex, want);
+                        if (pulled.isEmpty()) {
+                           break;
+                        }
+                        if (loaded.isEmpty()) {
+                           loaded = pulled;
+                        } else {
+                           loaded.grow(pulled.getCount());
+                        }
+                        want -= pulled.getCount();
+                     }
+                     if (!loaded.isEmpty()) {
+                        smoker.setItem(1, loaded);
                         smoker.setChanged();
                      }
                   }

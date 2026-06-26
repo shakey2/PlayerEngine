@@ -69,7 +69,14 @@ public class CollectFoodTask extends Task {
       blackListChickenJockeys(this.controller);
       blacklistPillagerHayBales(this.controller);
       SmeltTarget toSmelt = this.getBestSmeltTarget(this.controller);
-      if (toSmelt != null) {
+      // Spin guard: if the cached SmeltInSmokerTask child self-stopped on a fuel shortfall, do NOT
+      // re-spawn it (the raw food is still in inventory, so getBestSmeltTarget keeps returning non-null
+      // and we would re-stall forever). The leaf already reported the shortfall to both audiences; fall
+      // through to the other food strategies instead. CollectFoodTask is a plain Task (not @get-tracked),
+      // so there is no GetCommand model channel to propagate to here — the leaf's broadcast suffices.
+      boolean smokerFuelStalled = this.thisOrChildSatisfies(
+         task -> task instanceof SmeltInSmokerTask leaf && leaf.stopped() && leaf.getAggregatedFailureReason().isPresent());
+      if (toSmelt != null && !smokerFuelStalled) {
          this.setDebugState("Smelting food");
          return new SmeltInSmokerTask(toSmelt);
       } else {

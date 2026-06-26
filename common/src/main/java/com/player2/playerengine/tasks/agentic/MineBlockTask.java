@@ -71,6 +71,7 @@ public final class MineBlockTask extends Task {
         PARTIAL_NO_DROPS,
         PARTIAL_TIMEOUT,
         PARTIAL_RANGE_EXHAUSTED,
+        PARTIAL_DROPS_LOST,
         FAILED
     }
 
@@ -82,11 +83,15 @@ public final class MineBlockTask extends Task {
      * <ul>
      *   <li>{@link #TIMEOUT} — genuine overall timeout; more blocks may remain, retrying can continue.</li>
      *   <li>{@link #RANGE_EXHAUSTED} — no more matching blocks within range; the bot must relocate.</li>
+     *   <li>{@link #DROPS_UNREACHABLE} — one or more correct-tool breaks produced a drop that could not be
+     *       reached within the pickup budget (fell into water/void). The ore WAS destroyed, so this is still
+     *       a partial SUCCESS with a visible degradation — never a failure.</li>
      * </ul>
      */
     private enum PartialCause {
         TIMEOUT,
-        RANGE_EXHAUSTED
+        RANGE_EXHAUSTED,
+        DROPS_UNREACHABLE
     }
 
     /**
@@ -94,7 +99,8 @@ public final class MineBlockTask extends Task {
      * {@code SmeltDeferredTask.Outcome}. {@code reasonToken} is the raw machine token the task emitted
      * (the command humanizes it for both audiences); it is null on clean success.
      */
-    public record Outcome(OutcomeKind kind, int mined, int noDrops, String blockId, String reasonToken) {}
+    public record Outcome(OutcomeKind kind, int mined, int noDrops, int lostDrops, String blockId,
+            String reasonToken) {}
 
     private final MineBlockParams params;
     private final AgenticRunRegistry.AgenticRunState runState;
@@ -111,12 +117,45 @@ public final class MineBlockTask extends Task {
     /** Resolved minimum tool requirement for the target. */
     private MiningRequirement requirement = MiningRequirement.HAND;
 
+    /**
+     * Wall-clock budget for chasing a single break's drop before abandoning it as unreachable. Long
+     * enough for slow land pathing to a normal drop, short enough to give up on a water/void-trapped
+     * drop well before the 120s overall timeout. NOTE: this BOUNDS the unreachable-drop chase — it does
+     * not PREVENT a short bounded path toward water during the budget window (the pickup child may walk
+     * the bot a little way before the budget trips). A MineBlockParams knob does not exist for this, so a
+     * constant is used deliberately.
+     */
+    private static final long PICKUP_BUDGET_MS = 10_000L;
+
     private long startMs;
     private long settleStartMs = -1L;
+    /** Dedicated per-break pickup-chase timer (NOT shared with settleStartMs). -1L when not chasing. */
+    private long pickupStartMs = -1L;
+
+    /**
+     * Ground-truth pickup baseline, captured the instant {@link #pickupChild} is created.
+     * {@link PickupDroppedItemTask} extends {@code AbstractDoToClosestObjectTask} — it is an INFINITE
+     * task that NEVER flips {@code isFinished()}/{@code stopped()} on its own; when no target drop
+     * remains it just wanders. So collection CANNOT be detected from the child finishing — it is
+     * detected from world/inventory STATE instead: a positive delta of {@link #pickupItem}'s inventory
+     * count versus {@link #pickupPreCount} means the item entered the inventory (including by the
+     * vanilla proximity auto-pickup that fires while the child is still pathing). {@link #pickupTarget}
+     * is the tracked drop entity, used both to corroborate the success predicate (it must be removed,
+     * i.e. picked up/merged) and at budget-expiry to distinguish a destroyed drop (void/fire/lava) from
+     * one that is still physically present but unreachable. {@link #pickupExpected} is this break's drop
+     * stack size: success requires the inventory delta to reach it (so an unrelated same-type item
+     * trickling in cannot be mistaken for THIS drop). All null/-1 when not chasing.
+     */
+    private Item pickupItem;
+    private int pickupPreCount = -1;
+    private int pickupExpected = -1;
+    private ItemEntity pickupTarget;
 
     private int minedTotal;
     /** Blocks broken with an insufficient tool (vanilla suppressed their drops). Never fabricated. */
     private int minedNoDrops;
+    /** Correct-tool breaks whose drop could not be reached within {@link #PICKUP_BUDGET_MS}. */
+    private int lostDrops;
 
     /** Position currently being broken. */
     private BlockPos activePos;
@@ -401,10 +440,16 @@ public final class MineBlockTask extends Task {
         if (!breakChild.isFinished() && !breakChild.stopped()) {
             return breakChild; // still breaking
         }
-        // Block broken (now air) — move to collection.
+        // Block broken (now air) — move to collection. Count-at-BREAK: minedTotal is the single source
+        // of truth for "blocks broken" and is incremented here exactly once per break, so a broken-but-
+        // uncollected block (drop fell into water/void) is never miscounted as 0. The collect() paths no
+        // longer increment minedTotal (that would double-count).
         breakChild = null;
         this.phase = Phase.COLLECTING;
         this.settleStartMs = -1L;
+        this.pickupStartMs = -1L;
+        minedTotal++;
+        updateProgress();
         setDebugState(phase.name());
         return null;
     }
@@ -415,10 +460,9 @@ public final class MineBlockTask extends Task {
         // No-drops detection (wrong tool): vanilla already produced no drop — we OBSERVE and report it,
         // we never fabricate items. Count it and skip the pickup loop for this block.
         if (usedWrongTool) {
-            minedNoDrops++;
-            minedTotal++;
+            minedNoDrops++; // minedTotal already counted at break.
             usedWrongTool = false;
-            pickupChild = null;
+            clearPickupState();
             activePos = null;
             report("broke " + describeTarget() + " but my " + tierWord()
                     + " tool isn't strong enough — got no drops.", true);
@@ -448,7 +492,7 @@ public final class MineBlockTask extends Task {
                     setDebugState(phase.name() + ":waiting-for-drop");
                     return null;
                 }
-                minedTotal++;
+                // minedTotal already counted at break.
                 activePos = null;
                 updateProgress();
                 this.phase = Phase.FINDING_BLOCK;
@@ -458,23 +502,110 @@ public final class MineBlockTask extends Task {
             ItemEntity target = nearby.get();
             Item item = target.getItem().getItem();
             int count = Math.max(1, target.getItem().getCount());
+            // Capture the ground-truth pickup baseline BEFORE the child runs. Because the pickup child is
+            // infinite and never self-finishes, collection is detected below from the inventory delta of
+            // this exact item — NOT from the child stopping. pickupTarget corroborates void/destroyed vs.
+            // still-present-but-unreachable at budget expiry.
+            pickupItem = item;
+            pickupPreCount = this.controller.getItemStorage().getItemCount(item);
+            pickupExpected = count;
+            pickupTarget = target;
             pickupChild = new PickupDroppedItemTask(new ItemTarget(item, count), true);
             report("collecting " + ItemHelper.stripItemName(item) + " drop", false);
             setDebugState(phase.name() + ":pickup");
             return pickupChild;
         }
 
-        if (!pickupChild.isFinished() && !pickupChild.stopped()) {
-            return pickupChild; // still collecting
+        // PRIMARY success detector — ground truth from world/inventory STATE (the player-cited evidence).
+        // PickupDroppedItemTask is infinite and never self-finishes, so we MUST detect collection from
+        // state, not from the child stopping. This runs every tick: the instant THIS break's drop enters
+        // the inventory (by walking onto it OR by vanilla proximity auto-pickup while the child still
+        // paths), we stop the infinite child, count NOTHING as lost, and advance immediately — no 10s
+        // stall, no false "lost the drop" report.
+        //
+        // Robust predicate (avoids crediting an UNRELATED same-type item that trickled in concurrently
+        // — e.g. a previous session's stray raw_iron proximity-picked while pathing). We require EITHER:
+        //   (a) the tracked drop entity is actually removed (definitive: it was picked up / merged), OR
+        //   (b) the inventory delta has reached this break's full expected stack size.
+        // Either alone is conclusive that THIS drop landed; (b) backstops the case where the tracked
+        // entity merged into another stack (its reference still "removed" but only flips after the merge).
+        if (pickupItem != null) {
+            int delta = this.controller.getItemStorage().getItemCount(pickupItem) - pickupPreCount;
+            boolean targetGone = pickupTarget != null && pickupTarget.isRemoved();
+            if (delta > 0 && (targetGone || delta >= pickupExpected)) {
+                clearPickupState();
+                activePos = null;
+                settleStartMs = -1L; // stale-timer guard for the next break.
+                updateProgress();
+                this.phase = Phase.FINDING_BLOCK;
+                setDebugState(phase.name());
+                return null;
+            }
         }
-        // Pickup finished for this break.
-        pickupChild = null;
-        minedTotal++;
+
+        if (!pickupChild.isFinished() && !pickupChild.stopped()) {
+            // Bound the chase: PickupDroppedItemTask's internal wander never flips isFinished()/stopped()
+            // for an unreachable (water/void-trapped) drop, so without this budget the pickup child would
+            // run until the overall timeout. Start the per-break timer lazily, then ABANDON once it
+            // exceeds PICKUP_BUDGET_MS. minedTotal is already credited at break, so abandoning here loses
+            // only the drop, not the mine count. Clearing pickupChild + switching to FINDING_BLOCK
+            // atomically prevents collect() re-entry for this position (no re-trigger loop).
+            if (pickupStartMs < 0L) {
+                pickupStartMs = System.currentTimeMillis();
+            }
+            if (System.currentTimeMillis() - pickupStartMs > PICKUP_BUDGET_MS) {
+                // Budget expired. The PRIMARY check above ran every tick and did NOT credit this drop, so
+                // the bot genuinely never collected it — this is a TRUE loss (not the old false positive).
+                // Whether the tracked entity is gone (destroyed by void/fire/lava, despawned, or picked up
+                // by another entity) or still physically present (floating on water, unreachable by land
+                // path), the bot did not get it, so it is lost either way.
+                boolean gone = pickupTarget != null && pickupTarget.isRemoved();
+                if (!pickupChild.stopped()) {
+                    pickupChild.stop(this);
+                }
+                clearPickupState();
+                activePos = null;
+                settleStartMs = -1L; // stale-timer guard for the next break.
+                lostDrops++;
+                // Best-effort per-block progress line (report() is throttle- and terminal-gated; the
+                // TERMINAL dual-audience report is the truthfulness carrier, not this line).
+                report("broke " + describeTarget() + " but the drop is unreachable ("
+                        + (gone ? "gone — destroyed or taken by another entity" : "fell into water/void")
+                        + ") — lost the drop, moving on.", true);
+                updateProgress();
+                this.phase = Phase.FINDING_BLOCK;
+                setDebugState(phase.name());
+                return null;
+            }
+            return pickupChild; // still collecting, within budget
+        }
+        // Defensive fallback: the infinite child should never self-terminate (it wanders forever), but if
+        // it ever does, the PRIMARY state check above already ran every tick and did NOT credit this
+        // drop — so the bot did NOT collect it. We must NOT advance as a clean success (that would report
+        // CLEAN_SUCCESS while a drop was genuinely missed — a DESIGN.md §3 truthfulness bug). Treat it as
+        // a true loss, mirroring the budget-expiry path: count it and emit the same best-effort line.
+        boolean gone = pickupTarget != null && pickupTarget.isRemoved();
+        clearPickupState();
         activePos = null;
+        settleStartMs = -1L; // stale-timer guard for the next break.
+        lostDrops++;
+        report("broke " + describeTarget() + " but the drop is unreachable ("
+                + (gone ? "gone — destroyed or taken by another entity" : "fell into water/void")
+                + ") — lost the drop, moving on.", true);
         updateProgress();
         this.phase = Phase.FINDING_BLOCK;
         setDebugState(phase.name());
         return null;
+    }
+
+    /** Clears all per-break pickup chase state (child + ground-truth baseline + chase timer). */
+    private void clearPickupState() {
+        pickupChild = null;
+        pickupItem = null;
+        pickupPreCount = -1;
+        pickupExpected = -1;
+        pickupTarget = null;
+        pickupStartMs = -1L;
     }
 
     // ----------------------------------------------------------------------------------- SETTLING
@@ -491,6 +622,9 @@ public final class MineBlockTask extends Task {
             // Reached only when minedTotal >= maxBlocks with some no-drops breaks: the no-drops branch
             // in finishPartial wins, so the passed cause is unused here.
             finishPartial("mined with insufficient tool", PartialCause.RANGE_EXHAUSTED);
+        } else if (lostDrops > 0) {
+            // Hit the block quota but lost one or more drops — a truthful partial, not CLEAN_SUCCESS.
+            finishPartial("drops unreachable", PartialCause.DROPS_UNREACHABLE);
         } else {
             finishDone();
         }
@@ -502,7 +636,7 @@ public final class MineBlockTask extends Task {
     private void finishDone() {
         this.phase = Phase.DONE;
         this.finished = true;
-        this.outcome = new Outcome(OutcomeKind.CLEAN_SUCCESS, minedTotal, 0, targetLabel(), null);
+        this.outcome = new Outcome(OutcomeKind.CLEAN_SUCCESS, minedTotal, 0, 0, targetLabel(), null);
         recordProgress();
         // Clean success: no degradation set, factual count only (AgenticDegradationSummary mine arm
         // reads mined= for the clean factual clause). minedNoDrops==0 guaranteed on this path.
@@ -516,15 +650,21 @@ public final class MineBlockTask extends Task {
         this.finished = true; // PARTIAL maps to a SUCCEEDED step with a visible degradation note.
         if (minedNoDrops > 0) {
             // No-drops degradation always wins regardless of why we stopped iterating.
-            this.outcome = new Outcome(OutcomeKind.PARTIAL_NO_DROPS, minedTotal, minedNoDrops,
+            this.outcome = new Outcome(OutcomeKind.PARTIAL_NO_DROPS, minedTotal, minedNoDrops, lostDrops,
                     targetLabel(), "incorrect_tool_no_drops");
+        } else if (cause == PartialCause.DROPS_UNREACHABLE || lostDrops > 0) {
+            // Ore WAS broken but one or more drops could not be reached (water/void) — a truthful partial
+            // SUCCESS, never a failure and never CLEAN. Wins over range/timeout so the model is told the
+            // drops were lost, not merely that the bot ran out of blocks or time.
+            this.outcome = new Outcome(OutcomeKind.PARTIAL_DROPS_LOST, minedTotal, 0, lostDrops,
+                    targetLabel(), "drops_unreachable");
         } else if (cause == PartialCause.RANGE_EXHAUSTED) {
             // No more matching blocks within range — NOT a timeout; the bot must relocate to mine more.
-            this.outcome = new Outcome(OutcomeKind.PARTIAL_RANGE_EXHAUSTED, minedTotal, 0,
+            this.outcome = new Outcome(OutcomeKind.PARTIAL_RANGE_EXHAUSTED, minedTotal, 0, 0,
                     targetLabel(), "no_more_blocks_in_range");
         } else {
             // Genuine overall timeout — more blocks may remain; retrying can continue.
-            this.outcome = new Outcome(OutcomeKind.PARTIAL_TIMEOUT, minedTotal, 0,
+            this.outcome = new Outcome(OutcomeKind.PARTIAL_TIMEOUT, minedTotal, 0, 0,
                     targetLabel(), "timeout");
         }
         recordProgress();
@@ -536,6 +676,8 @@ public final class MineBlockTask extends Task {
             // humanizes each token into an actionable model clause.
             if (minedNoDrops > 0) {
                 runState.setMineDegraded(DegradationLevel.PARTIAL, "incorrect_tool_no_drops");
+            } else if (cause == PartialCause.DROPS_UNREACHABLE || lostDrops > 0) {
+                runState.setMineDegraded(DegradationLevel.PARTIAL, "drops_unreachable");
             } else if (cause == PartialCause.RANGE_EXHAUSTED) {
                 runState.setMineDegraded(DegradationLevel.PARTIAL, "no_more_blocks_in_range");
             } else {
@@ -544,10 +686,14 @@ public final class MineBlockTask extends Task {
         }
         setDebugState(Phase.PARTIAL.name());
         this.controller.log("[Agentic] mine_block: partial: " + message
-                + " (mined=" + minedTotal + " noDrops=" + minedNoDrops + " block=" + targetLabel() + ")");
+                + " (mined=" + minedTotal + " noDrops=" + minedNoDrops + " lostDrops=" + lostDrops
+                + " block=" + targetLabel() + ")");
         if (minedNoDrops > 0) {
             report("mined " + minedTotal + " " + describeTarget() + " but " + minedNoDrops
                     + " gave no drops (tool too weak).", true);
+        } else if (cause == PartialCause.DROPS_UNREACHABLE || lostDrops > 0) {
+            report("mined " + minedTotal + " " + describeTarget() + ", lost " + lostDrops
+                    + " drop(s) (unreachable).", true);
         } else {
             report("mined " + minedTotal + " " + describeTarget() + " (" + message + ").", true);
         }
@@ -556,7 +702,8 @@ public final class MineBlockTask extends Task {
     private void terminateFailed(String reason) {
         this.phase = Phase.FAILED;
         this.finished = false; // forced-stop path: stopped()==true && isFinished()==false => FAILED step.
-        this.outcome = new Outcome(OutcomeKind.FAILED, minedTotal, minedNoDrops, targetLabel(), reason);
+        this.outcome = new Outcome(OutcomeKind.FAILED, minedTotal, minedNoDrops, lostDrops,
+                targetLabel(), reason);
         // Hard-failure channel (B1): write the reason to mineProgress so the executor's
         // progressForKind("mine_block") surfaces the SPECIFIC reason to the model (DESIGN.md §3).
         if (runState != null) {
@@ -617,7 +764,8 @@ public final class MineBlockTask extends Task {
     private void recordProgress() {
         if (runState != null) {
             runState.setMineProgress(
-                    "mined=" + minedTotal + " noDrops=" + minedNoDrops + " block=" + targetLabel());
+                    "mined=" + minedTotal + " noDrops=" + minedNoDrops + " lostDrops=" + lostDrops
+                            + " block=" + targetLabel());
         }
     }
 

@@ -13,6 +13,7 @@ import com.player2.playerengine.executor.StepState;
 import com.player2.playerengine.executor.StopReason;
 import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.player2api.AgentCommandUtils;
+import com.player2.playerengine.tasks.ResourceTask;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.tasks.crafting.CraftMacroResourceTask;
 import com.player2.playerengine.tasks.crafting.CraftMacroTasks;
@@ -82,6 +83,13 @@ public class GetCommand extends Command {
       if (trackedTask instanceof CraftMacroResourceTask macro) {
          creationNote = blankToNull(macro.getCreationNote());
          terminationReason = blankToNull(macro.getFailureReason());
+      } else if (trackedTask instanceof ResourceTask rt) {
+         // Legacy smelt/cook shortfall channel: the tracked task for `@get iron_ingot N` / `gold_ingot N`
+         // / `cooked_<food> N` is a ResourceTask (a wrapper like CollectIronIngotTask, or a SmeltInFurnace
+         // /SmeltInSmokerTask leaf direct from the catalogue). getFailureReason() AGGREGATES the reason up
+         // the cached child chain, so a wrapper surfaces its nested smelt leaf's "out of fuel" reason here.
+         // This is the only model-side channel for the legacy smelt path (DESIGN.md §3 dual-audience).
+         terminationReason = rt.getAggregatedFailureReason().map(GetCommand::blankToNull).orElse(null);
       }
       if (genuineFailure) {
          // Player channel: deliver the failure reason as a milestone chat line BEFORE routing
@@ -123,12 +131,21 @@ public class GetCommand extends Command {
       return first + "; " + second;
    }
 
-   /** Prefer the macro task's recorded reason; otherwise a clear generic the model can act on. */
+   /**
+    * Prefer the tracked task's recorded reason; otherwise a clear generic the model can act on. The
+    * reason may come from a {@link CraftMacroResourceTask}, OR from any {@link ResourceTask} (including a
+    * WRAPPER like CollectIronIngotTask whose getFailureReason() aggregates a nested smelt leaf's reason).
+    */
    private static String getFailureReason(Task trackedTask) {
       if (trackedTask instanceof CraftMacroResourceTask macro) {
          String reason = macro.getFailureReason();
          if (reason != null && !reason.isBlank()) {
             return reason;
+         }
+      } else if (trackedTask instanceof ResourceTask rt) {
+         Optional<String> reason = rt.getAggregatedFailureReason();
+         if (reason.isPresent() && !reason.get().isBlank()) {
+            return reason.get();
          }
       }
       return "could not obtain the requested item(s)";

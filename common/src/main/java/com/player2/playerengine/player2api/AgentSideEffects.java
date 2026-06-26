@@ -45,8 +45,18 @@ public class AgentSideEffects {
 
     public static void onEntityMessage(MinecraftServer server, Event.CharacterMessage characterMessage) {
         // message part:
-        if (characterMessage.message() != null && !characterMessage.message().isBlank()) {
-            AgentConversationData sendingCharacterData = characterMessage.sendingCharacterData();
+        AgentConversationData sendingCharacterData = characterMessage.sendingCharacterData();
+        boolean hasText = characterMessage.message() != null && !characterMessage.message().isBlank();
+        // A marker-only message ("[bl:greeting]") strips to empty text (decision 2) but still carries
+        // pending gesture boundaries that MUST dispatch via the TTS/segment path — otherwise the gesture
+        // never fires, no stream_tts is sent, segment_done can never arrive, and the cooldown is never
+        // armed/cleared (a silent non-fire after the model expected the gesture; DESIGN.md §3). So the
+        // TTS dispatch / markSpeakingFor / invalid-marker report / onAICharacterMessage all run when there
+        // is text OR a pending gesture boundary. Only the player CHAT line is gated on actual text (no one
+        // wants a "<bot> " empty chat line for a marker-only turn).
+        java.util.List<MarkerParser.SegmentBoundary> pendingBoundaries = sendingCharacterData.getPendingSegmentActions();
+        boolean hasPendingGesture = pendingBoundaries != null && !pendingBoundaries.isEmpty();
+        if (hasText) {
             String message = String.format("<%s> %s", sendingCharacterData.getName(), characterMessage.message());
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 // if you are an owner, or close, send to player.
@@ -55,12 +65,35 @@ public class AgentSideEffects {
                 broadcastChatToPlayer(server, message, player);
                 // }
             }
-            TTSManager.TTS(characterMessage.message(), sendingCharacterData.getCharacter(),
+        }
+        if (hasText || hasPendingGesture) {
+            // Bodylang TTS-timed gestures: read the chunk list + VALID-only boundaries parsed at
+            // handleLlmResponse off the sending bot's data and forward them so the stream_tts payload
+            // carries the gesture chunks/boundaries (Workstream 1/2). The CharacterMessage.message()
+            // field is already STRIPPED (decision 2), so chat, TTS, and markSpeakingFor all use it. For a
+            // marker-only message the message is empty; the client chunk loop skips synthesis on the empty
+            // chunk and immediately emits segment_done for the boundary.
+            TTSManager.TTS(characterMessage.message(),
+                    sendingCharacterData.getPendingChunks(),
+                    sendingCharacterData.getPendingSegmentActions(),
+                    sendingCharacterData.getCharacter(),
                     sendingCharacterData.getPlayer2apiService(), sendingCharacterData.getUUID());
             // Per-bot speaking cooldown replaces the old server-wide TTS lock: this bot is gated
             // until its message is plausibly done playing client-side, but other bots can keep
-            // dispatching LLM calls in their own billing buckets.
+            // dispatching LLM calls in their own billing buckets. markSpeakingFor STAYS HERE
+            // (decision 4) operating on the now-stripped message — do not move or duplicate it. On a
+            // marker-only (empty) message this arms a near-minimal cooldown, i.e. an immediate gesture.
             sendingCharacterData.markSpeakingFor(characterMessage.message());
+            // Workstream 6 — player-facing report for any INVALID markers the model emitted this turn.
+            // The model already got a truthful InfoMessage at parse time (handleLlmResponse); here the
+            // PLAYER gets a concise, human chat line so neither audience is told a gesture happened that
+            // did not (DESIGN.md §3). Audience-tailored: short line for the player, full note for the model.
+            java.util.List<String> invalidMarkers = sendingCharacterData.getPendingInvalidMarkers();
+            if (invalidMarkers != null && !invalidMarkers.isEmpty()) {
+                String line = String.format("%s tried to gesture '%s' but doesn't know it.",
+                        sendingCharacterData.getName(), String.join("', '", invalidMarkers));
+                broadcastChatToAllPlayers(server, line);
+            }
             ConversationManager.onAICharacterMessage(characterMessage,
                     characterMessage.sendingCharacterData().getUUID());
         }

@@ -38,6 +38,22 @@ public class CollectGoldIngotTask extends ResourceTask {
    @Override
    protected Task onResourceTick(PlayerEngineController mod) {
       if (WorldHelper.getCurrentDimension(mod) == Dimension.OVERWORLD) {
+         // Wrapper terminal propagation: if the cached SmeltInFurnaceTask child self-stopped with a
+         // fuel-shortfall reason, copy it onto THIS wrapper and stop rather than re-spawning a fresh leaf
+         // that would re-stall (and starve onGetComplete). Read-only `sub` walk via thisOrChildSatisfies.
+         String[] childReason = new String[1];
+         this.thisOrChildSatisfies(task -> {
+            if (task instanceof SmeltInFurnaceTask leaf && leaf.stopped()) {
+               leaf.getAggregatedFailureReason().ifPresent(r -> childReason[0] = r);
+               return childReason[0] != null;
+            }
+            return false;
+         });
+         if (childReason[0] != null) {
+            this.recordFailureReason(childReason[0]);
+            this.stop(this);
+            return null;
+         }
          return new SmeltInFurnaceTask(new SmeltTarget(new ItemTarget(Items.GOLD_INGOT, this.count), new ItemTarget(Items.RAW_GOLD, this.count)));
       } else if (WorldHelper.getCurrentDimension(mod) == Dimension.NETHER) {
          int nuggs = mod.getItemStorage().getItemCount(Items.GOLD_NUGGET);

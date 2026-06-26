@@ -66,7 +66,14 @@ public final class Player2PayerResolution {
         return new ApiBillingContext(bill, null);
     }
 
-    private static ServerPlayer findByName(MinecraftServer server, String name) {
+    /**
+     * Name -> online {@link ServerPlayer} linear scan. Package-private (was {@code private}) so the
+     * {@code segment_done}/{@code message_done} C2S handlers can resolve a bot's PROMPTER
+     * (chain initiator) to a present player WITHOUT routing through {@link #resolve} /
+     * {@code ApiBillingContext} (the payer is billing only — never gesture authority). Do NOT
+     * duplicate this scan elsewhere; reuse this single helper so both branches stay in parity.
+     */
+    public static ServerPlayer findByName(MinecraftServer server, String name) {
         if (server == null || name == null) {
             return null;
         }

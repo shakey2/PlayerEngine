@@ -6,8 +6,11 @@ import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.automaton.api.utils.Rotation;
 import com.player2.playerengine.automaton.api.utils.input.Input;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class BodyLanguageTask extends Task {
+    private static final Logger LOGGER = LogManager.getLogger();
 
     public enum Type { GREETING, NOD_HEAD, SHAKE_HEAD, VICTORY }
 
@@ -23,17 +26,33 @@ public class BodyLanguageTask extends Task {
 
     private Task actuallyRunningTask;
 
-    public BodyLanguageTask(String type) {
-        this.type = parseType(type);
+    /** Type-safe constructor — callers must resolve the action to a {@link Type} before constructing. */
+    public BodyLanguageTask(Type type) {
+        this.type = type;
     }
 
-    private static Type parseType(String t) {
-        try { return Type.valueOf(t.toUpperCase()); }
-        catch (IllegalArgumentException e) { return Type.GREETING; }
+    /**
+     * Resolves an action string to a {@link Type}.  Throws {@link IllegalArgumentException} on any
+     * unknown value so no caller can silently default to GREETING — callers must validate first and
+     * report the error to both audiences before constructing a task.
+     */
+    public static Type resolveType(String t) {
+        try {
+            return Type.valueOf(t.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Unknown bodylang action: '" + t + "'. Valid: greeting, nod_head, shake_head, victory.");
+        }
     }
 
     @Override
     protected void onStart() {
+        boolean followWasActive = false;
+        if (this.controller != null) {
+            Task utTask = this.controller.getUserTaskChain().getCurrentTask();
+            followWasActive = (utTask instanceof FollowPlayerTask) && utTask.isActive();
+        }
+        LOGGER.info("[FollowDiag] GESTURE-START: type={} followWasActiveInUserTaskChain={}",
+                type, followWasActive);
         switch (type) {
             case GREETING:
                 actuallyRunningTask = seqGreeting;
@@ -69,6 +88,9 @@ public class BodyLanguageTask extends Task {
 
     @Override
     protected void onStop(Task next) {
+        LOGGER.info("[FollowDiag] GESTURE-STOP: type={} finished={} nextTask={}",
+                type, this.isFinished(),
+                (next != null) ? next.getClass().getSimpleName() : "(none)");
         PlayerEngineController mod = this.controller;
         mod.getInputControls().release(Input.SNEAK);
         mod.getInputControls().release(Input.JUMP);
@@ -86,12 +108,13 @@ public class BodyLanguageTask extends Task {
 
 
     private static PrimitiveSequenceTask makeGreeting() {
+        // A recognizable bow: sneak-hold pitches the player forward visually; the lookRelative
+        // pitch-down + pitch-up reinforces the head-bow read.  Two repetitions = greeting bow.
+        int holdTicks = 8, pauseTicks = 6;
+        int bowCount = 2;
         PrimitiveSequenceTask.Sequence.Builder b = PrimitiveSequenceTask.builder();
-        int sneakCount = 3;
-        int holdTicks = 6, pauseTicks = 6;
-        for (int i = 0; i < sneakCount; i++) {
-            b.jump().waitTicks(pauseTicks).jump().waitTicks(pauseTicks);
-            // b.hold(Input.SNEAK).waitTicks(holdTicks).release(Input.SNEAK).waitTicks(pauseTicks);
+        for (int i = 0; i < bowCount; i++) {
+            b.hold(Input.SNEAK).waitTicks(holdTicks).release(Input.SNEAK).waitTicks(pauseTicks);
         }
         return b.build();
     }
@@ -119,7 +142,7 @@ public class BodyLanguageTask extends Task {
         return PrimitiveSequenceTask.builder()
                 .jump()
                 .waitTicks(4)
-                .lookRelative(new Rotation(180f, 0), 20)   
+                .lookRelative(new Rotation(180f, 0), 20)
                 .lookRelative(new Rotation(-180f, 0), 20)
                 .hold(Input.SNEAK).waitTicks(6).release(Input.SNEAK)
                 .jump()

@@ -431,12 +431,14 @@ public final class AgenticDegradationSummary {
 
     /**
      * Renders a mine_block degradation reason token into a model-facing clause. The mine step records
-     * three partial degradations, all PARTIAL level: the no-drops-on-incorrect-tool case
+     * four partial degradations, all PARTIAL level: the no-drops-on-incorrect-tool case
      * ({@code incorrect_tool_no_drops}), a genuine overall timeout ({@code timeout} — more blocks may
-     * remain, retrying can continue), and range exhaustion ({@code no_more_blocks_in_range} — no more
-     * matching blocks within reach, the bot must RELOCATE to mine more). The factual mined/no-drops
-     * count and target block are parsed from {@code mineProgress}
-     * ({@code "mined=<N> noDrops=<M> block=<id>"}). Hard failures (no tool / unknown block / no
+     * remain, retrying can continue), range exhaustion ({@code no_more_blocks_in_range} — no more
+     * matching blocks within reach, the bot must RELOCATE to mine more), and drops-unreachable
+     * ({@code drops_unreachable} — the ore WAS broken but one or more drops fell into water/void and
+     * could not be collected). The factual mined/no-drops/lost-drops count and target block are parsed
+     * from {@code mineProgress}
+     * ({@code "mined=<N> noDrops=<M> lostDrops=<L> block=<id>"}). Hard failures (no tool / unknown block / no
      * target) do NOT pass through here — they surface via {@code progressForKind("mine_block")}.
      * Defensive: unknown tokens fall through to a generic, reason-preserving form.
      */
@@ -475,6 +477,27 @@ public final class AgenticDegradationSummary {
                     ? "mine partial: timed out after " + mined + " " + what
                             + " — more may remain, retrying can continue"
                     : "mine partial: timed out — more may remain, retrying can continue";
+        }
+        if (r.contains("drops_unreachable")) {
+            // Ore WAS broken but the drop(s) could not be reached (water/void). Tell the model the ore is
+            // gone but those items were not collected, so it answers truthfully — neither claiming full
+            // success nor reporting an outright failure.
+            // parseToken returns -1 when the token is absent/unparseable; never expose a negative
+            // count to the model (it would read literally as "-1 drop(s) unreachable" — a fabricated
+            // figure). Clamp to 0 so the line degrades to a truthful, non-numeric-nonsense statement.
+            int mined = parseToken(progress, "mined=");
+            if (mined < 0) {
+                mined = 0;
+            }
+            int lost = parseToken(progress, "lostDrops=");
+            if (lost < 0) {
+                lost = 0;
+            }
+            String block = parseStringToken(progress, "block=");
+            String what = (block != null && !block.isBlank()) ? block : "block(s)";
+            return "mine partial: mined " + mined + " " + what + " but " + lost
+                    + " drop(s) were unreachable (fell into water/void) — the ore WAS broken but those"
+                    + " items could not be collected";
         }
         // Generic fallback preserves the reason token for the model.
         return reason.isBlank() ? "mine partial" : "mine partial: " + reason;

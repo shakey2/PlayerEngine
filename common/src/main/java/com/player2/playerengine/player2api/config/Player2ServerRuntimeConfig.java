@@ -93,6 +93,24 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     /** When true, owner clients may send {@code tts_playback_done} to early-clear speaker cooldown. */
     private boolean botTtsPlaybackAckEnabled = false;
 
+    /**
+     * Bodylang TTS-timed gestures: legacy inter-chunk pause beat (ms). Clamped to [0, 2000].
+     *
+     * <p><strong>DEPRECATED / no longer consumed:</strong> client TTS playback is now unconditionally
+     * gapless (no pause beat), so this key no longer affects playback. Retained only for config/wire
+     * compatibility.
+     */
+    private int bodylangMarkerPauseMs = 250;
+    /**
+     * Bodylang TTS-timed gestures: when true, prefetch/synthesize the next chunk during the current
+     * chunk's playback to minimize the inter-chunk gap; the marker pause beat then becomes 0.
+     *
+     * <p><strong>DEPRECATED / no longer consumed:</strong> client TTS playback is now UNCONDITIONALLY
+     * gapless (prefetch always on, no pause beat) in {@code PlayerEngineClient.playChunksSequentially},
+     * so this key no longer affects playback. Retained only for config/wire compatibility.
+     */
+    private boolean bodylangGaplessPrefetch = true;
+
     // --- Bot lifecycle: auto-respawn + permadeath toggles ---
 
     /**
@@ -308,6 +326,28 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
 
     public void setBotTtsPlaybackAckEnabled(boolean botTtsPlaybackAckEnabled) {
         this.botTtsPlaybackAckEnabled = botTtsPlaybackAckEnabled;
+    }
+
+    public int getBodylangMarkerPauseMs() {
+        return bodylangMarkerPauseMs;
+    }
+
+    /** Clamped to [0, 2000]. */
+    public void setBodylangMarkerPauseMs(int v) {
+        if (v < 0) {
+            v = 0;
+        } else if (v > 2000) {
+            v = 2000;
+        }
+        this.bodylangMarkerPauseMs = v;
+    }
+
+    public boolean isBodylangGaplessPrefetch() {
+        return bodylangGaplessPrefetch;
+    }
+
+    public void setBodylangGaplessPrefetch(boolean bodylangGaplessPrefetch) {
+        this.bodylangGaplessPrefetch = bodylangGaplessPrefetch;
     }
 
     // --- Bot lifecycle getters/setters ---
