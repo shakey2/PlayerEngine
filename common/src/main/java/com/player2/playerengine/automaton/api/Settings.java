@@ -51,6 +51,14 @@ public final class Settings {
    public final Settings.Setting<Boolean> disableAutoTool = new Settings.Setting<>(false);
    public final Settings.Setting<Double> blockPlacementPenalty = new Settings.Setting<>(20.0);
    public final Settings.Setting<Double> blockBreakAdditionalPenalty = new Settings.Setting<>(2.0);
+   // Respect player structures (anti-vandalism pathing) — see masterplan/respect-player-structures-plan.md.
+   // Master toggle: when false, isProtected() short-circuits to false everywhere (legacy behavior).
+   public final Settings.Setting<Boolean> respectStructuresEnabled = new Settings.Setting<>(true);
+   // Finite cost multiplier applied to breaking/placing on a protected (real-player-placed) block.
+   // Must stay strictly below the 1000000.0 "impossible" gate so a sealed-in bot can always break out.
+   public final Settings.Setting<Double> respectStructuresBreakPenalty = new Settings.Setting<>(500.0);
+   // Hard cap on tracked player-placed positions; oldest whole-chunk eviction past this.
+   public final Settings.Setting<Integer> respectStructuresStoreMaxBlocks = new Settings.Setting<>(200000);
    public final Settings.Setting<Double> jumpPenalty = new Settings.Setting<>(2.0);
    public final Settings.Setting<Double> walkOnWaterOnePenalty = new Settings.Setting<>(3.0);
    public final Settings.Setting<Boolean> allowWaterBucketFall = new Settings.Setting<>(true);

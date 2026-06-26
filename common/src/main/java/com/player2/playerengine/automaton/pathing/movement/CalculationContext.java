@@ -27,6 +27,7 @@ import com.player2.playerengine.automaton.cache.WorldData;
 import com.player2.playerengine.automaton.utils.BlockStateInterface;
 import com.player2.playerengine.automaton.utils.ToolSet;
 import com.player2.playerengine.automaton.utils.accessor.ILivingEntityAccessor;
+import com.player2.playerengine.structureprotection.PlayerPlacedBlockStore;
 import com.player2.playerengine.util.EnchantmentUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.BlockPos.MutableBlockPos;
@@ -49,6 +50,9 @@ import org.jetbrains.annotations.Nullable;
 
 public class CalculationContext {
    private static final ItemStack STACK_BUCKET_WATER = new ItemStack(Items.WATER_BUCKET);
+   /** Clamp bounds for the structure-protection penalty — must stay strictly below the 1000000.0 impossible gate. */
+   protected static final double MIN_PROTECT_PENALTY = 2.0;
+   protected static final double MAX_PROTECT_PENALTY = 999999.0;
    public final boolean safeForThreadedUse;
    public final IBaritone baritone;
    public final Level world;
@@ -83,6 +87,8 @@ public class CalculationContext {
    public final int height;
    private final IInventoryProvider player;
    private final MutableBlockPos blockPos;
+   /** Dimension id ({@code minecraft:overworld}) of this context's world; resolved once (per-path constant). */
+   private final String protectionDimId;
    public final int breathTime;
    public final int startingBreathTime;
    public final boolean allowSwimming;
@@ -99,6 +105,7 @@ public class CalculationContext {
       LivingEntity entity = baritone.getEntityContext().entity();
       this.player = entity instanceof IInventoryProvider ? (IInventoryProvider)entity : null;
       this.world = baritone.getEntityContext().world();
+      this.protectionDimId = this.world.dimension().location().toString();
       this.worldData = (WorldData)baritone.getWorldProvider().getCurrentWorld();
       this.bsi = new BlockStateInterface(this.world);
       this.toolSet = this.player == null ? null : new ToolSet(entity);
@@ -169,11 +176,35 @@ public class CalculationContext {
       return this.get(x, y, z).getBlock();
    }
 
+   /**
+    * The {@code respectStructuresBreakPenalty} multiplier, clamped strictly below the 1000000.0 "impossible"
+    * gate ({@link #MIN_PROTECT_PENALTY}..{@link #MAX_PROTECT_PENALTY}). Read-site clamp so an out-of-range
+    * setting can never trip MovementHelper's {@code >= 1000000} gate and freeze the bot.
+    */
+   protected double protectedBreakPenalty() {
+      double p = this.baritone.settings().respectStructuresBreakPenalty.get();
+      if (p < MIN_PROTECT_PENALTY) {
+         return MIN_PROTECT_PENALTY;
+      }
+      return p > MAX_PROTECT_PENALTY ? MAX_PROTECT_PENALTY : p;
+   }
+
+   /**
+    * Place cost on a protected position: the finite penalty, but with the <em>product</em>
+    * {@code placeBlockCost * penalty} also clamped below the impossible gate (placeBlockCost is itself a
+    * setting, so the product — not just the multiplier — must stay finite).
+    */
+   protected double protectedPlaceCost() {
+      double cost = this.placeBlockCost * protectedBreakPenalty();
+      return cost > MAX_PROTECT_PENALTY ? MAX_PROTECT_PENALTY : cost;
+   }
+
    public double costOfPlacingAt(int x, int y, int z, BlockState current) {
       if (!this.hasThrowaway) {
          return 1000000.0;
       } else {
-         return this.isProtected(x, y, z) ? 1000000.0 : this.placeBlockCost;
+         // Protected = strong-but-FINITE place cost (never the 1000000 impossible gate) so a walled-in bot is not frozen.
+         return this.isProtected(x, y, z) ? protectedPlaceCost() : this.placeBlockCost;
       }
    }
 
@@ -181,7 +212,8 @@ public class CalculationContext {
       if (!this.allowBreak) {
          return 1000000.0;
       } else {
-         return this.isProtected(x, y, z) ? 1000000.0 : 1.0;
+         // Protected = strong-but-FINITE break penalty (last-resort), never the 1000000 impossible gate -> no freeze.
+         return this.isProtected(x, y, z) ? protectedBreakPenalty() : 1.0;
       }
    }
 
@@ -198,15 +230,23 @@ public class CalculationContext {
    }
 
    public boolean canPlaceAgainst(int againstX, int againstY, int againstZ, BlockState state) {
-      return !this.isProtected(againstX, againstY, againstZ) && MovementHelper.canPlaceAgainst(this.bsi, againstX, againstY, againstZ, state);
+      // Protection is NOT consulted here: placing a new block *against* a protected block (using it as a
+      // support face) never modifies the protected block, so gating it would be a hard exclusion (freeze
+      // risk in narrow liquid-pillar/ascend cases). The cost of placing AT a protected position is the
+      // finite penalty in costOfPlacingAt; this face check stays protection-agnostic.
+      return MovementHelper.canPlaceAgainst(this.bsi, againstX, againstY, againstZ, state);
    }
 
    public boolean isProtected(int x, int y, int z) {
-      this.blockPos.set(x, y, z);
-      if (this.player != null) {
+      if (!this.baritone.settings().respectStructuresEnabled.get()) {
+         return false; // toggle off -> legacy behavior (no protection)
       }
-
-      return false;
+      PlayerPlacedBlockStore store = PlayerPlacedBlockStore.get();
+      if (store == null) {
+         return false; // no world store loaded -> nothing protected
+      }
+      this.blockPos.set(x, y, z); // reused mutable pos: contains() reads it synchronously, allocation-free
+      return store.contains(this.protectionDimId, this.blockPos);
    }
 
    public double oxygenCost(double baseCost, BlockState headState) {

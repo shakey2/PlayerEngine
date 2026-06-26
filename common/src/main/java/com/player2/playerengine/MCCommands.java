@@ -36,6 +36,7 @@ import com.player2.playerengine.modintelligence.enrich.ModIntelligenceEnrichment
 import com.player2.playerengine.modintelligence.enrich.ModIntelligenceSpendSafety;
 import com.player2.playerengine.modintelligence.enrich.ModelBlacklist;
 import com.player2.playerengine.agentic.elliegps.EllieGPSStore;
+import com.player2.playerengine.structureprotection.PlayerPlacedBlockStore;
 import com.player2.playerengine.tasks.deferred.DeferredJobStore;
 import com.player2.playerengine.agentic.elliegps.EllieGPSWaypointCountingService;
 import com.player2.playerengine.agentic.elliegps.EllieGPSWaypointIndex;
@@ -118,6 +119,15 @@ public class MCCommands {
                 LOGGER.warn("DeferredJobStore startup load failed — deferred-smelt resume unavailable: {}",
                         e.getMessage());
             }
+            // Respect-player-structures (WS2): load the per-world player-placed-block store so the
+            // pathfinder's isProtected can consult it. Failures log WARN and leave protection off —
+            // never abort server start.
+            try {
+                PlayerPlacedBlockStore.loadForServer(server);
+            } catch (Exception e) {
+                LOGGER.warn("PlayerPlacedBlockStore startup load failed — block protection unavailable: {}",
+                        e.getMessage());
+            }
         });
         LifecycleEvent.SERVER_STOPPING.register(server -> {
             // On dedicated, drop queued AI work before tearing down executors so the next start
@@ -152,6 +162,16 @@ public class MCCommands {
                 }
             } catch (Exception e) {
                 LOGGER.warn("SERVER_STOPPING DeferredJobStore cleanup failed: {}", e.getMessage());
+            }
+            // Respect-player-structures (WS2): final flush + clear of the player-placed-block store
+            // (clear() flushes any dirty dimensions before nulling the singleton).
+            try {
+                PlayerPlacedBlockStore placedStore = PlayerPlacedBlockStore.get();
+                if (placedStore != null) {
+                    placedStore.clear();
+                }
+            } catch (Exception e) {
+                LOGGER.warn("SERVER_STOPPING PlayerPlacedBlockStore cleanup failed: {}", e.getMessage());
             }
             PlayerEngine.shutdownBackgroundExecutors();
         });

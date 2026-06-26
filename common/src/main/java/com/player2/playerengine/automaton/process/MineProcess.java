@@ -42,7 +42,10 @@ import com.player2.playerengine.automaton.pathing.movement.MovementHelper;
 import com.player2.playerengine.automaton.utils.BaritoneProcessHelper;
 import com.player2.playerengine.automaton.utils.BlockStateInterface;
 import com.player2.playerengine.automaton.utils.NotificationHelper;
+import com.player2.playerengine.automaton.utils.PathingCommandContext;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -123,7 +126,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
          int mineGoalUpdateInterval = this.baritone.settings().mineGoalUpdateInterval.get();
          List<BlockPos> curr = new ArrayList<>(this.knownOreLocations);
          if (mineGoalUpdateInterval != 0 && this.tickCount++ % mineGoalUpdateInterval == 0) {
-            CalculationContext context = new CalculationContext(this.baritone, true);
+            // S3: exempt the current candidate set being (re)scanned so a freshly-placed player-block mine target is never pruned as "protected".
+            CalculationContext context = new MineCalculationContext(this.baritone, true);
             PlayerEngine.getExecutor().execute(() -> this.rescan(curr, context));
          }
 
@@ -220,7 +224,10 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             return new PathingCommand(this.branchPointRunaway, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
          }
       } else {
-         CalculationContext context = new CalculationContext(this.baritone);
+         // S3: exempt the bot's commanded mine candidates from protection so it mines its own targets at normal cost.
+         // Must be safeForThreadedUse=true: this context is pruned on the tick thread AND handed to the off-thread
+         // pathfinder via PathingCommandContext below (PathingBehavior asserts context.safeForThreadedUse).
+         MineCalculationContext context = new MineCalculationContext(this.baritone, true);
          locs = prune(context, new ArrayList<>(locs), this.filter, 64, this.blacklist, this.droppedItemsScan());
          int locsSize = locs.size();
          Goal[] list = new Goal[locsSize];
@@ -233,7 +240,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
 
          Goal goal = new GoalComposite(list);
          this.knownOreLocations = locs;
-         return new PathingCommand(goal, legit ? PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH : PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+         // Deliver the exempting context to the pathfinder (mirrors BuilderProcess) so the commanded targets are not penalized as protected.
+         return new PathingCommandContext(goal, legit ? PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH : PathingCommandType.REVALIDATE_GOAL_AND_PATH, context);
       }
    }
 
@@ -354,12 +362,17 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
          }
       }
 
-      this.knownOreLocations = prune(new CalculationContext(this.baritone), this.knownOreLocations, this.filter, 64, this.blacklist, dropped);
+      this.knownOreLocations = prune(new MineCalculationContext(this.baritone, false), this.knownOreLocations, this.filter, 64, this.blacklist, dropped);
    }
 
    private static List<BlockPos> prune(
       CalculationContext ctx, List<BlockPos> locs2, BlockOptionalMetaLookup filter, int max, List<BlockPos> blacklist, List<BlockPos> dropped
    ) {
+      // S3: exempt the candidate set being filtered NOW (not the stale knownOreLocations) so a freshly-scanned
+      // player-placed mine target is not pruned by plausibleToBreak before it is ever accepted.
+      if (ctx instanceof MineCalculationContext mctx) {
+         mctx.exempt(locs2);
+      }
       dropped.removeIf(drop -> {
          for (BlockPos pos : locs2) {
             if (pos.distSqr(drop) <= 9.0 && filter.has(ctx.get(pos.getX(), pos.getY(), pos.getZ())) && plausibleToBreak(ctx, pos)) {
@@ -427,7 +440,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
          this.branchPointRunaway = null;
          this.anticipatedDrops = new HashMap<>();
          if (filter != null) {
-            this.rescan(new ArrayList<>(), new CalculationContext(this.baritone));
+            this.rescan(new ArrayList<>(), new MineCalculationContext(this.baritone, false));
          }
       }
    }
@@ -458,6 +471,37 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
          int yDiff = y - this.y;
          int zDiff = z - this.z;
          return GoalBlock.calculate(xDiff, yDiff < -1 ? yDiff + 2 : (yDiff == -1 ? 0 : yDiff), zDiff);
+      }
+   }
+
+   /**
+    * Calculation context for mining: exempts the bot's <em>current</em> commanded mine candidate set from
+    * structure protection (S3). The exempt set is the candidate collection being pruned in the present pass
+    * (populated by {@link MineProcess#prune}), NOT the stale {@code knownOreLocations} field — so a
+    * freshly-placed player-block mine target is never pruned or penalized in the same scan it is discovered.
+    *
+    * <p>The exempt set is written on the (single) thread that runs the prune pass for a given context and read
+    * by {@code isProtected}; for the context delivered to the pathfinder it is fully populated before delivery
+    * and read-only thereafter, so no concurrent mutation occurs on the off-thread read.
+    */
+   private static final class MineCalculationContext extends CalculationContext {
+      // Packed BlockPos longs (BlockPos.asLong) — allocation-free membership test on the pathfinder hot path,
+      // matching the base isProtected read. Populated on the prune thread before delivery, read-only thereafter.
+      private final LongOpenHashSet exemptTargets = new LongOpenHashSet();
+
+      MineCalculationContext(Baritone baritone, boolean forUseOnAnotherThread) {
+         super(baritone, forUseOnAnotherThread);
+      }
+
+      void exempt(Collection<BlockPos> targets) {
+         for (BlockPos pos : targets) {
+            this.exemptTargets.add(pos.asLong());
+         }
+      }
+
+      @Override
+      public boolean isProtected(int x, int y, int z) {
+         return this.exemptTargets.contains(BlockPos.asLong(x, y, z)) ? false : super.isProtected(x, y, z);
       }
    }
 }

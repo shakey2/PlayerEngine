@@ -808,9 +808,21 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
       }
 
       @Override
+      public boolean isProtected(int x, int y, int z) {
+         // Schematic-air exemption: a position the build explicitly wants cleared is the bot's own target, never protected.
+         BlockState sch = this.getSchematic(x, y, z, this.bsi.get0(x, y, z));
+         if (sch != null && sch.getBlock() instanceof AirBlock) {
+            return false;
+         }
+         return super.isProtected(x, y, z);
+      }
+
+      @Override
       public double costOfPlacingAt(int x, int y, int z, BlockState current) {
          if (this.isProtected(x, y, z)) {
-            return 1000000.0;
+            // Protected (and not a schematic-air target) -> strong-but-FINITE place cost; mirrors the base class
+            // (clamped so the product stays below the impossible gate) so a builder bot never freezes.
+            return protectedPlaceCost();
          } else {
             BlockState sch = this.getSchematic(x, y, z, current);
             if (sch != null) {
@@ -829,7 +841,13 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
 
       @Override
       public double breakCostMultiplierAt(int x, int y, int z, BlockState current) {
-         if (this.allowBreak && !this.isProtected(x, y, z)) {
+         if (!this.allowBreak) {
+            return 1000000.0; // breaking disabled -> genuinely impossible (unrelated to protection)
+         } else if (this.isProtected(x, y, z)) {
+            // Protected (and not a schematic-air target) -> strong-but-FINITE last-resort break; mirrors the base
+            // class (clamped below the impossible gate) so a builder bot never freezes.
+            return protectedBreakPenalty();
+         } else {
             BlockState sch = this.getSchematic(x, y, z, current);
             if (sch == null) {
                return 1.0;
@@ -838,8 +856,6 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
             } else {
                return BuilderProcess.this.valid(this.bsi.get0(x, y, z), sch, false) ? this.baritone.settings().breakCorrectBlockPenaltyMultiplier.get() : 1.0;
             }
-         } else {
-            return 1000000.0;
          }
       }
    }
