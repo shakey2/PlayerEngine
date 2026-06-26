@@ -214,18 +214,18 @@ public class ConversationHistory {
    public void addUserMessage(String userText, Player2APIService player2apiService) {
       JsonObject objectToAdd = new JsonObject();
       objectToAdd.addProperty("role", "user");
-      objectToAdd.addProperty("content", userText);
+      objectToAdd.addProperty("content", LogEgressGuard.capForModel(userText, "user"));
       this.addHistory(objectToAdd, false, player2apiService);
    }
 
    public void setBaseSystemPrompt(String newPrompt) {
       if (!this.conversationHistory.isEmpty()
             && "system".equals(this.conversationHistory.get(0).get("role").getAsString())) {
-         this.conversationHistory.get(0).addProperty("content", newPrompt);
+         this.conversationHistory.get(0).addProperty("content", LogEgressGuard.capForModel(newPrompt, "system"));
       } else {
          JsonObject systemMessage = new JsonObject();
          systemMessage.addProperty("role", "system");
-         systemMessage.addProperty("content", newPrompt);
+         systemMessage.addProperty("content", LogEgressGuard.capForModel(newPrompt, "system"));
          this.conversationHistory.add(0, systemMessage);
       }
    }
@@ -233,14 +233,14 @@ public class ConversationHistory {
    public void addSystemMessage(String systemText, Player2APIService player2apiService) {
       JsonObject objectToAdd = new JsonObject();
       objectToAdd.addProperty("role", "system");
-      objectToAdd.addProperty("content", systemText);
+      objectToAdd.addProperty("content", LogEgressGuard.capForModel(systemText, "system"));
       this.addHistory(objectToAdd, false, player2apiService);
    }
 
    public void addAssistantMessage(String messageText, Player2APIService player2apiService) {
       JsonObject objectToAdd = new JsonObject();
       objectToAdd.addProperty("role", "assistant");
-      objectToAdd.addProperty("content", messageText);
+      objectToAdd.addProperty("content", LogEgressGuard.capForModel(messageText, "assistant"));
       this.addHistory(objectToAdd, true, player2apiService);
    }
 

@@ -94,10 +94,10 @@ public class Player2APIService {
       JsonArray messagesArray = new JsonArray();
 
       for (JsonObject msg : conversationHistory.getListJSON()) {
-         messagesArray.add(msg);
+         messagesArray.add(LogEgressGuard.cappedMessage(msg));
       }
-      String lastMessageForDebug = conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1)
-            .toString();
+      String lastMessageForDebug = LogEgressGuard.capForModel(
+            conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1).toString(), "debug");
 
       requestBody.add("messages", messagesArray);
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
@@ -126,12 +126,12 @@ public class Player2APIService {
       JsonArray messagesArray = new JsonArray();
 
       for (JsonObject msg : conversationHistory.getListJSON()) {
-         messagesArray.add(msg);
+         messagesArray.add(LogEgressGuard.cappedMessage(msg));
       }
 
       requestBody.add("messages", messagesArray);
-      String lastMessageForDebug = conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1)
-            .toString();
+      String lastMessageForDebug = LogEgressGuard.capForModel(
+            conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1).toString(), "debug");
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
       Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody, taskClass);
       if (responseMap.containsKey("choices")) {

@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.player2.playerengine.executor.BudgetTracker;
 import com.player2.playerengine.player2api.AiTaskClass;
 import com.player2.playerengine.player2api.JoulesCache;
+import com.player2.playerengine.player2api.LogEgressGuard;
 import com.player2.playerengine.player2api.ModelTierRouter;
 import com.player2.playerengine.player2api.Player2PayerResolution;
 import com.player2.playerengine.player2api.RoutingDecision;
@@ -81,8 +82,10 @@ public final class ModIntelligenceEnrichmentClient {
 
         JsonObject requestBody = new JsonObject();
         JsonArray messages = new JsonArray();
+        // Egress gate (DESIGN.md §3): this is a SECOND /v1/chat/completions builder outside Player2APIService,
+        // so it must apply the same log-egress cap or it would be an uncapped bypass.
         for (JsonObject msg : history.getListJSON()) {
-            messages.add(msg);
+            messages.add(LogEgressGuard.cappedMessage(msg));
         }
         requestBody.add("messages", messages);
         JsonObject responseFormat = new JsonObject();
