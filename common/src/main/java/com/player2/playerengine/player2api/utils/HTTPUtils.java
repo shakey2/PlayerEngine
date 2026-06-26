@@ -183,7 +183,18 @@ public class HTTPUtils {
         }
 
         reader.close();
-        return JsonParser.parseString(response.toString()).getAsJsonObject();
+
+        // Some endpoints (e.g. /v1/stt/start) return an empty body on HTTP 200 by contract; a few may
+        // return a non-object JSON value. Treat either as "no fields" instead of throwing
+        // IllegalStateException ("Not a JSON Object: null"), which previously turned a successful
+        // empty-body response into a spurious failure. Genuine errors still surface via the 4xx/5xx
+        // branches above (with their JSON error body).
+        String body = response.toString().trim();
+        if (body.isEmpty()) {
+            return new JsonObject();
+        }
+        JsonElement parsed = JsonParser.parseString(body);
+        return parsed.isJsonObject() ? parsed.getAsJsonObject() : new JsonObject();
 
     }
 }

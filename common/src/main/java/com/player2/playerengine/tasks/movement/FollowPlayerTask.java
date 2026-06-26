@@ -5,6 +5,8 @@ import com.player2.playerengine.executor.StopReason;
 import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.tasks.base.Task;
 import java.util.Optional;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
@@ -12,6 +14,8 @@ import net.minecraft.world.entity.vehicle.Boat;
 import net.minecraft.world.phys.Vec3;
 
 public class FollowPlayerTask extends Task {
+   private static final Logger LOGGER = LogManager.getLogger();
+
    private final String playerName;
    private final double followDistance;
    /**
@@ -79,6 +83,10 @@ public class FollowPlayerTask extends Task {
 
    @Override
    protected void onStop(Task interruptTask) {
+      LOGGER.info("[FollowDiag] FOLLOW-TASK-STOP: targetGone={} interruptTask={} isFinished={}",
+            this.targetGone,
+            (interruptTask != null) ? interruptTask.getClass().getSimpleName() : "(none)",
+            this.isFinished());
       // If we stopped because the followed player vanished, arm a graceful FOLLOWED_TARGET_GONE on
       // the step executor before the user task chain fires its terminal onFinish callback. Without
       // this, the chain sees a task that stopped without finishing and labels it FATAL.

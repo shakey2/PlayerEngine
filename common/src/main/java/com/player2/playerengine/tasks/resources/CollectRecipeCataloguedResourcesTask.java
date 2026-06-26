@@ -3,6 +3,7 @@ package com.player2.playerengine.tasks.resources;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.TaskCatalogue;
+import com.player2.playerengine.tasks.ResourceTask;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.util.CraftingRecipe;
 import com.player2.playerengine.util.ItemTarget;
@@ -17,6 +18,7 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
    private final RecipeTarget[] targets;
    private final boolean ignoreUncataloguedSlots;
    private boolean finished = false;
+   private String failureReason = null;
 
    public CollectRecipeCataloguedResourcesTask(boolean ignoreUncataloguedSlots, RecipeTarget... targets) {
       this.targets = targets;
@@ -26,6 +28,7 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
    @Override
    protected void onStart() {
       this.finished = false;
+      this.failureReason = null;
    }
 
    @Override
@@ -33,6 +36,37 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
       PlayerEngineController mod = this.controller;
       HashMap<String, Integer> catalogueCount = new HashMap<>();
       HashMap<Item, Integer> itemCount = new HashMap<>();
+
+      // Once a genuine failure has been recorded, never re-enter the target loop below — doing so
+      // would return a fresh gather task (the items were never collected, so the target is still
+      // unmet) and re-spawn the stopped sub-chain. The CraftInInventoryTask interception fires on
+      // the next tick to stop the chain cleanly; until then we must short-circuit to a no-op finish.
+      if (this.failureReason != null) {
+         this.finished = true;
+         return null;
+      }
+
+      // Stopped-child failure guard: if the previously-dispatched sub has self-stopped with a
+      // genuine failure (stopped but not finished), propagate the reason and signal completion
+      // so the caller (CraftInInventoryTask) can intercept and stop cleanly. Without this guard
+      // the framework restarts the stopped sub from first=true on the next tick (because onTick()
+      // re-returns the same isEqual candidate), wiping its sub-chain and re-spawning a fresh
+      // SmeltInFurnaceTask leaf (clean fuel-gather latch) every tick -> ~10 Hz infinite spin.
+      // Must run BEFORE the target loop below: a guard placed after a return inside the loop is dead.
+      Task cachedSub = this.getSub();
+      if (cachedSub != null && cachedSub.stopped() && !cachedSub.isFinished()) {
+         // Record the leaf's reason when present; otherwise stamp a sentinel so failureReason is
+         // never left null on a genuine stopped-child failure. A null reason here would let
+         // isFinished()'s safety-reset branch flip finished back to false next tick (the target is
+         // unmet), re-entering this loop and re-spawning the sub — the exact spin this guard prevents.
+         String reason = null;
+         if (cachedSub instanceof ResourceTask rt) {
+            reason = rt.getAggregatedFailureReason().orElse(null);
+         }
+         this.failureReason = (reason != null) ? reason : "sub-task failed";
+         this.finished = true;
+         return null;
+      }
 
       for (RecipeTarget target : this.targets) {
          if (target != null) {
@@ -107,11 +141,24 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
 
    @Override
    public boolean isFinished() {
+      // When a genuine failure has been recorded by the stopped-child guard, treat this task as
+      // permanently finished regardless of item state. The safety-reset below must NOT fire in this
+      // case — it would undo the finished=true set by the guard (the items were never gathered, so
+      // hasRecipeMaterialsOrTarget() returns false), creating a per-tick toggle that re-spawns the
+      // collect sub forever and prevents clean termination. This bypass MUST be the first statement.
+      if (this.failureReason != null) {
+         return true;
+      }
+
       if (this.finished && !StorageHelper.hasRecipeMaterialsOrTarget(this.controller, this.targets)) {
          this.finished = false;
          Debug.logMessage("Invalid collect recipe \"finished\" state, resetting.");
       }
 
       return this.finished;
+   }
+
+   public String getFailureReason() {
+      return this.failureReason;
    }
 }

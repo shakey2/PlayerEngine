@@ -44,12 +44,32 @@ public class TTSManager {
     }
 
     public static void TTS(String message, Character character, Player2APIService player2apiService, UUID botUuid) {
+        TTS(message, java.util.List.of(message == null ? "" : message), java.util.List.of(), character, player2apiService, botUuid);
+    }
+
+    /**
+     * TTS dispatch with TTS-timed gesture chunks/boundaries (Workstream 2). The chunk list and the
+     * VALID-only boundary list are read off the bot's {@code AgentConversationData} at the
+     * {@code AgentSideEffects.onEntityMessage} call site and forwarded to the
+     * {@link Player2APIService#textToSpeech} overload that writes them onto the {@code stream_tts}
+     * payload. Submitted on the dedicated TTS thread exactly as the single-string path.
+     *
+     * <p>1.20.1 threading note: the {@code ttsThread} here submits the S2C packet broadcast (network I/O).
+     * The actual {@code BodyLanguageTask} dispatch (gesture execution) is driven separately by the
+     * {@code segment_done} C2S handler (which uses {@code server.execute()} to hop to the server tick
+     * thread) or the fallback timer (already on the tick thread). Do NOT dispatch gestures from ttsThread.
+     */
+    public static void TTS(String message, java.util.List<String> chunks,
+            java.util.List<com.player2.playerengine.player2api.MarkerParser.SegmentBoundary> validBoundaries,
+            Character character, Player2APIService player2apiService, UUID botUuid) {
         if (message == null) {
             return;
         }
-        LOGGER.info("TTSManager.TTS submitting broadcast for msg.len={}", message.length());
+        LOGGER.info("TTSManager.TTS submitting broadcast for msg.len={} chunks={} boundaries={}",
+                message.length(), chunks == null ? 0 : chunks.size(),
+                validBoundaries == null ? 0 : validBoundaries.size());
         ttsThread.submit(() -> {
-            player2apiService.textToSpeech(message, character, botUuid, (_unusedMap) -> {
+            player2apiService.textToSpeech(message, chunks, validBoundaries, character, botUuid, (_unusedMap) -> {
                 // Per-bot pacing is set at the AgentSideEffects.onEntityMessage call site so the
                 // dispatcher can defer just the speaking bot until its audio is done playing.
             });

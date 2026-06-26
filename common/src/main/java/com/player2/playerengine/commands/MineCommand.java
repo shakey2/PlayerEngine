@@ -114,6 +114,9 @@ public class MineCommand extends Command {
                     this.finishWithNote("partial: mined " + o.mined() + " "
                             + o.blockId() + "; no more " + o.blockId() + " within range "
                             + "(relocate to mine more)");
+            case PARTIAL_DROPS_LOST ->
+                    this.finishWithNote("partial: mined " + o.mined() + " " + o.blockId() + "; "
+                            + o.lostDrops() + " drop(s) fell into water/void and could not be collected");
             case FAILED ->
                     this.finishWithError("could not mine " + o.blockId() + ": "
                             + readable(o.reasonToken()));
@@ -131,6 +134,8 @@ public class MineCommand extends Command {
                     + " before timing out.";
             case PARTIAL_RANGE_EXHAUSTED -> "Mined " + o.mined() + " " + block
                     + " — no more within reach.";
+            case PARTIAL_DROPS_LOST -> "Mined " + o.mined() + " " + block + " — " + o.lostDrops()
+                    + " drop(s) were lost (unreachable).";
             case FAILED -> "Couldn't mine " + block + " (" + readable(o.reasonToken()) + ").";
         };
     }
@@ -157,7 +162,7 @@ public class MineCommand extends Command {
      * Tokens enumerated from {@code MineBlockTask.terminateFailed}/{@code finishPartial}/{@code onStop}:
      * {@code unknown_block_id}, {@code no_target_block_in_range}, {@code mine_timeout},
      * {@code timeout}, {@code no_more_blocks_in_range}, {@code incorrect_tool_no_drops},
-     * {@code interrupted}, and the compound
+     * {@code drops_unreachable}, {@code interrupted}, and the compound
      * {@code could_not_acquire_tool:<tier>}. Any unrecognized token falls back to stripping
      * underscores and colons rather than surfacing a raw machine token.
      */
@@ -176,6 +181,7 @@ public class MineCommand extends Command {
             case "mine_timeout", "timeout" -> "timed out";
             case "no_more_blocks_in_range" -> "no more matching blocks within range";
             case "incorrect_tool_no_drops" -> "tool too weak";
+            case "drops_unreachable" -> "drops fell into water or void";
             case "interrupted" -> "interrupted";
             default -> t.replace('_', ' ').replace(':', ' ');
         };

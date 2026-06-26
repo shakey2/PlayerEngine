@@ -51,6 +51,20 @@ public class CraftInInventoryTask extends ResourceTask {
       if (controller.getItemStorage().getItemCount(outputItem) >= targetCount) {
          return null;
       } else if (this.collect && !StorageHelper.hasRecipeMaterialsOrTarget(controller, this.target)) {
+         // Interception: if the cached collect sub already recorded a failure reason (e.g. a nested
+         // SmeltInFurnaceTask that ran out of sourceable fuel), propagate the reason and stop instead
+         // of re-spawning a fresh CollectRecipeCataloguedResourcesTask. Without this guard a new CRCT
+         // is returned every tick, isEqual keeps the old cached instance, its stopped-child guard fires
+         // again but the overall craft chain never terminates -> the same ~10 Hz respawn spin. The CRCT
+         // instance is still our cached sub here, and its failureReason persists even after its own
+         // child (CollectIronIngotTask) was nulled by Task.tick()'s cleanup.
+         Task collectSub = this.getSub();
+         if (collectSub instanceof CollectRecipeCataloguedResourcesTask crct
+               && crct.getFailureReason() != null) {
+            this.recordFailureReason(crct.getFailureReason());
+            this.stop(this);
+            return null;
+         }
          this.setDebugState("Collecting ingredients for " + outputItem.getDescription().getString());
          return new CollectRecipeCataloguedResourcesTask(this.ignoreUncataloguedSlots, this.target);
       } else {

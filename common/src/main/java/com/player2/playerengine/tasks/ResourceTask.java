@@ -37,6 +37,15 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
    private Dimension targetDimension;
    private ContainerCache currentContainer;
    protected boolean allowContainers = false;
+   /**
+    * Machine-readable terminal degradation reason for the dual-audience truthfulness channel
+    * (DESIGN.md §3). Defaults null (no degradation -> {@link #getAggregatedFailureReason()} is empty for the
+    * vast majority of ResourceTask subclasses). Set via {@link #recordFailureReason(String)} by a leaf
+    * task (e.g. the smelt tasks on a fuel shortfall) or copied onto a wrapper that propagates a child's
+    * reason. Read by {@code GetCommand.onGetComplete} for ANY ResourceTask so the model is told the
+    * truth, not a generic "finished".
+    */
+   protected String failureReason = null;
 
    public ResourceTask(ItemTarget... itemTargets) {
       this.itemTargets = itemTargets;
@@ -225,6 +234,43 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
 
    public ItemTarget[] getItemTargets() {
       return this.itemTargets;
+   }
+
+   /**
+    * Records a machine-readable terminal degradation reason on this task (DESIGN.md §3 dual-audience).
+    * Called by a leaf smelt task on an unrecoverable fuel shortfall, and copied onto a wrapper that
+    * propagates a terminal child's reason.
+    */
+   protected void recordFailureReason(String reason) {
+      this.failureReason = reason;
+   }
+
+   /**
+    * Returns the terminal degradation reason for this task chain, if any.
+    *
+    * <p>Aggregates the active cached sub-task chain: if THIS task has a non-blank reason it wins;
+    * otherwise the nearest descendant {@link ResourceTask} (reached via the framework's cached {@code sub}
+    * walk in {@link #thisOrChildSatisfies}) with a non-blank reason is surfaced. This is what lets a
+    * wrapper collector (e.g. {@code CollectIronIngotTask}/{@code CollectGoldIngotTask}/food collectors)
+    * surface its nested {@code SmeltInFurnaceTask}/{@code SmeltInSmokerTask} leaf's reason WITHOUT editing
+    * each wrapper. Non-ResourceTask subclasses (default {@code failureReason == null}) yield empty.
+    */
+   public Optional<String> getAggregatedFailureReason() {
+      if (this.failureReason != null && !this.failureReason.isBlank()) {
+         return Optional.of(this.failureReason);
+      }
+      // Walk the cached child chain for the nearest descendant ResourceTask carrying a reason. Skip
+      // `this` (already checked above) so a wrapper with no reason of its own still finds its leaf.
+      String[] found = new String[1];
+      this.thisOrChildSatisfies(task -> {
+         if (task != this && task instanceof ResourceTask rt
+            && rt.failureReason != null && !rt.failureReason.isBlank()) {
+            found[0] = rt.failureReason;
+            return true;
+         }
+         return false;
+      });
+      return Optional.ofNullable(found[0]);
    }
 
    public ResourceTask mineIfPresent(Block[] toMine) {

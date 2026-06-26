@@ -254,6 +254,13 @@ public class StorageHelper {
       return result;
    }
 
+   /**
+    * Returns total smelt-OPERATIONS available from inventory fuel (200-tick units: 1 coal = 8), NOT a
+    * fuel-ITEM count. Historically misused as a coal-count gate in the legacy smelt tasks (compared
+    * against {@code ceil(targetCount/8)}), which let a single coal pass and smelt only 8 items; that gate
+    * is RETIRED — the smelt path now uses {@link com.player2.playerengine.tasks.cooking.FuelPlanner}.
+    * Keep the unit meaning (operations, not items) clear so the original misuse does not recur.
+    */
    public static double calculateInventoryFuelCount(PlayerEngineController controller) {
       double result = 0.0;
 

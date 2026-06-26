@@ -115,6 +115,11 @@ public abstract class Task {
       return this.stopped;
    }
 
+   // Read-only: for stopped-child inspection in subclasses only. Do not use for sub-task replacement.
+   protected Task getSub() {
+      return this.sub;
+   }
+
    protected abstract void onStart();
 
    protected abstract Task onTick();

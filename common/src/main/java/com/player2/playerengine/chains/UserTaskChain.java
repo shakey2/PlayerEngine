@@ -4,9 +4,14 @@ import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.tasks.base.TaskRunner;
+import com.player2.playerengine.tasks.movement.FollowPlayerTask;
 import com.player2.playerengine.util.time.Stopwatch;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class UserTaskChain extends SingleTaskChain {
+   private static final Logger LOGGER = LogManager.getLogger();
+
    private final Stopwatch taskStopwatch = new Stopwatch();
    private Runnable currentOnFinish = null;
    private boolean runningIdleTask;
@@ -72,6 +77,17 @@ public class UserTaskChain extends SingleTaskChain {
          Debug.logMessage("User Task Set: " + task.toString());
       }
 
+      boolean incomingIsFollow = task instanceof FollowPlayerTask;
+      boolean existingIsFollow = (this.mainTask instanceof FollowPlayerTask) && this.mainTask.isActive();
+      if (existingIsFollow && !this.runningIdleTask) {
+         LOGGER.info("[FollowDiag] FOLLOW-OVERWRITE: active follow '{}' being replaced by '{}' (incoming isFollow={})",
+               this.mainTask.toString(), task.toString(), incomingIsFollow);
+      }
+      if (incomingIsFollow && !this.runningIdleTask) {
+         LOGGER.info("[FollowDiag] FOLLOW-START: FollowPlayerTask assigned to UserTaskChain (existingFollowActive={})",
+               existingIsFollow);
+      }
+
       mod.getTaskRunner().enable();
       this.taskStopwatch.begin();
       this.setTask(task);
@@ -85,6 +101,13 @@ public class UserTaskChain extends SingleTaskChain {
       boolean shouldIdle = mod.getModSettings().shouldRunIdleCommandWhenNotActive();
       double seconds = this.taskStopwatch.time();
       Task oldTask = this.mainTask;
+      if (oldTask instanceof FollowPlayerTask && !this.runningIdleTask) {
+         // String.format here is intentional: Log4j lazy-eval doesn't apply but the call is
+         // at most once per task completion (not a hot path), and "%.1f" is required to keep
+         // the output to 1 decimal place (raw double via {} would emit full precision).
+         LOGGER.info("[FollowDiag] FOLLOW-FINISH: FollowPlayerTask ended after {}s; task.isFinished={} task.stopped={} shouldIdle={}",
+               String.format("%.1f", seconds), oldTask.isFinished(), oldTask.stopped(), shouldIdle);
+      }
       this.mainTask = null;
       if (!shouldIdle) {
          mod.stop();
@@ -104,6 +127,12 @@ public class UserTaskChain extends SingleTaskChain {
          }
 
          if (shouldIdle) {
+            // Guard mirrors FOLLOW-FINISH at line 104: exclude the case where the idle task
+            // itself is a follow invocation, which would emit a spurious "will NOT auto-resume".
+            if (oldTask instanceof FollowPlayerTask && !this.runningIdleTask) {
+               LOGGER.info("[FollowDiag] FOLLOW-IDLE-FALLBACK: follow ended, chain executing idleCommand='{}' - follow will NOT auto-resume",
+                     mod.getModSettings().getIdleCommand());
+            }
             this.controller.getCommandExecutor().executeWithPrefix(mod.getModSettings().getIdleCommand());
             this.signalNextTaskToBeIdleTask();
             this.runningIdleTask = true;

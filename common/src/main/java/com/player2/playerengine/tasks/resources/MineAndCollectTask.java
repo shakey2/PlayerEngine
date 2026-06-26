@@ -182,24 +182,13 @@ public class MineAndCollectTask extends ResourceTask {
          // re-arms the same-tick cancel.
          this.subtask.resetBreakCancelGuard();
          if (this.subtask.isMining()) {
+            // Possession of a sufficient tool is already proven by the miningRequirementMet gate above;
+            // the builder equips the owned tool just-in-time during the break
+            // (BuilderProcess -> MovementHelper.switchToBestToolFor -> ToolSet.getBestSlot), and the
+            // "tool broke" transition is handled by miningRequirementMet flipping false in the UNMET
+            // branch. WS1 already prevents cheated drops on any leaked break. (A prior FAULT-1
+            // equipped-slot guard here raced the builder's lazy equip and bricked legitimate mining.)
             this.makeSureToolIsEquipped(mod);
-            // FAULT-1 gather re-acquire: after the in-flight upgrade-equip swap has had its chance this
-            // tick, judge the tool that will actually be equipped against the block being mined. If the
-            // target requiresCorrectToolForDrops and the equipped tool cannot harvest it, STOP this break
-            // (cancelActiveBreakOnce -> builder.onLostControl, so no caller is stranded) rather than
-            // breaking it bare-/wrong-handed for zero drops. Next tick miningRequirementMet flips false ->
-            // SatisfyMiningRequirementTask re-acquires, and the existing toolAcquisitionFailed latch
-            // surfaces could_not_acquire_tool:<tier> to both player and model on terminal failure. The
-            // requiresCorrectToolForDrops() guard mirrors canHarvest's short-circuit so hand-breakable
-            // blocks (dirt, wood, wheat) never trip it.
-            BlockPos miningPos = this.subtask.miningPos();
-            if (miningPos != null) {
-               ItemStack equippedStack = StorageHelper.getItemStackInSlot(PlayerSlot.getEquipSlot(mod.getInventory()));
-               net.minecraft.world.level.block.state.BlockState state = mod.getWorld().getBlockState(miningPos);
-               if (state.requiresCorrectToolForDrops() && !equippedStack.isCorrectToolForDrops(state)) {
-                  this.subtask.cancelActiveBreakOnce(mod);
-               }
-            }
          }
 
          return (Task)(this.subtask.wasWandering() && this.isInWrongDimension(mod) && !mod.getBlockScanner().anyFound(this.blocksToMine)

@@ -7,6 +7,14 @@ import com.player2.playerengine.util.Dimension;
 import com.player2.playerengine.util.helpers.WorldHelper;
 import net.minecraft.world.item.Items;
 
+/**
+ * <b>RETIRED from the legacy smelt path.</b> The furnace/smoker smelt tasks no longer use this task:
+ * fuel unit math and fuel-type selection (charcoal/coal/planks/logs, with the held-pickaxe-gated coal
+ * spiral guard) now go through {@link com.player2.playerengine.tasks.cooking.FuelPlanner}'s
+ * {@code plan}/{@code deficitFor}, which speaks raw cook-ticks and never re-divides by 8. This class is
+ * kept only for any OTHER callers; do not re-wire the smelt tasks back to it (it only ever gathers coal
+ * and conflated coal-count with smelt-operations, which was the root cause of the "smelts only 8" bug).
+ */
 public class CollectFuelTask extends Task {
    private final double targetFuel;
 

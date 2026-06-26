@@ -344,16 +344,32 @@ public class ConversationManager {
         data.onGreeting();
     }
 
+    public static void sendReturnMessage(PlayerEngineController mod, Character character, String ownerName) {
+        LOGGER.info("Sending return message character={} owner={}", character, ownerName);
+        AgentConversationData data = getOrCreateEventQueueData(mod);
+        data.onReturn(ownerName);
+    }
+
+    public static void sendDeathRevival(PlayerEngineController mod, Character character, String deathCause) {
+        LOGGER.info("Sending death revival character={} cause={}", character, deathCause);
+        AgentConversationData data = getOrCreateEventQueueData(mod);
+        data.onDeathRevival(deathCause);
+    }
+
     public static void resetMemory(PlayerEngineController mod) {
         mod.getAIPersistantData().clearHistory();
     }
 
     private static boolean isCloseToPlayer(AgentConversationData data, String userName) {
-        LOGGER.info("Passing msg btw {} <-> {}, owner {}", data.getName(), userName, data.getMod().getOwnerUsername());
-        if(data.getMod().getOwnerUsername().equals(userName)){
-            LOGGER.info("Passing b.c. is owner", data.getName(), userName);
-            return true;
-        }
+        // Owner-bypass REMOVED (Workstream 4, decision 11a): the bot hears the owner only when within
+        // messagePassingMaxDistance (<64) in the SAME dimension, exactly like any other player.
+        // StatusUtils.getDistanceToUsername already scans only mod.getWorld().players() (the BOT's
+        // dimension) and returns Float.MAX_VALUE for cross-dimension players, so dimension gating falls
+        // out for free — no new code is needed; the bypass was the only escape from both checks.
+        // Consequence (decision 11b): the owner can no longer prompt the bot via chat/voice from >64
+        // blocks or another dimension. Event-driven recall/return/revival are unaffected (they do not
+        // route through onUserChatMessage).
+        LOGGER.info("Passing msg btw {} <-> {}", data.getName(), userName);
         return StatusUtils.getDistanceToUsername(data.getMod(), userName) < messagePassingMaxDistance;
     }
 

@@ -3,13 +3,19 @@ package com.player2.playerengine.tasks.base;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.util.Debug;
 import java.util.ArrayList;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class TaskRunner {
+   private static final Logger LOGGER = LogManager.getLogger();
+
    private final ArrayList<TaskChain> chains = new ArrayList<>();
    private final PlayerEngineController mod;
    private boolean active;
    private TaskChain cachedCurrentTaskChain = null;
    public String statusReport = " (no chain running) ";
+   /** Tracks last-logged winning chain name so CHAIN-CHANGE fires only on transitions, not every tick. */
+   private String lastLoggedChainName = null;
 
    public TaskRunner(PlayerEngineController mod) {
       this.mod = mod;
@@ -33,6 +39,17 @@ public class TaskRunner {
 
          if (this.cachedCurrentTaskChain != null && maxChain != this.cachedCurrentTaskChain) {
             this.cachedCurrentTaskChain.onInterrupt(maxChain);
+         }
+
+         String newChainName = (maxChain != null) ? maxChain.getName() : "(none)";
+         if (!newChainName.equals(this.lastLoggedChainName)) {
+            String oldChainName = (this.lastLoggedChainName != null) ? this.lastLoggedChainName : "(none)";
+            // When no chain is active maxPriority retains NEGATIVE_INFINITY; log "N/A" to avoid
+            // confusing beta testers who see newPriority=-Infinity and assume something broke.
+            String loggedPriority = (maxChain != null) ? String.valueOf(maxPriority) : "N/A";
+            LOGGER.info("[FollowDiag] CHAIN-CHANGE: {} -> {} (newPriority={})",
+                  oldChainName, newChainName, loggedPriority);
+            this.lastLoggedChainName = newChainName;
          }
 
          this.cachedCurrentTaskChain = maxChain;

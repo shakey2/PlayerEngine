@@ -54,6 +54,38 @@ public class AIPersistantData {
         }
     }
 
+    /**
+     * Builds the FIRST_MEETING/RETURNING model event: a true greeting when this is the first-ever
+     * spawn for this per-world history (no history file yet), otherwise a "&lt;owner&gt; has respawned
+     * you" return line.
+     * <p>
+     * PRECONDITION: never call this for a DEATH_RESPAWN spawn. A bot that just died and was
+     * auto-revived must go through {@link #getDeathRevivalEvent(String)} so the model is told it died
+     * (and how). Routing a death respawn here would silently convert death context into a greeting
+     * for any bot with no history file yet (first-tick death) -- exactly the truthfulness bug
+     * (DESIGN.md §3) this feature exists to prevent. The caller dispatch in
+     * {@code AutomatoneEntity.init} guarantees this: DEATH_RESPAWN goes to {@code sendDeathRevival},
+     * only FIRST_MEETING/RETURNING reach {@code sendReturnMessage} -> here.
+     */
+    public Event getReturnEvent(String ownerName) {
+        // First-ever meeting still greets (true greeting), even on a RETURNING reason.
+        if (!conversationHistory.isLoadedFromFile()) {
+            return getGreetingEvent(); // greetingInfo + greeting bodylang suffix
+        }
+        String who = (ownerName == null || ownerName.isBlank()) ? "Your owner" : ownerName;
+        // Q3 default: no forced bodylang suffix on return.
+        return new InfoMessage(who + " has respawned you. You are returning to them; do not greet as if "
+            + "meeting for the first time.");
+    }
+
+    public Event getDeathRevivalEvent(String deathCause) {
+        String cause = (deathCause == null || deathCause.isBlank()) ? "You died." : deathCause;
+        // Q3 default: no forced bodylang suffix. Model-facing; instruct truthfulness (DESIGN.md §3).
+        return new InfoMessage("You just died and the game automatically revived you. Death: " + cause
+            + ". Do not claim you respawned yourself, and do not greet as if meeting for the first time;"
+            + " you may briefly react to how you died.");
+    }
+
     public Event dumpEventQueueToConversationHistoryAndReturnLastEvent(Deque<Event> eventQueue, Player2APIService player2apiService){
         Event lastEvent = null;
         while(!eventQueue.isEmpty()){
@@ -148,8 +180,15 @@ public class AIPersistantData {
         if (worldRoot == null) return null;
 
         try {
-            if (mod.getOwner() != null) {
-                UUID ownerUuid = mod.getOwner().getUUID();
+            // Resolve the STABLE owner UUID (independent of whether the owner ServerPlayer is attached at
+            // construction time). The owner entity is frequently null at summon — which previously dropped
+            // this to the transient entity-UUID path below, so EVERY re-summon got a fresh empty
+            // conversation file: the bot lost all prior-session memory AND greeted as if meeting for the
+            // first time (isLoadedFromFile()==false). Resolving via the owner USERNAME (always known) keeps
+            // the canonical owners/<ownerUuid>/<characterId>/ path stable across sessions, matching the
+            // per-owner inventory/settings layout.
+            UUID ownerUuid = resolveOwnerUuidOrNull(mod);
+            if (ownerUuid != null) {
                 return worldRoot
                         .resolve("player2npc")
                         .resolve("persistentdata")
@@ -158,6 +197,8 @@ public class AIPersistantData {
                         .resolve(characterId)
                         .resolve("conversation.jsonl");
             }
+            // Last resort only (owner truly unresolvable): legacy entity-UUID segment — not stable across
+            // re-summons, but better than no persistence for the current session.
             UUID entityUuid = mod.getPlayer().getUUID();
             return worldRoot
                     .resolve("player2npc")
@@ -168,6 +209,35 @@ public class AIPersistantData {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Resolve the bot's owner UUID stably, NOT depending on the owner {@code ServerPlayer} being attached
+     * at construction time. Tries the direct owner entity first, then resolves the owner username (always
+     * known via {@code getOwnerUsername()}) through the shared {@link Player2NpcInitiatorUuidResolve}
+     * (online list -> server username cache -> profile cache) — the same stable resolution the per-owner
+     * inventory/settings paths rely on. Returns {@code null} only when the owner cannot be resolved at all.
+     */
+    private static UUID resolveOwnerUuidOrNull(PlayerEngineController mod) {
+        try {
+            if (mod.getOwner() != null) {
+                return mod.getOwner().getUUID();
+            }
+        } catch (Exception ignored) {
+            // fall through to username-based resolution
+        }
+        try {
+            String ownerName = mod.getOwnerUsername();
+            if (ownerName != null && !ownerName.isBlank() && mod.getPlayer() != null) {
+                MinecraftServer server = mod.getPlayer().level().getServer();
+                if (server != null) {
+                    return Player2NpcInitiatorUuidResolve.resolve(server, ownerName);
+                }
+            }
+        } catch (Exception ignored) {
+            // owner UUID unresolvable
+        }
+        return null;
     }
 
     /**

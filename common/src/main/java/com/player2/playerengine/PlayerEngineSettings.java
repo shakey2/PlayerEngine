@@ -176,6 +176,13 @@ public class PlayerEngineSettings implements IFailableConfigFile {
       .toList();
    private boolean limitFuelsToSupportedFuels = true;
 
+   // NOTE: the legacy AND agentic smelt/cook fuel selection deliberately goes through FuelPlanner, which
+   // reads the vanilla registry burn-map (AbstractFurnaceBlockEntity.getFuel()) and picks
+   // charcoal/coal/planks/logs. It intentionally BYPASSES supportedFuels / isSupportedFuel /
+   // calculateInventoryFuelCount (the retired legacy gate), so planks/logs work as fuel ("trees-as-fuel")
+   // even though they are not listed here. Do NOT "reconcile" this set with FuelPlanner's preference list
+   // or add planks/logs here to make them match — that would re-couple the retired gate and risk
+   // re-breaking trees-as-fuel. This list now only governs any remaining isSupportedFuel callers.
    private List<Item> supportedFuels = Streams.concat(new Stream[]{Stream.of(Items.COAL, Items.CHARCOAL)}).toList();
    private BlockPos homeBasePosition = new BlockPos(0, 64, 0);
    private List<BlockRange> areasToProtect = Collections.emptyList();

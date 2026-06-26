@@ -298,14 +298,32 @@ public final class SeedToolMetadata {
             //          "put up", "place structure"),
             //     list("building", "placement")),
 
+            // Bodylang doc. Two grounding points exist for gestures now: this doc AND the inline-marker
+            // syntax in the message field (see Prompts.java). Gestures are TTS-timed via inline markers
+            // [bl:<action>] placed inside the spoken message at the point the gesture should fire; the
+            // marker is silent (never spoken/shown). The whole-message `bodylang <action>` command path
+            // remains as a backward-compatible fallback. Keywords cover ONLY synonyms of the four REAL
+            // actions (greeting/nod_head/shake_head/victory) so retrieval never primes a marker that
+            // deterministically resolves to invalid (every invalid marker fires the noisy truthful-failure
+            // path). The stale "wave" keyword was removed for that reason (wave is not one of the four).
+            //
+            // FUTURE per-action seam (documented, NOT implemented here): per-action emotion docs (e.g.
+            // id "bodylang_nod_head") are blocked today because RagPromptBuilder.appendToolBlock skips any
+            // doc whose executor.get(toolId) is null, and only one Command named "bodylang" is registered.
+            // The recommended future path is an OVERRIDE-DOC render: let appendToolBlock render a
+            // whitelisted set of metadata-only sub-doc ids using the parent command's usage line, instead
+            // of gating on Command presence — zero command-name proliferation. Do NOT add new docs or
+            // change appendToolBlock in this phase; this comment + the plan establish the seam only.
             doc("bodylang",
                 "bodylang",
-                "Perform a body language or emote animation. Supported actions: greeting, nod_head, shake_head, victory.",
-                "Use when the owner or social context calls for a non-verbal physical reaction — greeting an arrival, nodding agreement, shaking head in disagreement, or celebrating a victory. Do NOT use for movement or task commands.",
+                "Perform a body-language / emote animation. Valid actions: greeting, nod_head, shake_head, victory. Gestures can be TTS-timed by embedding a silent inline marker [bl:<action>] inside the spoken message at the exact point the gesture should fire (e.g. \"Hi! [bl:greeting] Nice to meet you.\"); markers are never spoken or shown. The whole-message command form `bodylang <action>` also works.",
+                "Use when the social context calls for a non-verbal physical reaction — greeting an arrival, nodding agreement, shaking head in disagreement, or celebrating a victory. Prefer the inline [bl:<action>] marker inside the message so the gesture syncs with speech; use the command form for a single whole-message gesture. Do NOT use for movement or task commands. Only the four listed actions are valid.",
                 list("bodylang greeting", "bodylang nod_head", "bodylang shake_head", "bodylang victory"),
-                list("emote", "animation", "gesture", "wave", "nod", "shake head", "celebrate",
-                     "victory dance", "greet", "hello gesture", "non-verbal", "body motion",
-                     "react", "cheer", "disagree", "agree"),
+                list("emote", "animation", "gesture", "non-verbal", "body motion", "react",
+                     "bow", "greet", "hello", "welcome",
+                     "nod", "agree", "affirmative", "acknowledge", "yes",
+                     "shake", "disagree", "negative", "no",
+                     "celebrate", "cheer", "triumph", "victory dance"),
                 list("social", "utility")),
 
             doc("food",
