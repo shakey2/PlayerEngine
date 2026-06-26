@@ -66,6 +66,52 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     private double deepCheckWeakTokenCoverage = 0.35;
     private boolean forceDeepCheckOnEmpty = true;
 
+    // --- Phase D: GraphRAG roleplay memory (W7 — master gate + memory-pipeline windowed cap) ---
+
+    /**
+     * Master off switch for the Phase D GraphRAG long-term memory pipeline. Default {@code false} —
+     * memory is disabled until explicitly enabled AND the companion owner is a confirmed patron
+     * (both must be true; the patron check is in {@code MemoryGate}). The later integration pass adds
+     * the W3/W4/W5/W6 tuning keys; W7 owns only this flag + the two window keys below.
+     */
+    private boolean enableGraphRagMemory = false;
+    /** Hard per-billing-key memory LLM calls per window (worst-case spend lever). Clamped [0, 1000]. */
+    private int memoryCallsPerWindow = 50;
+    /** Memory-pipeline window length in minutes. Clamped [1, 1440]. */
+    private int memoryWindowMinutes = 60;
+
+    // --- Phase D: GraphRAG roleplay memory (W3/W4/W5/W6 tuning keys — integration pass) ---
+    // Key NAMES + defaults below are a cross-branch parity contract (must be byte-identical on 1.21.1).
+
+    /** W3: gated-turn batch size floor before one extraction fires. */
+    private int memoryExtractionBatchMin = 5;
+    /** W3: gated-turn batch buffer ceiling (recency-biased drop above this). */
+    private int memoryExtractionBatchMax = 10;
+    /** W3: zero-LLM extraction eligibility length floor (chars). */
+    private int memoryExtractionLengthThreshold = 40;
+    /** W4: MinHash fuzzy-resolution length floor; mentions shorter than this skip layer 2. */
+    private int memoryLayer2MinChars = 20;
+    /** W5: ego-graph BFS hop bound. */
+    private int memoryMaxHops = 2;
+    /** W5: ego-graph BFS visited-node bound. */
+    private int memoryMaxEgoNodes = 64;
+    /** W5: tail-injected memory block char cap (~400 tokens). */
+    private int memoryBlockCharCap = 1600;
+    /** W5: knowledge-boundary confidence threshold. Clamped [0, 1]. */
+    private double memoryMinConfidence = 0.20;
+    /** W5/W6: per-game-hour recency decay base. */
+    private double memoryDecayBase = 0.995;
+    /** W5/W6: ticks per game-time unit used for recency decay. */
+    private long memoryGameTimeUnit = 24000;
+    /** W6/W5: scored hits injected per turn. Clamped [1, 50]. */
+    private int memoryRetrievalTopK = 5;
+    /** W6: cumulative-importance reflection trigger. Clamped [1, 100000]. */
+    private int reflectionImportanceThreshold = 150;
+    /** W6: relationship-summary char cap (prefix-size budget). Clamped [0, 1000]. */
+    private int relationshipSummaryCharCap = 280;
+    /** W6: importance rubric version (advisory; pairs with MemoryStore.setImportanceRubricVersion). */
+    private int importanceRubricVersion = 1;
+
     // --- Phase B4: Mod intelligence ---
 
     private boolean modIntelligenceEnabled = true;
@@ -452,4 +498,151 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
 
     public boolean isForceDeepCheckOnEmpty() { return forceDeepCheckOnEmpty; }
     public void setForceDeepCheckOnEmpty(boolean v) { this.forceDeepCheckOnEmpty = v; }
+
+    // --- Phase D getters/setters (W7) ---
+
+    public boolean isEnableGraphRagMemory() { return enableGraphRagMemory; }
+    public void setEnableGraphRagMemory(boolean v) { this.enableGraphRagMemory = v; }
+
+    public int getMemoryCallsPerWindow() { return memoryCallsPerWindow; }
+    public void setMemoryCallsPerWindow(int v) { this.memoryCallsPerWindow = v; }
+
+    /** Clamped to [0, 1000]. */
+    public int getMemoryCallsPerWindowClamped() {
+        int n = memoryCallsPerWindow;
+        if (n < 0) return 0;
+        if (n > 1000) return 1000;
+        return n;
+    }
+
+    public int getMemoryWindowMinutes() { return memoryWindowMinutes; }
+    public void setMemoryWindowMinutes(int v) { this.memoryWindowMinutes = v; }
+
+    /** Clamped to [1, 1440]. */
+    public int getMemoryWindowMinutesClamped() {
+        int m = memoryWindowMinutes;
+        if (m < 1) return 1;
+        if (m > 1440) return 1440;
+        return m;
+    }
+
+    // --- Phase D getters/setters (W3/W4/W5/W6 tuning keys — integration pass) ---
+
+    public int getMemoryExtractionBatchMin() { return memoryExtractionBatchMin; }
+    public void setMemoryExtractionBatchMin(int v) { this.memoryExtractionBatchMin = v; }
+
+    public int getMemoryExtractionBatchMax() { return memoryExtractionBatchMax; }
+    public void setMemoryExtractionBatchMax(int v) { this.memoryExtractionBatchMax = v; }
+
+    public int getMemoryExtractionLengthThreshold() { return memoryExtractionLengthThreshold; }
+    public void setMemoryExtractionLengthThreshold(int v) { this.memoryExtractionLengthThreshold = v; }
+
+    public int getMemoryLayer2MinChars() { return memoryLayer2MinChars; }
+    public void setMemoryLayer2MinChars(int v) { this.memoryLayer2MinChars = v; }
+
+    /** Clamped to [0, 200]. */
+    public int getMemoryLayer2MinCharsClamped() {
+        int n = memoryLayer2MinChars;
+        if (n < 0) return 0;
+        if (n > 200) return 200;
+        return n;
+    }
+
+    public int getMemoryMaxHops() { return memoryMaxHops; }
+    public void setMemoryMaxHops(int v) { this.memoryMaxHops = v; }
+
+    /** Clamped to [1, 6]. */
+    public int getMemoryMaxHopsClamped() {
+        int n = memoryMaxHops;
+        if (n < 1) return 1;
+        if (n > 6) return 6;
+        return n;
+    }
+
+    public int getMemoryMaxEgoNodes() { return memoryMaxEgoNodes; }
+    public void setMemoryMaxEgoNodes(int v) { this.memoryMaxEgoNodes = v; }
+
+    /** Clamped to [1, 4096]. */
+    public int getMemoryMaxEgoNodesClamped() {
+        int n = memoryMaxEgoNodes;
+        if (n < 1) return 1;
+        if (n > 4096) return 4096;
+        return n;
+    }
+
+    public int getMemoryBlockCharCap() { return memoryBlockCharCap; }
+    public void setMemoryBlockCharCap(int v) { this.memoryBlockCharCap = v; }
+
+    /** Clamped to [0, 8000]. */
+    public int getMemoryBlockCharCapClamped() {
+        int n = memoryBlockCharCap;
+        if (n < 0) return 0;
+        if (n > 8000) return 8000;
+        return n;
+    }
+
+    public double getMemoryMinConfidence() { return memoryMinConfidence; }
+    public void setMemoryMinConfidence(double v) { this.memoryMinConfidence = v; }
+
+    /** Clamped to [0.0, 1.0]. */
+    public double getMemoryMinConfidenceClamped() {
+        double d = memoryMinConfidence;
+        if (d < 0.0) return 0.0;
+        if (d > 1.0) return 1.0;
+        return d;
+    }
+
+    public double getMemoryDecayBase() { return memoryDecayBase; }
+    public void setMemoryDecayBase(double v) { this.memoryDecayBase = v; }
+
+    /** Clamped to (0.0, 1.0] (a decay base outside this range is meaningless). */
+    public double getMemoryDecayBaseClamped() {
+        double d = memoryDecayBase;
+        if (d <= 0.0 || d > 1.0) return 0.995;
+        return d;
+    }
+
+    public long getMemoryGameTimeUnit() { return memoryGameTimeUnit; }
+    public void setMemoryGameTimeUnit(long v) { this.memoryGameTimeUnit = v; }
+
+    /** Clamped to >= 1 (division basis). */
+    public long getMemoryGameTimeUnitClamped() {
+        return memoryGameTimeUnit < 1 ? 1 : memoryGameTimeUnit;
+    }
+
+    public int getMemoryRetrievalTopK() { return memoryRetrievalTopK; }
+    public void setMemoryRetrievalTopK(int v) { this.memoryRetrievalTopK = v; }
+
+    /** Clamped to [1, 50]. */
+    public int getMemoryRetrievalTopKClamped() {
+        int n = memoryRetrievalTopK;
+        if (n < 1) return 1;
+        if (n > 50) return 50;
+        return n;
+    }
+
+    public int getReflectionImportanceThreshold() { return reflectionImportanceThreshold; }
+    public void setReflectionImportanceThreshold(int v) { this.reflectionImportanceThreshold = v; }
+
+    /** Clamped to [1, 100000]. */
+    public int getReflectionImportanceThresholdClamped() {
+        int n = reflectionImportanceThreshold;
+        if (n < 1) return 1;
+        if (n > 100000) return 100000;
+        return n;
+    }
+
+    public int getRelationshipSummaryCharCap() { return relationshipSummaryCharCap; }
+    public void setRelationshipSummaryCharCap(int v) { this.relationshipSummaryCharCap = v; }
+
+    /** Clamped to [0, 1000]. */
+    public int getRelationshipSummaryCharCapClamped() {
+        int n = relationshipSummaryCharCap;
+        if (n < 0) return 0;
+        if (n > 1000) return 1000;
+        return n;
+    }
+
+    public int getImportanceRubricVersion() { return importanceRubricVersion; }
+    public void setImportanceRubricVersion(int v) { this.importanceRubricVersion = v; }
 }

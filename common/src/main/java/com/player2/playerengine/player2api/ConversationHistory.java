@@ -326,6 +326,18 @@ public class ConversationHistory {
    public ConversationHistory copyThenWrapLatestWithStatus(String worldStatus, String agentStatus,
          String altoclefStatusMsgs, Player2APIService player2apiService, Optional<String> reminderString,
          Optional<String> validCommandsBlock) {
+      // Existing-arity delegate: no memory block → behavior byte-identical to pre-Phase-D.
+      return copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoclefStatusMsgs,
+            player2apiService, reminderString, validCommandsBlock, Optional.empty());
+   }
+
+   // Phase D (W5) overload: identical body PLUS the per-turn memory block injected at the TAIL of the
+   // throwaway copy, AFTER validCommands. The memory block lives ONLY in this never-persisted copy
+   // (historyFile == null), so it never reaches conversation.jsonl. An absent / blank block is dropped
+   // by the .filter guard, so the non-patron / empty path produces a byte-identical request.
+   public ConversationHistory copyThenWrapLatestWithStatus(String worldStatus, String agentStatus,
+         String altoclefStatusMsgs, Player2APIService player2apiService, Optional<String> reminderString,
+         Optional<String> validCommandsBlock, Optional<String> memoryBlock) {
       ConversationHistory copy = new ConversationHistory(this.conversationHistory.get(0).get("content").getAsString());
 
       for (int i = 1; i < this.conversationHistory.size() - 1; i++) {
@@ -349,6 +361,10 @@ public class ConversationHistory {
             validCommandsBlock
                   .filter(s -> !s.isBlank())
                   .ifPresent(block -> msgObj.add("validCommands", block));
+            // W5: memory injected at the TAIL, after validCommands. Absent/blank → key omitted.
+            memoryBlock
+                  .filter(s -> !s.isBlank())
+                  .ifPresent(block -> msgObj.add("memory", block));
             last.addProperty("content", msgObj.toString());
          }
 

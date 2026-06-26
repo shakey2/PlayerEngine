@@ -163,6 +163,65 @@ public final class Player2NpcPersistencePaths {
     }
 
     // -------------------------------------------------------------------------
+    // GraphRAG memory paths (Phase D, W2) — per companion, PRIVATE
+    // -------------------------------------------------------------------------
+
+    /** Per-companion memory subdirectory name. */
+    public static final String MEMORY_DIR_NAME = "memory";
+
+    /** Authoritative memory graph filename within a companion's memory directory. */
+    public static final String MEMORY_GRAPH_FILE_NAME = "graph.json";
+
+    /**
+     * Owner-resolved per-companion memory directory:
+     * {@code <worldRoot>/player2npc/persistentdata/owners/<ownerUuid>/<companionId>/memory/}.
+     *
+     * <p>Mirrors the conversation-history canonical layout. The memory graph is strictly private
+     * to one {@code (ownerUuid, companionId)} pair.
+     */
+    public static Path memoryDir(Path worldRoot, UUID ownerUuid, String companionId) {
+        return ownersRoot(worldRoot)
+                .resolve(ownerUuid.toString())
+                .resolve(companionId)
+                .resolve(MEMORY_DIR_NAME);
+    }
+
+    public static Path memoryDir(MinecraftServer server, UUID ownerUuid, String companionId) {
+        return memoryDir(server.getWorldPath(LevelResource.ROOT), ownerUuid, companionId);
+    }
+
+    /**
+     * Owner-UUID-unresolvable fallback memory directory:
+     * {@code <worldRoot>/player2npc/persistentdata/<entityUuid>/<companionId>/memory/}.
+     *
+     * <p>Mirrors the conversation-history entity-scoped fallback (see {@code AIPersistantData}):
+     * used when the owner UUID cannot be resolved this session.
+     */
+    public static Path memoryDirEntityFallback(Path worldRoot, UUID entityUuid, String companionId) {
+        return persistentDataRoot(worldRoot)
+                .resolve(entityUuid.toString())
+                .resolve(companionId)
+                .resolve(MEMORY_DIR_NAME);
+    }
+
+    public static Path memoryDirEntityFallback(MinecraftServer server, UUID entityUuid, String companionId) {
+        return memoryDirEntityFallback(server.getWorldPath(LevelResource.ROOT), entityUuid, companionId);
+    }
+
+    /**
+     * Authoritative memory graph file (owner-resolved):
+     * {@code owners/<ownerUuid>/<companionId>/memory/graph.json}.
+     */
+    public static Path memoryGraphFile(Path worldRoot, UUID ownerUuid, String companionId) {
+        return memoryDir(worldRoot, ownerUuid, companionId).resolve(MEMORY_GRAPH_FILE_NAME);
+    }
+
+    /** Authoritative memory graph file (owner-unresolvable fallback). */
+    public static Path memoryGraphFileEntityFallback(Path worldRoot, UUID entityUuid, String companionId) {
+        return memoryDirEntityFallback(worldRoot, entityUuid, companionId).resolve(MEMORY_GRAPH_FILE_NAME);
+    }
+
+    // -------------------------------------------------------------------------
     // Deferred-job store paths (WS7)
     // -------------------------------------------------------------------------
 

@@ -469,9 +469,13 @@ public class AgentConversationData {
         this.turnAgentStatus = agentStatus;
         this.turnAltoClefDebugMsgs = altoClefDebugMsgs;
         this.turnReminderString = reminderString;
+        // Phase D (W5): zero-LLM memory retrieval, hard-gated by the OWNER's patron status (fail-closed
+        // → Optional.empty(), request byte-identical to today). Injected at the user-tail only.
+        Optional<String> memoryBlock = resolveMemoryBlock(lastUserMsgForRag);
         ConversationHistory historyWithWrappedStatus = mod.getAIPersistantData()
                 .getConversationHistoryWrappedWithStatus(worldStatus, agentStatus, altoClefDebugMsgs,
-                        mod.getPlayer2APIService(), reminderString, Optional.ofNullable(pendingValidCommandsBlock));
+                        mod.getPlayer2APIService(), reminderString, Optional.ofNullable(pendingValidCommandsBlock),
+                        memoryBlock);
 
         LOGGER.info("[AICommandBridge/processChatWithAPI]: Calling LLM: history={}",
                 new Object[] { historyWithWrappedStatus.toString() });
@@ -481,6 +485,80 @@ public class AgentConversationData {
                 jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
                 historyWithWrappedStatus, ragUserMsg, false, false);
         completer.processToJson(mod.getPlayer2APIService(), historyWithWrappedStatus, onLLMResponse, onErrMsg, true, AiTaskClass.DECISION);
+    }
+
+    /**
+     * Phase D (W5) per-turn memory retrieval. Resolves the OWNER's billing context, runs the W7 patron
+     * gate, and only on an {@code allowed} (patron + master-flag-on) decision performs the zero-LLM
+     * graph retrieval over the companion's published snapshot. Non-patron / disabled / no store / empty
+     * graph → {@link Optional#empty()} (request byte-identical to today). Never throws — any failure
+     * degrades to no memory block. No Player2 call happens here (retrieval is deterministic on-device).
+     */
+    private Optional<String> resolveMemoryBlock(Event.UserMessage lastUserMsgForRag) {
+        try {
+            String turnText = lastUserMsgForRag != null ? lastUserMsgForRag.message() : null;
+            if (turnText == null || turnText.isBlank()) {
+                return Optional.empty();
+            }
+            LivingEntity self = mod.getPlayer();
+            if (self == null) {
+                return Optional.empty();
+            }
+            MinecraftServer server = self.getServer();
+            if (server == null) {
+                return Optional.empty();
+            }
+            Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
+            // Resolve the OWNER billing context (never the prompter's), then the fail-closed patron gate.
+            com.player2.playerengine.player2api.Player2PayerResolution.ApiBillingContext ownerBilling =
+                    com.player2.playerengine.player2api.Player2PayerResolution.resolve(
+                            mod, mod.getOwnerUsername(), cfg.getHeartbeatClientId());
+            com.player2.playerengine.memory.budget.MemoryGateDecision decision =
+                    com.player2.playerengine.memory.budget.MemoryGate.preflight(server, ownerBilling);
+            com.player2.playerengine.memory.budget.Layer3Context ctx =
+                    com.player2.playerengine.memory.budget.Layer3Context.fromGate(ownerBilling, decision);
+            if (!ctx.layer3Enabled()) {
+                return Optional.empty(); // not a patron / disabled / over budget
+            }
+
+            // Resolve this companion's scope + live store (lazy-load via the registry).
+            Character character = mod.getAIPersistantData() != null
+                    ? mod.getAIPersistantData().getCharacter() : null;
+            String companionId = character != null ? character.id() : null;
+            if (companionId == null || companionId.isBlank()) {
+                return Optional.empty();
+            }
+            UUID ownerUuid = (mod.getOwner() != null) ? mod.getOwner().getUUID() : null;
+            com.player2.playerengine.memory.MemoryScope scope = (ownerUuid != null)
+                    ? com.player2.playerengine.memory.MemoryScope.of(ownerUuid, companionId)
+                    : com.player2.playerengine.memory.MemoryScope.ofEntityFallback(self.getUUID(), companionId);
+
+            com.player2.playerengine.memory.MemoryStore store =
+                    com.player2.playerengine.memory.MemoryStoreRegistry.getOrLoad(server, scope);
+            if (store == null) {
+                return Optional.empty();
+            }
+
+            long gameTime = server.overworld() != null ? server.overworld().getGameTime() : 0L;
+            com.player2.playerengine.memory.retrieval.MemoryRetriever.Thresholds thresholds =
+                    new com.player2.playerengine.memory.retrieval.MemoryRetriever.Thresholds(
+                            cfg.getMemoryMaxHopsClamped(),
+                            cfg.getMemoryMaxEgoNodesClamped(),
+                            cfg.getMemoryBlockCharCapClamped(),
+                            cfg.getMemoryMinConfidenceClamped(),
+                            cfg.getMemoryDecayBaseClamped(),
+                            cfg.getMemoryGameTimeUnitClamped(),
+                            cfg.getMemoryRetrievalTopKClamped());
+            com.player2.playerengine.memory.retrieval.MemoryRetriever retriever =
+                    new com.player2.playerengine.memory.retrieval.MemoryRetriever(store);
+            com.player2.playerengine.memory.retrieval.MemoryRetrievalResult result =
+                    retriever.retrieve(turnText, ownerUuid, companionId, gameTime, thresholds, true);
+            return result != null ? result.memoryBlock() : Optional.empty();
+        } catch (Exception e) {
+            LOGGER.warn("[Memory] retrieval failed; degrading to no memory block ({})",
+                    e.getClass().getSimpleName());
+            return Optional.empty();
+        }
     }
 
     private boolean isEventDuplicateOfLastMessage(Event evt) {
