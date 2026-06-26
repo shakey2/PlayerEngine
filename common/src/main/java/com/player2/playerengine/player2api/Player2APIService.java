@@ -422,7 +422,8 @@ public class Player2APIService {
 
    public void startSTT() {
       JsonObject requestBody = new JsonObject();
-      requestBody.addProperty("timeout", 180);
+      // Capped at the /v1/stt/start schema maximum (StartSpeechToTextRequest.timeout max 60s).
+      requestBody.addProperty("timeout", 60);
 
       try {
          api("POST", "/v1/stt/start", requestBody);

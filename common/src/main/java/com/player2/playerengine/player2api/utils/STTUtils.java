@@ -20,13 +20,71 @@ public class STTUtils {
 
     private static final ExecutorService sttThread = Executors.newSingleThreadExecutor();
 
-    /** Matches {@link com.player2.playerengine.player2api.Player2APIService#startSTT()}. */
-    private static final int STT_TIMEOUT_SECONDS = 180;
+    /**
+     * Matches {@link com.player2.playerengine.player2api.Player2APIService#startSTT()}.
+     * Capped at the {@code /v1/stt/start} schema maximum ({@code StartSpeechToTextRequest.timeout}
+     * max 60s, min 3s); push-to-talk holds are far shorter than this, so the timeout is only the
+     * safety ceiling for an abandoned session. A value above 60 would be a spec-invalid request a
+     * conformant app may reject with 4xx.
+     */
+    private static final int STT_TIMEOUT_SECONDS = 60;
+
+    /**
+     * Minimum capture window (ms) the local Player2 app is given between {@code /v1/stt/start}
+     * completing and {@code /v1/stt/stop} being issued. Without this floor, a quick push-to-talk
+     * tap (press and release within the blocking {@code /v1/stt/start} latency) opens the recording
+     * window late and immediately closes it, so the app captures near-silence and returns an empty
+     * transcript. The window the user actually held (press -> release wall time) does not begin in
+     * the app until {@code /v1/stt/start} returns; this floor guarantees the app records for at least
+     * this long even on an instant tap. Conservative value: long enough to cover a short word, short
+     * enough not to feel laggy. Disk/console reasoning only; never model-facing.
+     */
+    private static final long MIN_CAPTURE_WINDOW_MS = 600L;
 
     public static volatile boolean isListening = false;
     private static volatile boolean pushToTalkActive = false;
     private static volatile boolean sessionStarted = false;
     private static volatile boolean stopPendingAfterStart = false;
+
+    // --- Bounded per-cycle diagnostic timing (millis/booleans/counts only — never audio/transcript text).
+    // Lets a tester's log conclusively show the press -> start-complete -> release -> stop timeline and
+    // whether the dead-window mechanism is firing, without reproducing locally.
+    private static final java.util.concurrent.atomic.AtomicLong cycleCounter = new java.util.concurrent.atomic.AtomicLong();
+    private static volatile long currentCycleId = 0L;
+    private static volatile long pressNanos = 0L;
+    private static volatile long startRequestNanos = 0L;
+    private static volatile long startCompleteNanos = 0L;
+    private static volatile long releaseNanos = 0L;
+    private static volatile boolean ttsActiveAtPress = false;
+
+    private static long msSince(long fromNanos) {
+        if (fromNanos == 0L) {
+            return -1L;
+        }
+        return (System.nanoTime() - fromNanos) / 1_000_000L;
+    }
+
+    private static long deltaMs(long fromNanos, long toNanos) {
+        if (fromNanos == 0L || toNanos == 0L) {
+            return -1L;
+        }
+        return (toNanos - fromNanos) / 1_000_000L;
+    }
+
+    /**
+     * Bounded one-line timeline for the current push-to-talk cycle: numeric latencies + booleans only,
+     * never audio/transcript text. Lets a tester log prove press -> start-complete -> release -> stop
+     * timing and whether the dead-window mechanism fired.
+     */
+    private static String cycleTimingSummary() {
+        long heldMs = deltaMs(pressNanos, releaseNanos);
+        long startLatencyMs = deltaMs(startRequestNanos, startCompleteNanos);
+        long pressToStartCompleteMs = deltaMs(pressNanos, startCompleteNanos);
+        long captureWindowMs = deltaMs(startCompleteNanos, System.nanoTime());
+        return String.format(
+                "[cycle=%d heldMs=%d startLatencyMs=%d pressToStartCompleteMs=%d captureWindowSinceStartMs=%d ttsActiveAtPress=%b]",
+                currentCycleId, heldMs, startLatencyMs, pressToStartCompleteMs, captureWindowMs, ttsActiveAtPress);
+    }
 
     public static String clientId;
 
@@ -55,7 +113,14 @@ public class STTUtils {
             pushToTalkActive = true;
             isListening = true;
             stopPendingAfterStart = false;
-            LOGGER.info("STT: push-to-talk pressed (clientId={})", clientId);
+            currentCycleId = cycleCounter.incrementAndGet();
+            pressNanos = System.nanoTime();
+            startRequestNanos = 0L;
+            startCompleteNanos = 0L;
+            releaseNanos = 0L;
+            ttsActiveAtPress = AudioUtils.isPlaybackActive();
+            LOGGER.info("STT: push-to-talk pressed (cycle={}, clientId={}, ttsActiveAtPress={})",
+                    currentCycleId, clientId, ttsActiveAtPress);
             sttThread.execute(STTUtils::startSession);
         } else {
             if (!pushToTalkActive) {
@@ -64,7 +129,8 @@ public class STTUtils {
             }
             pushToTalkActive = false;
             isListening = false;
-            LOGGER.info("STT: push-to-talk released");
+            releaseNanos = System.nanoTime();
+            LOGGER.info("STT: push-to-talk released (cycle={}, heldMs={})", currentCycleId, msSince(pressNanos));
             sttThread.execute(STTUtils::stopSession);
         }
     }
@@ -75,6 +141,14 @@ public class STTUtils {
         pushToTalkActive = false;
         isListening = false;
         stopPendingAfterStart = false;
+        // Clear the aborted cycle's diagnostic timing so a late stop log (or a new cycle's first
+        // log before setIsListening overwrites them) does not print stale press/release/TTS values.
+        // Diagnostic-only fields; no operational effect.
+        pressNanos = 0L;
+        startRequestNanos = 0L;
+        startCompleteNanos = 0L;
+        releaseNanos = 0L;
+        ttsActiveAtPress = false;
         sttThread.execute(() -> {
             if (sessionStarted) {
                 stopSessionInternal(false);
@@ -105,12 +179,34 @@ public class STTUtils {
         try {
             JsonObject requestBody = new JsonObject();
             requestBody.addProperty("timeout", STT_TIMEOUT_SECONDS);
-            Player2HTTPUtils.sendRequest(mc.player, clientId, "/v1/stt/start", true, requestBody);
+            startRequestNanos = System.nanoTime();
+            Map<String, JsonElement> startResponse =
+                    Player2HTTPUtils.sendRequest(mc.player, clientId, "/v1/stt/start", true, requestBody);
+            startCompleteNanos = System.nanoTime();
             sessionStarted = true;
-            LOGGER.info("STT: session started via /v1/stt/start (clientId={})", clientId);
+            LOGGER.info("STT: session started via /v1/stt/start (cycle={}, startLatencyMs={}, startBodyEmpty={}, clientId={})",
+                    currentCycleId, msSince(startRequestNanos), startResponse == null || startResponse.isEmpty(), clientId);
             if (stopPendingAfterStart) {
-                LOGGER.info("STT: stop was queued while start was in flight; stopping now");
+                // Quick-tap path: the user already released before /v1/stt/start returned, so the app's
+                // recording window only just opened. Guarantee a minimum capture window before stopping
+                // so an instant tap does not yield an empty transcript (the regression's core mechanism).
                 stopPendingAfterStart = false;
+                long windowSoFarMs = msSince(startCompleteNanos);
+                long remainingMs = MIN_CAPTURE_WINDOW_MS - Math.max(0L, windowSoFarMs);
+                LOGGER.info("STT: stop was queued while start was in flight (cycle={}); enforcing min capture window (remainingMs={})",
+                        currentCycleId, Math.max(0L, remainingMs));
+                if (remainingMs > 0L) {
+                    try {
+                        Thread.sleep(remainingMs);
+                    } catch (InterruptedException ie) {
+                        // Interrupted only on shutdownNow(); abortSession() has already queued the
+                        // session stop, so do NOT fire a second /v1/stt/stop on this interrupted,
+                        // shutting-down thread. Re-set the flag and bail.
+                        Thread.currentThread().interrupt();
+                        LOGGER.info("STT: min-capture-window sleep interrupted (cycle={}); skipping stop (shutdown)", currentCycleId);
+                        return;
+                    }
+                }
                 stopSessionInternal(true);
             }
         } catch (Exception e) {
@@ -123,8 +219,28 @@ public class STTUtils {
     private static void stopSession() {
         if (!sessionStarted) {
             stopPendingAfterStart = true;
-            LOGGER.info("STT: stop requested before session started; will stop after /v1/stt/start completes");
+            LOGGER.info("STT: stop requested before session started (cycle={}); will stop after /v1/stt/start completes",
+                    currentCycleId);
             return;
+        }
+        // Session opened before release. If the recording window since /v1/stt/start completed is still
+        // shorter than the floor (short hold), pad it so the app captures a usable clip rather than a
+        // sliver of audio that decodes to an empty transcript.
+        long windowSoFarMs = msSince(startCompleteNanos);
+        long remainingMs = MIN_CAPTURE_WINDOW_MS - Math.max(0L, windowSoFarMs);
+        LOGGER.info("STT: stop after started (cycle={}, windowSinceStartMs={}, padMs={})",
+                currentCycleId, windowSoFarMs, Math.max(0L, remainingMs));
+        if (remainingMs > 0L) {
+            try {
+                Thread.sleep(remainingMs);
+            } catch (InterruptedException ie) {
+                // Interrupted only on shutdownNow(); abortSession() has already queued the session
+                // stop, so do NOT fire a second /v1/stt/stop on this interrupted, shutting-down
+                // thread. Re-set the flag and bail.
+                Thread.currentThread().interrupt();
+                LOGGER.info("STT: stop-pad sleep interrupted (cycle={}); skipping stop (shutdown)", currentCycleId);
+                return;
+            }
         }
         stopSessionInternal(true);
     }
@@ -159,16 +275,17 @@ public class STTUtils {
     private static void deliverTranscriptFromStopResponse(Map<String, JsonElement> responseMap) {
         String text = extractTranscriptText(responseMap);
         if (text == null) {
-            LOGGER.warn("STT: /v1/stt/stop response has no usable transcript (keys={})",
-                    SttLogging.jsonResponseKeys(responseMap));
+            LOGGER.warn("STT: /v1/stt/stop response has no usable transcript (cycle={}, keys={}); timeline {}",
+                    currentCycleId, SttLogging.jsonResponseKeys(responseMap), cycleTimingSummary());
             return;
         }
         if (text.isBlank()) {
-            LOGGER.warn("STT: /v1/stt/stop returned empty transcript (keys={})",
-                    SttLogging.jsonResponseKeys(responseMap));
+            LOGGER.warn("STT: /v1/stt/stop returned empty transcript (cycle={}, keys={}); timeline {}",
+                    currentCycleId, SttLogging.jsonResponseKeys(responseMap), cycleTimingSummary());
             return;
         }
-        LOGGER.info("STT: transcript received (len={}, preview=\"{}\")", text.length(), SttLogging.messagePreview(text));
+        LOGGER.info("STT: transcript received (cycle={}, len={}, preview=\"{}\"); timeline {}",
+                currentCycleId, text.length(), SttLogging.messagePreview(text), cycleTimingSummary());
         onSTTMessageGenerated(text);
     }
 
