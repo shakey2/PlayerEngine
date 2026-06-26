@@ -94,10 +94,10 @@ public class Player2APIService {
       JsonArray messagesArray = new JsonArray();
 
       for (JsonObject msg : conversationHistory.getListJSON()) {
-         messagesArray.add(msg);
+         messagesArray.add(LogEgressGuard.cappedMessage(msg));
       }
-      String lastMessageForDebug = conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1)
-            .toString();
+      String lastMessageForDebug = LogEgressGuard.capForModel(
+            conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1).toString(), "debug");
 
       requestBody.add("messages", messagesArray);
       // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 2a: log outgoing request message count and body char length (NOT tokens)
@@ -145,7 +145,7 @@ public class Player2APIService {
       JsonArray messagesArray = new JsonArray();
 
       for (JsonObject msg : conversationHistory.getListJSON()) {
-         messagesArray.add(msg);
+         messagesArray.add(LogEgressGuard.cappedMessage(msg));
       }
 
       requestBody.add("messages", messagesArray);
@@ -155,8 +155,8 @@ public class Player2APIService {
          int dbgBodyChars = requestBody.toString().length();
          LOGGER.info("[DBG llm-latency-2026-06-13] request messages={} bodyChars={} taskClass={}", dbgMsgCount, dbgBodyChars, taskClass);
       } // [/DEBUG-INSTR:llm-latency-2026-06-13]
-      String lastMessageForDebug = conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1)
-            .toString();
+      String lastMessageForDebug = LogEgressGuard.capForModel(
+            conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1).toString(), "debug");
       LOGGER.info("Called complete conversation (string) HTTP request, last msg={}", lastMessageForDebug);
       Map<String, JsonElement> responseMap = sendChatCompletionRequest(requestBody, taskClass);
       // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 2b (toString variant): log usage tokens from response if backend provides them
