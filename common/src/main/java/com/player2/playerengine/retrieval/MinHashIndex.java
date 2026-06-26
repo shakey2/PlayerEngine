@@ -22,7 +22,7 @@ import java.util.Set;
  *
  * <p>LSH threshold (probability ≈ 0.5 at Jaccard ≈ (1/32)^(1/4) ≈ 0.42).
  */
-public final class MinHashIndex {
+public final class MinHashIndex implements Retriever {
 
     private static final int NUM_HASHES     = 128;
     private static final int NUM_BANDS      = 32;
@@ -130,6 +130,12 @@ public final class MinHashIndex {
                     Integer.MAX_VALUE, r + 1));
         }
         return hits;
+    }
+
+    /** {@link Retriever} slot: MinHash = {@link RetrieverRegistry#SLOT_MINHASH}. */
+    @Override
+    public int slotIndex() {
+        return RetrieverRegistry.SLOT_MINHASH;
     }
 
     // -------------------------------------------------------------------------

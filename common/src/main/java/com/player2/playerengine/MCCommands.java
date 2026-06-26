@@ -59,6 +59,9 @@ import com.player2.playerengine.tasks.crafting.resolver.ResolverResult;
 import com.player2.playerengine.util.ItemTarget;
 
 import dev.architectury.event.events.common.LifecycleEvent;
+import dev.architectury.event.events.common.TickEvent;
+import com.player2.playerengine.memory.MemoryStoreRegistry;
+import com.player2.playerengine.memory.ingest.MemoryIngestionService;
 import net.minecraft.world.entity.player.Player;
 import com.player2.playerengine.player2api.AgentSideEffects;
 import net.minecraft.server.level.ServerPlayer;
@@ -91,6 +94,9 @@ public class MCCommands {
 
     /** Max {@code --category} flags before the goal string on {@code rag retrieve}. */
     private static final int RAG_RETRIEVE_MAX_CATEGORIES = 8;
+
+    /** Phase D: ticks between memory-store dirty flushes (no-op when clean); ~5s at 20 TPS. */
+    private static final int MEMORY_FLUSH_INTERVAL_TICKS = 100;
 
     public static void onInit() {
         LifecycleEvent.SERVER_STARTING.register(server -> {
@@ -127,6 +133,27 @@ public class MCCommands {
             } catch (Exception e) {
                 LOGGER.warn("PlayerPlacedBlockStore startup load failed — block protection unavailable: {}",
                         e.getMessage());
+            }
+            // Phase D memory (W2/W3 integration): install the store-provider seam so the async
+            // ingestion path resolves a live per-companion MemoryStore through the registry (the
+            // registry lazy-loads on first use; SERVER THREAD lookup inside server.execute). Failures
+            // here only leave memory ingestion a no-op — never abort server start.
+            try {
+                MemoryIngestionService.setStoreProvider(MemoryStoreRegistry::getOrLoad);
+            } catch (Exception e) {
+                LOGGER.warn("Memory store-provider wiring failed — memory ingestion disabled: {}",
+                        e.getClass().getSimpleName());
+            }
+        });
+        // Phase D memory (W2 integration): tick-end flush of any dirty per-companion store. flushIfDirty
+        // is a no-op for clean stores, so this is cheap; throttled so we don't compact+hash every tick.
+        TickEvent.SERVER_POST.register(server -> {
+            try {
+                if (server != null && server.getTickCount() % MEMORY_FLUSH_INTERVAL_TICKS == 0) {
+                    MemoryStoreRegistry.flushAllIfDirty(server);
+                }
+            } catch (Exception e) {
+                LOGGER.warn("Memory tick-end flush failed: {}", e.getClass().getSimpleName());
             }
         });
         LifecycleEvent.SERVER_STOPPING.register(server -> {
@@ -172,6 +199,29 @@ public class MCCommands {
                 }
             } catch (Exception e) {
                 LOGGER.warn("SERVER_STOPPING PlayerPlacedBlockStore cleanup failed: {}", e.getMessage());
+            }
+            // Phase D memory (W2 integration): final flush + clear of every per-companion store BEFORE
+            // shutdownBackgroundExecutors() tears down the memory executor — so a dirty graph is persisted
+            // while the world path is still valid. clearAll() does a synchronous final flush per store
+            // (no LLM, no async), then drops the registry so the next SERVER_STARTING starts fresh.
+            //
+            // W6 session-end reflection: intentionally NOT triggered here. Per the plan's W6 binding
+            // (§729-741) the lower-risk resolution is taken — reflection relies solely on the mid-session
+            // cumulative-importance threshold path (fires off-tick with a live context), avoiding the
+            // teardown race where a reflection dispatched at SERVER_STOPPING would hit a terminated
+            // MEMORY_EXECUTOR / invalidated billing context. Memory data is still durably persisted below.
+            try {
+                MemoryStoreRegistry.clearAll(server);
+            } catch (Exception e) {
+                LOGGER.warn("SERVER_STOPPING memory store cleanup failed: {}", e.getClass().getSimpleName());
+            }
+            // Drop W3/W6 per-session static state (turn batcher + reflection in-flight latches) so a
+            // same-JVM (integrated) restart does not carry stale buffered turns into the next session's
+            // graph or leave a reflection latch stuck at true (permanently suppressing reflection).
+            try {
+                MemoryIngestionService.clearSessionState();
+            } catch (Exception e) {
+                LOGGER.warn("SERVER_STOPPING memory ingestion cleanup failed: {}", e.getClass().getSimpleName());
             }
             PlayerEngine.shutdownBackgroundExecutors();
         });

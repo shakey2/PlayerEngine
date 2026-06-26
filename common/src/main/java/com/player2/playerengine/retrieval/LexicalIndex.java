@@ -19,7 +19,7 @@ import java.util.regex.Pattern;
  * <p>No external dependencies. Index state is serializable for persistence via
  * {@link ToolRetriever}.
  */
-public final class LexicalIndex {
+public final class LexicalIndex implements Retriever {
 
     private static final double K1 = 1.2;
     private static final double B  = 0.75;
@@ -141,6 +141,12 @@ public final class LexicalIndex {
             hits.add(new RetrievalHit(state.docIds[is.idx], is.score, r + 1, Integer.MAX_VALUE));
         }
         return hits;
+    }
+
+    /** {@link Retriever} slot: lexical/BM25 = {@link RetrieverRegistry#SLOT_LEXICAL}. */
+    @Override
+    public int slotIndex() {
+        return RetrieverRegistry.SLOT_LEXICAL;
     }
 
     /** Tokenizes text: lowercase → split on non-alphanumeric → discard short tokens. */

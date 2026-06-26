@@ -32,13 +32,76 @@ public class AIPersistantData {
         this.characterId = character == null ? null : character.id();
         Path worldRoot = resolveWorldRootOrNull(mod);
         this.conversationHistoryFile = getConversationHistoryFileOrNull(mod, worldRoot, this.characterId);
+        String basePrompt = withRelationshipSuffix(systemPrompt);
         if (this.conversationHistoryFile != null) {
             migrateLegacyHistoryIfPresent(character, this.characterId, worldRoot, this.conversationHistoryFile, mod);
-            this.conversationHistory = new ConversationHistory(systemPrompt, this.conversationHistoryFile);
+            this.conversationHistory = new ConversationHistory(basePrompt, this.conversationHistoryFile);
         } else {
             // Fallback to non-persistent history if we can't resolve world root or characterId.
-            this.conversationHistory = new ConversationHistory(systemPrompt);
+            this.conversationHistory = new ConversationHistory(basePrompt);
         }
+    }
+
+    /**
+     * Phase D (W6) — the SINGLE combine point for "base prompt + optional {@code [Relationship]} suffix".
+     * EVERY system-prompt rebuild path ({@link #updateSystemPrompt}, {@link #updateSystemPromptWithBlock},
+     * {@link #updateSystemPromptStatic}, and the constructor) routes the freshly-built base prompt through
+     * here so the relationship-summary suffix is <b>byte-identical across all rebuild paths</b> for a given
+     * {@code summaryVersion} — the prefix-cache stability invariant (plan §W6). The summary changes only on
+     * reflection; between reflections this suffix is constant, so two consecutive turns taking different
+     * rebuild paths produce the same system block.
+     *
+     * <p>Empty / absent summary (memory off, store not loaded, non-patron) → suffix omitted → the system
+     * block is <b>byte-identical to today</b>. The summary is normalized + hard-capped by
+     * {@link com.player2.playerengine.memory.reflection.RelationshipSummary} (write-time egress boundary);
+     * {@code setBaseSystemPrompt} additionally applies {@code LogEgressGuard.capForModel(..., "system")}.
+     */
+    private String withRelationshipSuffix(String basePrompt) {
+        String base = basePrompt != null ? basePrompt : "";
+        String summary = currentRelationshipSummaryOrEmpty();
+        return base + com.player2.playerengine.memory.reflection.RelationshipSummary.suffixFor(summary);
+    }
+
+    /**
+     * Reads this companion's current relationship summary from its loaded {@link
+     * com.player2.playerengine.memory.MemoryStore}, or {@code ""} when memory is off / the store is not
+     * loaded / there is no summary. Best-effort and never throws — a failure simply omits the suffix
+     * (byte-identical to baseline). Does not load the store (read-only {@code peek}); the store is loaded
+     * lazily by the lifecycle/ingestion/retrieval paths.
+     */
+    private String currentRelationshipSummaryOrEmpty() {
+        try {
+            com.player2.playerengine.memory.MemoryScope scope = resolveMemoryScopeOrNull();
+            if (scope == null) {
+                return "";
+            }
+            com.player2.playerengine.memory.MemoryStore store =
+                    com.player2.playerengine.memory.MemoryStoreRegistry.peek(scope);
+            if (store == null) {
+                return "";
+            }
+            String summary = store.relationshipSummary();
+            return summary != null ? summary : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** Resolves this companion's {@link com.player2.playerengine.memory.MemoryScope} (owner-keyed, entity
+     *  fallback), mirroring the conversation-history layout. {@code null} when the companion id is unknown. */
+    private com.player2.playerengine.memory.MemoryScope resolveMemoryScopeOrNull() {
+        if (this.characterId == null || this.characterId.isBlank()) {
+            return null;
+        }
+        UUID ownerUuid = resolveOwnerUuidOrNull(mod);
+        if (ownerUuid != null) {
+            return com.player2.playerengine.memory.MemoryScope.of(ownerUuid, this.characterId);
+        }
+        if (mod != null && mod.getPlayer() != null) {
+            return com.player2.playerengine.memory.MemoryScope.ofEntityFallback(
+                    mod.getPlayer().getUUID(), this.characterId);
+        }
+        return null;
     }
 
     public void clearHistory() {
@@ -88,16 +151,34 @@ public class AIPersistantData {
 
     public Event dumpEventQueueToConversationHistoryAndReturnLastEvent(Deque<Event> eventQueue, Player2APIService player2apiService){
         Event lastEvent = null;
+        java.util.List<String> committedTurns = new java.util.ArrayList<>();
         while(!eventQueue.isEmpty()){
             Event event = eventQueue.poll();
-            conversationHistory.addUserMessage(event.getConversationHistoryString(), player2apiService);
+            String turn = event.getConversationHistoryString();
+            conversationHistory.addUserMessage(turn, player2apiService);
+            committedTurns.add(turn);
             lastEvent = event;
         }
+        // Phase D memory ingestion (W3): self-gates on patron status + the master flag — a complete
+        // no-op (zero LLM calls, zero writes) for non-patrons / when memory is off. Cheap to call
+        // unconditionally; returns promptly (any extraction is scheduled async, never on the tick).
+        com.player2.playerengine.memory.ingest.MemoryIngestionService.onCuratedTurnsReady(this.mod, committedTurns);
         return lastEvent;
     }
     public ConversationHistory getConversationHistoryWrappedWithStatus(String worldStatus, String agentStatus, String altoClefDebugMsgs, Player2APIService player2apiService, Optional<String> reminderString, Optional<String> validCommandsBlock){
+        // Existing-arity delegate (no memory block) — byte-identical to pre-Phase-D.
+        return getConversationHistoryWrappedWithStatus(worldStatus, agentStatus, altoClefDebugMsgs,
+                player2apiService, reminderString, validCommandsBlock, Optional.empty());
+    }
+
+    /**
+     * Phase D (W5) overload: threads the per-turn memory block into the throwaway wrapped copy so it
+     * is injected at the user-tail (after {@code validCommands}) and never persisted. Non-patron /
+     * empty → caller passes {@link Optional#empty()} → request byte-identical to today.
+     */
+    public ConversationHistory getConversationHistoryWrappedWithStatus(String worldStatus, String agentStatus, String altoClefDebugMsgs, Player2APIService player2apiService, Optional<String> reminderString, Optional<String> validCommandsBlock, Optional<String> memoryBlock){
         return this.conversationHistory
-                .copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoClefDebugMsgs, player2apiService, reminderString, validCommandsBlock);
+                .copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoClefDebugMsgs, player2apiService, reminderString, validCommandsBlock, memoryBlock);
     }
     public void addAssistantMessage(String llmMessage, Player2APIService player2apiService){
         this.conversationHistory.addAssistantMessage(llmMessage, player2apiService);
@@ -113,7 +194,7 @@ public class AIPersistantData {
 
     public void updateSystemPrompt(){
         String systemPrompt = Prompts.getAINPCSystemPrompt(character, mod.getCommandExecutor().allCommands(), mod.getOwnerUsername());
-        conversationHistory.setBaseSystemPrompt(systemPrompt);
+        conversationHistory.setBaseSystemPrompt(withRelationshipSuffix(systemPrompt));
     }
 
     /**
@@ -126,7 +207,7 @@ public class AIPersistantData {
     public void updateSystemPromptWithBlock(String validCommandsBlock) {
         String block = validCommandsBlock != null ? validCommandsBlock : "";
         String systemPrompt = Prompts.getAINPCSystemPromptWithValidCommandsBlock(character, block, mod.getOwnerUsername());
-        conversationHistory.setBaseSystemPrompt(systemPrompt);
+        conversationHistory.setBaseSystemPrompt(withRelationshipSuffix(systemPrompt));
     }
 
     /**
@@ -137,7 +218,7 @@ public class AIPersistantData {
      */
     public void updateSystemPromptStatic() {
         String systemPrompt = Prompts.getAINPCSystemPromptNoCommandsBlock(character, mod.getOwnerUsername());
-        conversationHistory.setBaseSystemPrompt(systemPrompt);
+        conversationHistory.setBaseSystemPrompt(withRelationshipSuffix(systemPrompt));
     }
 
     public void saveHistoryNow() {
