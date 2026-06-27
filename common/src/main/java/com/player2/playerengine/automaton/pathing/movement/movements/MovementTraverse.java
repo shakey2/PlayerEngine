@@ -447,15 +447,19 @@ public class MovementTraverse extends Movement {
             if (this.baritone.settings().closeDoorsBehindBot.get()) {
                OpenedDoorTracker.forBaritone(this.baritone).recordOpened(this.ctx.world(), dest);
             }
-            state.setTarget(
-                  new MovementState.MovementTarget(
-                     RotationUtils.calcRotationFromVec3d(
-                        this.ctx.headPos(), VecUtils.calculateBlockCenter(this.ctx.world(), dest.up()), this.ctx.entityRotations()
-                     ),
-                     true
-                  )
-               )
-               .setInput(Input.CLICK_RIGHT, true);
+            // Always aim at the door this tick so we keep "trying to open" (the movement re-enters this
+            // method every tick until the door is open, which is the retry loop). Only actually fire the
+            // right-click once the rotation has settled onto the door / it is reachable — otherwise the
+            // click lands in the air mid-stride and the door never opens, the movement makes no progress
+            // and PathExecutor eventually times it out. Mirrors the reachability gate the fence-gate
+            // branch below already uses (and the look-then-click pattern in Movement/MineProcess).
+            Rotation doorRot = RotationUtils.calcRotationFromVec3d(
+               this.ctx.headPos(), VecUtils.calculateBlockCenter(this.ctx.world(), dest.up()), this.ctx.entityRotations()
+            );
+            state.setTarget(new MovementState.MovementTarget(doorRot, true));
+            if (this.ctx.isLookingAt(dest) || this.ctx.isLookingAt(dest.up()) || this.ctx.entityRotations().isReallyCloseTo(doorRot)) {
+               state.setInput(Input.CLICK_RIGHT, true);
+            }
             return true;
          }
       } else if (bs.getBlock() instanceof FenceGateBlock) {

@@ -3,6 +3,7 @@ package com.player2.playerengine.memory.retrieval;
 import com.player2.playerengine.memory.MemoryCaps;
 import com.player2.playerengine.memory.MemoryGraph;
 import com.player2.playerengine.memory.MemoryNode;
+import com.player2.playerengine.memory.MemoryNodeType;
 import com.player2.playerengine.memory.retrieval.MemoryRetrievalConfidence.BoundaryVerdict;
 import com.player2.playerengine.retrieval.RetrievalHit;
 
@@ -46,17 +47,25 @@ public final class MemoryBlockSerializer {
 
     /**
      * Closed-world anti-fabrication footer appended after the bulleted memories in a
-     * {@link BoundaryVerdict#HAS_MEMORY} block. Static, bounded, author-controlled — it frames the
-     * listed facts as the COMPLETE set so the model cannot treat a partial match (e.g. the
-     * always-present self/owner nodes) as license to agree to a fabricated event. Kept byte-stable
-     * (prefix-cache) and counted within the bounded block: {@link #buildHasMemory} reserves cap room
-     * for it so the whole block never exceeds the char cap (DESIGN.md §3 egress bound).
+     * {@link BoundaryVerdict#HAS_MEMORY} block. Static, bounded, author-controlled.
+     *
+     * <p><b>Scope (Phase D fixation fix):</b> the HAS_MEMORY body now lists ONLY episodic
+     * {@link MemoryNodeType#EVENT} recall — stable profile facts (favorite colour, who the player is,
+     * etc.) are deliberately excluded from per-turn recall and surface naturally via the relationship
+     * summary in the system block instead. So this footer is scoped to <em>shared-history events</em>:
+     * it frames the listed events as the COMPLETE set of remembered shared history so the model cannot
+     * treat a partial seed match (e.g. the always-present self/owner nodes, or a profile entity that
+     * merely seeded retrieval) as license to agree to a fabricated "remember when…" event. It no longer
+     * claims the list is everything the companion knows about the player — only everything it remembers
+     * <em>happening together</em>. Kept byte-stable (prefix-cache) and counted within the bounded block:
+     * {@link #buildHasMemory} reserves cap room for it so the whole block never exceeds the char cap
+     * (DESIGN.md §3 egress bound).
      */
     public static final String HAS_MEMORY_FOOTER =
-            "These are the ONLY things you remember about this player and your shared history. "
-            + "If the player refers to a specific event, person, place, or fact that is NOT listed "
-            + "above, you do NOT remember it — say so honestly and do not invent, agree to, or play "
-            + "along with a memory that is not here.";
+            "These are the ONLY shared experiences and events you remember happening with this player. "
+            + "If the player refers to a specific event or moment you shared that is NOT listed above, "
+            + "you do NOT remember it — say so honestly and do not invent, agree to, or play along with "
+            + "a shared memory that is not here.";
 
     /**
      * Templated decline note for {@link BoundaryVerdict#NO_MEMORY}. Static, bounded, author-controlled
@@ -90,21 +99,44 @@ public final class MemoryBlockSerializer {
             case HAS_MEMORY:
             default:
                 String block = buildHasMemory(hits, graph, blockCharCap);
-                // An empty body (no resolvable hits) degrades to the decline note rather than an
-                // empty header — never claim memory the block does not actually carry.
-                return Optional.of(block.isEmpty() ? NO_MEMORY_NOTE : block);
+                // An empty body here means the confident hits were ALL stable profile/entity nodes and
+                // carried NO episodic EVENT recall (Phase D fixation fix filters profile nodes out of the
+                // recall body). In that case inject NOTHING — do NOT emit the closed-world decline note.
+                //
+                // Why not NO_MEMORY_NOTE: the turn DID link to real graph knowledge (a profile fact such
+                // as the player's favourite colour), and that fact already surfaces via the relationship
+                // summary in the SYSTEM block. Emitting "you have no recollection of what was just
+                // mentioned" would directly CONTRADICT the summary the model can already see — a
+                // truthfulness regression. The genuine "linked to nothing specific" decline is the
+                // separate NO_MEMORY verdict above (driven by the seedMatches / specificSeedMatches
+                // gate), which is unchanged. Returning empty keeps the request byte-identical to a
+                // STORE_ABSENT turn (prefix-cache safe).
+                return block.isEmpty() ? Optional.empty() : Optional.of(block);
         }
     }
 
     private static String buildHasMemory(List<RetrievalHit> hits, MemoryGraph graph, int blockCharCap) {
         int cap = blockCharCap > 0 ? blockCharCap : DEFAULT_BLOCK_CHAR_CAP;
 
-        // Render one line per hit, in fused (highest-first) order.
+        // Render one line per hit, in fused (highest-first) order — but ONLY for episodic EVENT nodes.
+        //
+        // Phase D fixation fix (SEPARATE PROFILE FROM RECALL): stable profile/entity nodes
+        // (CHARACTER/PLACE/FACTION/ITEM/REFLECTION — e.g. "Green = favourite colour", "who the player
+        // is") still seed retrieval, feed the ego BFS, count toward specificSeedMatches, and surface
+        // naturally via the relationship summary in the SYSTEM block. They are deliberately NOT recited
+        // here, because dumping the whole tiny graph neighbourhood every turn made the companion fixate
+        // on a handful of profile facts and bring them up unnaturally. The per-turn recall block carries
+        // ONLY relevant episodic shared-history events. A turn whose hits are all profile nodes yields an
+        // empty body; serialize() then injects NOTHING for that turn (the profile fact already shows via
+        // the relationship summary) — never a dumped dossier and never a contradicting decline note.
+        // Unknown/blank node types are treated as non-episodic and excluded (fail-closed to
+        // "not episodic recall").
         List<String> lines = new ArrayList<>();
         if (hits != null && graph != null) {
             for (RetrievalHit hit : hits) {
                 MemoryNode node = graph.node(hit.id());
                 if (node == null) continue;
+                if (!isEpisodic(node)) continue; // profile/entity nodes never recited as per-turn recall
                 String line = renderLine(node);
                 if (!line.isEmpty()) lines.add(line);
             }
@@ -131,6 +163,17 @@ public final class MemoryBlockSerializer {
         sb.append("\n\n").append(HAS_MEMORY_FOOTER);
         // Final defensive clamp (belt-and-suspenders egress re-clamp).
         return MemoryCaps.cap(sb.toString(), cap);
+    }
+
+    /**
+     * True iff this node is an episodic {@link MemoryNodeType#EVENT} — the only node type recited as
+     * per-turn recall (Phase D fixation fix). All other recognized types (CHARACTER/PLACE/FACTION/ITEM/
+     * REFLECTION) are stable profile/entity knowledge that surfaces via the relationship summary, not
+     * here. An unknown/blank stored {@code type} maps to no recognized type and is treated as
+     * non-episodic (fail-closed: never recited as "shared event" recall).
+     */
+    private static boolean isEpisodic(MemoryNode node) {
+        return MemoryNodeType.EVENT == MemoryNodeType.fromWire(node.type());
     }
 
     /** {@code "- <CanonicalName>: <content>"}, per-line re-clamped. */
