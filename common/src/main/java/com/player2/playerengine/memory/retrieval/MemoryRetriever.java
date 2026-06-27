@@ -178,6 +178,21 @@ public final class MemoryRetriever implements Retriever {
         // (8) Serialize the bounded tail block.
         Optional<String> block = MemoryBlockSerializer.serialize(verdict, ranked, graph, t.blockCharCap);
 
+        // A HAS_MEMORY verdict whose serialized block is empty means every confident hit was a stable
+        // profile/entity node with no episodic EVENT recall (the serializer filters profile nodes out of
+        // the recall body — Phase D fixation fix). The profile fact still surfaces via the relationship
+        // summary in the SYSTEM block, so nothing is injected this turn. Reclassify the RESULT to
+        // STORE_ABSENT in that case so the public contract holds (verdict == HAS_MEMORY -> block present;
+        // see MemoryRetrievalResult javadoc), debug logging reports a consistent verdict/block state, and
+        // result.hits() does not advertise profile node ids that were never rendered. STORE_ABSENT (not
+        // NO_MEMORY) is the right re-class: it is the byte-identical no-op path and emits NO decline note,
+        // so it cannot contradict the relationship summary the model can already see. The anti-fabrication
+        // gate is unaffected — an EVENT seed still drives a real HAS_MEMORY block with rendered hits, and
+        // the genuine "linked to nothing specific" decline remains the separate NO_MEMORY verdict above.
+        if (verdict == BoundaryVerdict.HAS_MEMORY && block.isEmpty()) {
+            return new MemoryRetrievalResult(List.of(), confidence, BoundaryVerdict.STORE_ABSENT, block);
+        }
+
         // HAS_MEMORY hits carry the actual recall; NO_MEMORY surfaces the decline note with no hits.
         List<RetrievalHit> resultHits = verdict == BoundaryVerdict.HAS_MEMORY ? ranked : List.of();
         return new MemoryRetrievalResult(resultHits, confidence, verdict, block);
