@@ -57,26 +57,42 @@ public final class MemoryBlockSerializer {
      * treat a partial seed match (e.g. the always-present self/owner nodes, or a profile entity that
      * merely seeded retrieval) as license to agree to a fabricated "remember when…" event. It no longer
      * claims the list is everything the companion knows about the player — only everything it remembers
-     * <em>happening together</em>. Kept byte-stable (prefix-cache) and counted within the bounded block:
+     * <em>happening together</em>.
+     *
+     * <p><b>ASK vs TELL (Phase D engagement fix):</b> the anti-fabrication boundary fires ONLY for the
+     * RECALL case — when the player ASKS whether a specific past shared event is remembered. It must NOT
+     * be applied to NEW information the player is TELLING the companion this turn (a fresh fact,
+     * preference, or just-happened event): new info is not a false memory, so the model must accept and
+     * acknowledge it rather than deny it. The footer also forbids disengagement entirely — the model
+     * must always respond to what the player just said and never re-greet or change the subject instead
+     * of replying. Kept byte-stable (prefix-cache) and counted within the bounded block:
      * {@link #buildHasMemory} reserves cap room for it so the whole block never exceeds the char cap
      * (DESIGN.md §3 egress bound).
      */
     public static final String HAS_MEMORY_FOOTER =
-            "These are the ONLY shared experiences and events you remember happening with this player. "
-            + "If the player refers to a specific event or moment you shared that is NOT listed above, "
-            + "you do NOT remember it — say so honestly and do not invent, agree to, or play along with "
-            + "a shared memory that is not here.";
+            "The list above is the complete set of past events you remember sharing with this player. "
+            + "Always respond to what the player just said. If they are telling you something NEW (a "
+            + "fact about themselves, a preference, an event), simply accept and acknowledge it — new "
+            + "information is not a false memory. If they ASK whether you remember a specific past event "
+            + "or thing that is NOT listed above, tell them honestly, in your own voice, that you do not "
+            + "recall it, and never invent or play along with a shared memory that is not here. Either "
+            + "way, stay engaged — never ignore the player or change the subject.";
 
     /**
-     * Templated decline note for {@link BoundaryVerdict#NO_MEMORY}. Static, bounded, author-controlled
-     * — instructs the model to decline rather than invent, with the same closed-world anti-fabrication
-     * framing as {@link #HAS_MEMORY_FOOTER}. Kept byte-stable so it never busts the cache with churn.
+     * Templated decline note for {@link BoundaryVerdict#NO_MEMORY}. Static, bounded, author-controlled.
+     * Mirrors {@link #HAS_MEMORY_FOOTER}'s ASK-vs-TELL framing: it instructs the model to decline a
+     * RECALL request (the player ASKING about an unstored past event) rather than invent, while still
+     * accepting and acknowledging NEW information the player is TELLING it this turn, and to always stay
+     * engaged (never ignore the player, change the subject, or re-greet). Kept byte-stable so it never
+     * busts the cache with churn.
      */
     public static final String NO_MEMORY_NOTE =
-            "[Memory] You have no recollection of what was just mentioned. You do NOT remember the "
-            + "specific event, person, place, or fact the player referred to. Say plainly that you do "
-            + "not remember rather than inventing details, and do not agree to or play along with a "
-            + "memory you do not actually have.";
+            "[Memory] You have no stored memory matching what the player just referred to. Always "
+            + "respond to what they actually said. If they are telling you something NEW, accept and "
+            + "acknowledge it as new information. If they are ASKING whether you remember a specific "
+            + "past event or thing, say honestly, in your own in-character voice, that you do not recall "
+            + "it — do not invent or play along with it. Never ignore the player, change the subject, or "
+            + "greet them again instead of replying.";
 
     /**
      * Builds the tail block for the given verdict.
