@@ -222,6 +222,31 @@ public final class Player2NpcPersistencePaths {
     }
 
     // -------------------------------------------------------------------------
+    // Companion mood paths (Lightweight Companion Mood System — WS1) — per companion
+    // -------------------------------------------------------------------------
+
+    /** Filename for a companion's persisted current {@code CompanionMood}. */
+    public static final String MOOD_FILE_NAME = "mood.json";
+
+    /**
+     * Owner-resolved per-companion mood file:
+     * {@code <worldRoot>/player2npc/persistentdata/owners/<ownerUuid>/<characterId>/mood.json}.
+     *
+     * <p>Parallel to {@code conversation.jsonl} (same {@code owners/<ownerUuid>/<characterId>/}
+     * directory). Holds the single current {@code CompanionMood} record; missing/corrupt → neutral.
+     */
+    public static Path moodFile(Path worldRoot, UUID ownerUuid, String characterId) {
+        return ownersRoot(worldRoot)
+                .resolve(ownerUuid.toString())
+                .resolve(characterId)
+                .resolve(MOOD_FILE_NAME);
+    }
+
+    public static Path moodFile(MinecraftServer server, UUID ownerUuid, String characterId) {
+        return moodFile(server.getWorldPath(LevelResource.ROOT), ownerUuid, characterId);
+    }
+
+    // -------------------------------------------------------------------------
     // Deferred-job store paths (WS7)
     // -------------------------------------------------------------------------
 

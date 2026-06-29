@@ -99,6 +99,13 @@ public class AgentConversationData {
     private String turnAgentStatus = "";
     private String turnAltoClefDebugMsgs = "";
     private Optional<String> turnReminderString = Optional.empty();
+    /**
+     * The per-turn currentMood block (already-bounded {@code toPromptString()}), resolved once per turn
+     * gated on {@code enableCompanionMood}, so deep-check / post-decision retry follow-up tail rebuilds
+     * reuse the same value. {@link Optional#empty()} when the flag is off (tail byte-identical). Reset in
+     * {@link #resetB5TurnState()}. TAIL ONLY — must never enter the static system block (prefix-cache).
+     */
+    private Optional<String> turnCurrentMood = Optional.empty();
     /** Suppress repeated warnings when the RAG index is not yet initialised for this bot. */
     private boolean ragFallbackWarnedOnce = false;
 
@@ -340,6 +347,7 @@ public class AgentConversationData {
         postDecisionRetryAttempted = false;
         lastRagPromptSource = "first_pass";
         lastDeepCheckTriggerReason = "";
+        turnCurrentMood = Optional.empty();
     }
 
     // get LLM response and add to conversation history
@@ -472,10 +480,17 @@ public class AgentConversationData {
         // Phase D (W5): zero-LLM memory retrieval, hard-gated by the OWNER's patron status (fail-closed
         // → Optional.empty(), request byte-identical to today). Injected at the user-tail only.
         Optional<String> memoryBlock = resolveMemoryBlock(lastUserMsgForRag);
+        // Mood (WS3): inject the persisted current mood into the per-turn TAIL only, gated on
+        // enableCompanionMood. Flag-off → Optional.empty() → tail byte-identical to pre-mood-feature.
+        // toPromptString() is already bounded (enum label + clamped intensity + capped cause); it flows
+        // through LogEgressGuard.cappedMessage at the API call site (whole-message backstop, same as
+        // every other message — there is no per-field capForModel call). Stored on turnCurrentMood so
+        // mid-turn follow-up rebuilds reuse the same value.
+        this.turnCurrentMood = resolveCurrentMoodBlock();
         ConversationHistory historyWithWrappedStatus = mod.getAIPersistantData()
                 .getConversationHistoryWrappedWithStatus(worldStatus, agentStatus, altoClefDebugMsgs,
                         mod.getPlayer2APIService(), reminderString, Optional.ofNullable(pendingValidCommandsBlock),
-                        memoryBlock);
+                        memoryBlock, this.turnCurrentMood);
 
         LOGGER.info("[AICommandBridge/processChatWithAPI]: Calling LLM: history={}",
                 new Object[] { historyWithWrappedStatus.toString() });
@@ -562,6 +577,97 @@ public class AgentConversationData {
             return result != null ? result.memoryBlock() : Optional.empty();
         } catch (Exception e) {
             LOGGER.warn("[Memory] retrieval failed; degrading to no memory block ({})",
+                    e.getClass().getSimpleName());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Companion mood (WS2 + WS4): reads the optional {@code "mood"} object from the LLM reply, validates
+     * it deterministically, updates + persists {@link com.player2.playerengine.player2api.mood.CompanionMood},
+     * reports an invalid label to the MODEL ONLY (no player chat), and on a model-flagged +
+     * code-confirmed meaningful transition mints one memory EVENT (patron-gated inside the ingest call).
+     *
+     * <p>Gated on {@code enableCompanionMood} (WS5): when off this is a complete no-op (no parse, no
+     * write) so the per-turn behavior is byte-identical to pre-mood-feature. Never throws.
+     */
+    private void handleMoodDeclaration(JsonObject jsonResp) {
+        try {
+            if (!Player2ServerConfigHolder.get().isEnableCompanionMood()) {
+                return;
+            }
+            AIPersistantData data = mod.getAIPersistantData();
+            if (data == null) {
+                return;
+            }
+            // Read the optional "mood" object directly (decision 1: absent = no change).
+            JsonObject moodObj = (jsonResp.has("mood") && jsonResp.get("mood").isJsonObject())
+                    ? jsonResp.getAsJsonObject("mood") : null;
+
+            com.player2.playerengine.player2api.mood.CompanionMood prevMood = data.getCurrentMood();
+            com.player2.playerengine.player2api.mood.MoodUpdate.MoodUpdateResult result =
+                    com.player2.playerengine.player2api.mood.MoodUpdate.apply(moodObj, prevMood);
+
+            // Invalid label → tell the MODEL only (mirrors the invalid-marker InfoMessage path); mood
+            // stays unchanged; no player chat (mood is a soft state — do not spam the player).
+            if (result.invalidLabel()) {
+                addEventToQueue(new InfoMessage(
+                        "Note: the mood label you declared is not valid and your mood was NOT changed. "
+                        + "Valid moods are: neutral, happy, content, excited, curious, sad, anxious, "
+                        + "angry, afraid, determined. Do not claim a mood you did not set."));
+                return;
+            }
+
+            com.player2.playerengine.player2api.mood.CompanionMood newMood = result.mood();
+            // Unchanged (absent/partial mood, same object) → nothing to persist or mint.
+            if (newMood == prevMood) {
+                return;
+            }
+
+            // Deterministic update + persist (mirrors updateMood → saveHistoryNow sequencing).
+            data.updateMood(newMood);
+            data.saveMoodNow();
+
+            // WS4: model-flagged (memorable) AND code-confirmed meaningful transition → mint one EVENT.
+            // ingestMoodEventDirectly runs MemoryGate.preflight internally (patron + enableGraphRagMemory
+            // + budget); a complete no-op for non-patrons / memory off. The cause it writes is the
+            // already-capped newMood.cause(), never the raw model JSON.
+            if (com.player2.playerengine.player2api.mood.MoodMemoryRule.isMeaningfulTransition(
+                    prevMood, newMood, result.memorable())) {
+                com.player2.playerengine.memory.ingest.MemoryIngestionService.ingestMoodEventDirectly(
+                        this.mod, prevMood, newMood);
+            }
+        } catch (Exception e) {
+            LOGGER.warn("[Mood] declaration handling failed; mood unchanged ({})",
+                    e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Mood (WS3): resolves the per-turn currentMood block for the user-tail, gated on
+     * {@code enableCompanionMood}. When the flag is off this returns {@link Optional#empty()} so the
+     * tail is byte-identical to pre-mood-feature. When on, the persisted mood's
+     * {@link com.player2.playerengine.player2api.mood.CompanionMood#toPromptString()} (already bounded:
+     * enum label + clamped intensity + capped cause) is injected at the tail only — never the static
+     * system block. Never throws; any failure degrades to no mood block.
+     */
+    private Optional<String> resolveCurrentMoodBlock() {
+        try {
+            if (!Player2ServerConfigHolder.get().isEnableCompanionMood()) {
+                return Optional.empty();
+            }
+            AIPersistantData data = mod.getAIPersistantData();
+            if (data == null) {
+                return Optional.empty();
+            }
+            com.player2.playerengine.player2api.mood.CompanionMood mood = data.getCurrentMood();
+            if (mood == null) {
+                return Optional.empty();
+            }
+            String block = mood.toPromptString();
+            return (block == null || block.isBlank()) ? Optional.empty() : Optional.of(block);
+        } catch (Exception e) {
+            LOGGER.warn("[Mood] currentMood block resolution failed; degrading to no mood block ({})",
                     e.getClass().getSimpleName());
             return Optional.empty();
         }
@@ -766,6 +872,18 @@ public class AgentConversationData {
         String command = this.isGreetingResponse ? "bodylang greeting"
                 : Utils.getStringJsonSafely(jsonResp, "command");
         this.isGreetingResponse = false;
+
+        // --- Companion mood: declare-parse + deterministic update (WS2) + mood→memory trigger (WS4) ---
+        // Gated on enableCompanionMood (WS5): flag-off → no parse, no mood write, no extra request bytes.
+        // The "mood" object is read directly from jsonResp (no marker fragility); MoodUpdate.apply
+        // validates the label against the fixed vocabulary code-side and caps the cause (data-egress).
+        // First-pass ONLY: mood is declared at most once per logical turn. Deep-check and post-decision
+        // retry responses (isModelDeepSearchFollowUp / isFollowUpDecision) carry the pre-first-pass
+        // turnCurrentMood in their tail, so a mood field on a follow-up would be reacting to stale
+        // context and could double-mint; ignore mood on those passes.
+        if (!isFollowUpDecision && !isModelDeepSearchFollowUp) {
+            handleMoodDeclaration(jsonResp);
+        }
 
         String cmdId = resolveCommandId(command);
         if (isModelDeepSearchFollowUp && RagDeepSearchCommands.isMetaCommandId(cmdId)) {
@@ -1014,10 +1132,14 @@ public class AgentConversationData {
      * untouched (byte-stable for the conversation).
      */
     private ConversationHistory rebuildWrappedStatusForFollowUp() {
+        // Thread the per-turn currentMood (resolved once in process()) through the follow-up tail rebuild
+        // so deep-check / post-decision retry turns carry the same mood block. Empty memory block here
+        // matches the pre-mood follow-up behavior (memory is first-pass only); mood is tail-only.
         return mod.getAIPersistantData().getConversationHistoryWrappedWithStatus(
                 turnWorldStatus, turnAgentStatus, turnAltoClefDebugMsgs,
                 mod.getPlayer2APIService(), turnReminderString,
-                Optional.ofNullable(pendingValidCommandsBlock));
+                Optional.ofNullable(pendingValidCommandsBlock),
+                Optional.empty(), turnCurrentMood);
     }
 
     private void registerPendingLearnCandidate() {

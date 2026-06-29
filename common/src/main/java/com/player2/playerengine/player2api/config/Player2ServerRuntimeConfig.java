@@ -75,6 +75,16 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
      * the W3/W4/W5/W6 tuning keys; W7 owns only this flag + the two window keys below.
      */
     private boolean enableGraphRagMemory = false;
+
+    /**
+     * Master switch for companion mood roleplay (the model declares a mood change + the current mood is
+     * injected into the per-turn tail). Default {@code true} — mood roleplay is on by default for every
+     * companion (owner-ratified). Off → no mood parse, no tail {@code currentMood} key, no mood writes;
+     * the <b>per-turn tail</b> is then byte-identical to pre-feature (the static system-block mood
+     * instruction is unconditional). mood→memory is governed SEPARATELY by {@link #enableGraphRagMemory}
+     * + the patron gate, so it can never fire when memory is off even if this flag is on.
+     */
+    private boolean enableCompanionMood = true;
     /** Hard per-billing-key memory LLM calls per window (worst-case spend lever). Clamped [0, 1000]. */
     private int memoryCallsPerWindow = 50;
     /** Memory-pipeline window length in minutes. Clamped [1, 1440]. */
@@ -503,6 +513,9 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
 
     public boolean isEnableGraphRagMemory() { return enableGraphRagMemory; }
     public void setEnableGraphRagMemory(boolean v) { this.enableGraphRagMemory = v; }
+
+    public boolean isEnableCompanionMood() { return enableCompanionMood; }
+    public void setEnableCompanionMood(boolean v) { this.enableCompanionMood = v; }
 
     public int getMemoryCallsPerWindow() { return memoryCallsPerWindow; }
     public void setMemoryCallsPerWindow(int v) { this.memoryCallsPerWindow = v; }

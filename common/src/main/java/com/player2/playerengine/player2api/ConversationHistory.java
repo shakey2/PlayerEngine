@@ -338,6 +338,19 @@ public class ConversationHistory {
    public ConversationHistory copyThenWrapLatestWithStatus(String worldStatus, String agentStatus,
          String altoclefStatusMsgs, Player2APIService player2apiService, Optional<String> reminderString,
          Optional<String> validCommandsBlock, Optional<String> memoryBlock) {
+      // Mood overload delegate: no mood block → tail byte-identical to pre-mood-feature.
+      return copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoclefStatusMsgs,
+            player2apiService, reminderString, validCommandsBlock, memoryBlock, Optional.empty());
+   }
+
+   // Mood overload: identical body PLUS the per-turn currentMood block injected at the TAIL of the
+   // throwaway copy, AFTER memory. Like memory/validCommands it lives ONLY in this never-persisted copy
+   // (historyFile == null), so it never reaches conversation.jsonl, and it must NEVER enter the static
+   // system block (prefix-cache invariant). An absent / blank block is dropped by the .filter guard so
+   // the flag-off / neutral path keeps the tail byte-identical.
+   public ConversationHistory copyThenWrapLatestWithStatus(String worldStatus, String agentStatus,
+         String altoclefStatusMsgs, Player2APIService player2apiService, Optional<String> reminderString,
+         Optional<String> validCommandsBlock, Optional<String> memoryBlock, Optional<String> moodBlock) {
       ConversationHistory copy = new ConversationHistory(this.conversationHistory.get(0).get("content").getAsString());
 
       for (int i = 1; i < this.conversationHistory.size() - 1; i++) {
@@ -365,6 +378,11 @@ public class ConversationHistory {
             memoryBlock
                   .filter(s -> !s.isBlank())
                   .ifPresent(block -> msgObj.add("memory", block));
+            // Mood: currentMood injected at the TAIL, AFTER memory. Absent/blank → key omitted, so the
+            // flag-off / neutral-empty path keeps the tail byte-identical to pre-mood-feature.
+            moodBlock
+                  .filter(s -> !s.isBlank())
+                  .ifPresent(block -> msgObj.add("currentMood", block));
             last.addProperty("content", msgObj.toString());
          }
 

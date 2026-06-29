@@ -25,6 +25,16 @@ public class AIPersistantData {
     private String characterId;
     private Path conversationHistoryFile;
 
+    /**
+     * Per-companion current mood (Lightweight Companion Mood System — WS1). Never null; defaults to
+     * {@link com.player2.playerengine.player2api.mood.CompanionMood#neutral()}. Loaded tolerantly from
+     * {@code mood.json} beside {@code conversation.jsonl}; a missing/corrupt file degrades to neutral
+     * with a {@code Debug.logWarning} (never crashes, never reaches a prompt).
+     */
+    private com.player2.playerengine.player2api.mood.CompanionMood currentMood =
+            com.player2.playerengine.player2api.mood.CompanionMood.neutral();
+    private Path moodFile;
+
     public AIPersistantData(PlayerEngineController mod, Character character) {
         this.character = character;
         this.mod = mod;
@@ -40,6 +50,11 @@ public class AIPersistantData {
             // Fallback to non-persistent history if we can't resolve world root or characterId.
             this.conversationHistory = new ConversationHistory(basePrompt);
         }
+        // Mood (WS1): resolve mood.json beside conversation.jsonl and load tolerantly. A null path
+        // (unresolvable world root / characterId) keeps the in-memory neutral default — non-persistent,
+        // exactly like the conversation-history fallback above.
+        this.moodFile = getMoodFileOrNull(mod, worldRoot, this.characterId);
+        loadMoodFromDiskTolerant();
     }
 
     /**
@@ -177,8 +192,20 @@ public class AIPersistantData {
      * empty → caller passes {@link Optional#empty()} → request byte-identical to today.
      */
     public ConversationHistory getConversationHistoryWrappedWithStatus(String worldStatus, String agentStatus, String altoClefDebugMsgs, Player2APIService player2apiService, Optional<String> reminderString, Optional<String> validCommandsBlock, Optional<String> memoryBlock){
+        // Mood overload delegate (no mood block) — tail byte-identical to pre-mood-feature.
+        return getConversationHistoryWrappedWithStatus(worldStatus, agentStatus, altoClefDebugMsgs,
+                player2apiService, reminderString, validCommandsBlock, memoryBlock, Optional.empty());
+    }
+
+    /**
+     * Mood overload: threads the per-turn {@code currentMood} block into the throwaway wrapped copy so it
+     * is injected at the user-tail (after {@code memory}) and never persisted. Flag-off / neutral →
+     * caller passes {@link Optional#empty()} → tail byte-identical to pre-mood-feature. Current mood must
+     * never enter the static system block (prefix-cache invariant).
+     */
+    public ConversationHistory getConversationHistoryWrappedWithStatus(String worldStatus, String agentStatus, String altoClefDebugMsgs, Player2APIService player2apiService, Optional<String> reminderString, Optional<String> validCommandsBlock, Optional<String> memoryBlock, Optional<String> moodBlock){
         return this.conversationHistory
-                .copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoClefDebugMsgs, player2apiService, reminderString, validCommandsBlock, memoryBlock);
+                .copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoClefDebugMsgs, player2apiService, reminderString, validCommandsBlock, memoryBlock, moodBlock);
     }
     public void addAssistantMessage(String llmMessage, Player2APIService player2apiService){
         this.conversationHistory.addAssistantMessage(llmMessage, player2apiService);
@@ -229,6 +256,114 @@ public class AIPersistantData {
         conversationHistory.reloadNow();
         // After reload, ensure the system prompt is updated to match the current command list/owner.
         updateSystemPrompt();
+    }
+
+    // -------------------------------------------------------------------------
+    // Companion mood (Lightweight Companion Mood System — WS1)
+    // -------------------------------------------------------------------------
+
+    /** Current per-companion mood (never null; neutral default). */
+    public com.player2.playerengine.player2api.mood.CompanionMood getCurrentMood() {
+        return this.currentMood;
+    }
+
+    /**
+     * Replaces the in-memory current mood. A {@code null} argument is coerced to
+     * {@link com.player2.playerengine.player2api.mood.CompanionMood#neutral()} so the field stays
+     * non-null. Does NOT persist — the caller follows with {@link #saveMoodNow()} (mirroring the
+     * conversation {@code updateMood → saveHistoryNow} sequence).
+     */
+    public void updateMood(com.player2.playerengine.player2api.mood.CompanionMood newMood) {
+        this.currentMood = (newMood != null)
+                ? newMood
+                : com.player2.playerengine.player2api.mood.CompanionMood.neutral();
+    }
+
+    /**
+     * Persists the current mood to {@code mood.json} via atomic temp-then-rename (mirrors the deferred
+     * store / EllieGPS write pattern). No-op when the mood path is unresolvable (non-persistent
+     * fallback). Best-effort: an I/O failure logs a warning and never throws into the caller.
+     */
+    public void saveMoodNow() {
+        if (this.moodFile == null) {
+            return;
+        }
+        try {
+            if (this.moodFile.getParent() != null) {
+                Files.createDirectories(this.moodFile.getParent());
+            }
+            String json = this.currentMood.toJson().toString();
+            Path tmp = this.moodFile.resolveSibling(
+                    com.player2.playerengine.player2api.Player2NpcPersistencePaths.MOOD_FILE_NAME + ".tmp");
+            Files.writeString(tmp, json, java.nio.charset.StandardCharsets.UTF_8);
+            try {
+                Files.move(tmp, this.moodFile,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(tmp, this.moodFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (Exception e) {
+            // Never crash on a mood save; a templated, bounded warning only (no model-facing text).
+            com.player2.playerengine.util.Debug.logWarning("saveMoodNow: failed to write mood.json for character %s", this.characterId);
+        }
+    }
+
+    /** Re-reads the current mood from {@code mood.json}, tolerantly (missing/corrupt → neutral). */
+    public void reloadMoodFromDisk() {
+        loadMoodFromDiskTolerant();
+    }
+
+    /**
+     * Loads {@code mood.json} into {@link #currentMood}. Missing file → neutral (no warning — a
+     * first-ever companion is expected to have none). Corrupt/unparseable → neutral + a single bounded
+     * {@code Debug.logWarning}. Never throws into the load path (DESIGN.md: degrade visibly, never crash;
+     * no log/stack/unbounded text reaches a prompt).
+     */
+    private void loadMoodFromDiskTolerant() {
+        if (this.moodFile == null) {
+            this.currentMood = com.player2.playerengine.player2api.mood.CompanionMood.neutral();
+            return;
+        }
+        if (!Files.exists(this.moodFile)) {
+            this.currentMood = com.player2.playerengine.player2api.mood.CompanionMood.neutral();
+            return;
+        }
+        try {
+            String raw = Files.readString(this.moodFile, java.nio.charset.StandardCharsets.UTF_8);
+            com.google.gson.JsonObject obj = com.google.gson.JsonParser.parseString(raw).getAsJsonObject();
+            this.currentMood = com.player2.playerengine.player2api.mood.CompanionMood.fromJson(obj);
+        } catch (Exception e) {
+            // Truncated/corrupt mood.json — degrade to neutral with a bounded warning (no file content,
+            // no stack trace, ever reaches a prompt). Never crashes the companion load.
+            this.currentMood = com.player2.playerengine.player2api.mood.CompanionMood.neutral();
+            com.player2.playerengine.util.Debug.logWarning("loadMood: corrupt mood.json for character %s; using neutral", this.characterId);
+        }
+    }
+
+    /**
+     * Canonical: {@code player2npc/persistentdata/owners/<ownerUuid>/<characterId>/mood.json}, beside
+     * {@code conversation.jsonl}. Falls back to the legacy entity-UUID segment when the owner UUID is
+     * unresolvable (mirroring {@link #getConversationHistoryFileOrNull}). {@code null} when world root or
+     * characterId is unknown (mood then stays the in-memory neutral default, non-persistent).
+     */
+    private static Path getMoodFileOrNull(PlayerEngineController mod, Path worldRoot, String characterId) {
+        if (mod == null || mod.getPlayer() == null) return null;
+        if (characterId == null || characterId.isBlank()) return null;
+        if (worldRoot == null) return null;
+        try {
+            UUID ownerUuid = resolveOwnerUuidOrNull(mod);
+            if (ownerUuid != null) {
+                return Player2NpcPersistencePaths.moodFile(worldRoot, ownerUuid, characterId);
+            }
+            UUID entityUuid = mod.getPlayer().getUUID();
+            return Player2NpcPersistencePaths.persistentDataRoot(worldRoot)
+                    .resolve(entityUuid.toString())
+                    .resolve(characterId)
+                    .resolve(Player2NpcPersistencePaths.MOOD_FILE_NAME);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     public Path getConversationHistoryFile() {
