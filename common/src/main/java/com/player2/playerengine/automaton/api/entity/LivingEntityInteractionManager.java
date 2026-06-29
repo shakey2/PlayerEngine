@@ -34,6 +34,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.InteractionResultHolder;
+import net.minecraft.world.ItemInteractionResult;
 import net.minecraft.world.effect.MobEffectUtil;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -439,13 +440,41 @@ public class LivingEntityInteractionManager {
          boolean bl = !player.getMainHandItem().isEmpty() || !player.getOffhandItem().isEmpty();
          boolean bl2 = this.shouldCancelInteraction() && bl;
          ItemStack itemStack = stack.copy();
+         // The automaton entity is a LivingEntity (AutomatoneEntity), NOT a Player, so we pass null
+         // here exactly as before -- the block impls that matter for the bot (door/button/lever toggle)
+         // are null-player safe.
+         //
+         // MC 1.21 split the old unified BlockState.use() into useItemOn (item path) and useWithoutItem
+         // (empty-hand / default block interaction -- this is where the DOOR/button/lever toggle lives).
+         // The original port only called useItemOn, so the bot could never open doors. We now add the
+         // useWithoutItem fallback, mirroring vanilla ServerPlayerGameMode.useItemOn.
+         //
+         // The two calls are in SEPARATE try blocks on purpose: NeoForge's BlockStateBase.useItemOn
+         // wrapper dereferences the player (player.getItemInHand(hand).copy()) before reaching the block,
+         // so with a null player it NPEs. If both calls shared one try, that NPE would skip the
+         // useWithoutItem fallback and doors would still never open on NeoForge. By isolating it, a
+         // useItemOn NPE leaves itemResult at its PASS_TO_DEFAULT default and we still attempt the
+         // door toggle. (On Fabric/vanilla useItemOn returns PASS_TO_DEFAULT cleanly with a null player.)
+         // FenceGateBlock.useWithoutItem derefs the null player and is harmlessly swallowed by its own
+         // catch -- same as the pre-fix behavior, no regression.
          if (!bl2) {
+            ItemInteractionResult itemResult = ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION;
             try {
-               InteractionResult actionResult = blockState.useItemOn(stack, world, null, hand, hitResult).result();
-               if (actionResult.consumesAction()) {
-                  return actionResult;
+               itemResult = blockState.useItemOn(stack, world, null, hand, hitResult);
+               if (itemResult.consumesAction()) {
+                  return itemResult.result();
                }
-            } catch (NullPointerException var14) {
+            } catch (NullPointerException var15) {
+            }
+
+            if (itemResult == ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION && hand == InteractionHand.MAIN_HAND) {
+               try {
+                  InteractionResult blockResult = blockState.useWithoutItem(world, null, hitResult);
+                  if (blockResult.consumesAction()) {
+                     return blockResult;
+                  }
+               } catch (NullPointerException var14) {
+               }
             }
          }
 
