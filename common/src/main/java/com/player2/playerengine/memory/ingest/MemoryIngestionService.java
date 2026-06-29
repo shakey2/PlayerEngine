@@ -15,6 +15,8 @@ import com.player2.playerengine.memory.reflection.ReflectionService;
 import com.player2.playerengine.memory.reflection.ReflectionTrigger;
 import com.player2.playerengine.memory.retrieval.MemoryRetriever;
 import com.player2.playerengine.retrieval.RetrievalHit;
+import com.player2.playerengine.memory.MemoryCaps;
+import com.player2.playerengine.memory.MemoryNodeType;
 import com.player2.playerengine.player2api.AiTaskClass;
 import com.player2.playerengine.player2api.Character;
 import com.player2.playerengine.player2api.ConversationHistory;
@@ -22,6 +24,7 @@ import com.player2.playerengine.player2api.Player2APIService;
 import com.player2.playerengine.player2api.Player2PayerResolution;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
+import com.player2.playerengine.player2api.mood.CompanionMood;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.LivingEntity;
 
@@ -205,6 +208,137 @@ public final class MemoryIngestionService {
         } catch (RuntimeException e) {
             // Defensive: ingestion must NEVER crash the server thread. Bounded, distilled reason.
             PlayerEngine.LOGGER.warn("Memory ingestion: server-thread entry failed ({})",
+                    e.getClass().getSimpleName());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Direct mood-EVENT ingestion (server thread; no LLM — WS4)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Mints a single {@link MemoryNodeType#EVENT} node for a meaningful mood transition. SERVER
+     * THREAD; returns promptly (the graph mutation is dispatched via {@code server.execute}). This is
+     * a complete no-op when the owner is not a patron, memory is disabled, or the budget gate
+     * refuses.
+     *
+     * <p><b>Patron gate (release blocker).</b> {@link MemoryGate#preflight} is called before any
+     * graph write; non-patron / memory-off → complete no-op (same gate as
+     * {@link #onCuratedTurnsReady}).
+     *
+     * <p><b>Egress (release blocker).</b> The EVENT content is assembled code-side from a short
+     * fixed template using only the already-capped {@link CompanionMood#cause()} stored on
+     * {@code newMood} (never the raw model reply). {@link MemoryCaps#capContent} is applied to the
+     * assembled content as the final backstop before the graph write. No log/stack/unbounded string
+     * reaches the graph.
+     *
+     * <p><b>No LLM.</b> Importance is derived code-side from {@link CompanionMood#intensity()}; no
+     * {@code ImportanceScorer} or extraction call is made.
+     *
+     * @param controller the companion controller (owner, character, server)
+     * @param prevMood   the companion's mood before this turn (pre-transition)
+     * @param newMood    the newly declared mood (already normalized + capped by {@code CompanionMood})
+     */
+    public static void ingestMoodEventDirectly(PlayerEngineController controller,
+                                               CompanionMood prevMood,
+                                               CompanionMood newMood) {
+        try {
+            if (controller == null || prevMood == null || newMood == null) {
+                return;
+            }
+
+            // (1) Resolve server; bail if unavailable.
+            MinecraftServer server = resolveServer(controller);
+            if (server == null) {
+                return;
+            }
+
+            // (2) Patron gate FIRST — same billing resolution as onCuratedTurnsReady.
+            Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
+            String ownerUsername = controller.getOwnerUsername();
+            String clientId = cfg.getHeartbeatClientId();
+            Player2PayerResolution.ApiBillingContext ownerBilling =
+                    Player2PayerResolution.resolve(controller, ownerUsername, clientId);
+
+            MemoryGateDecision decision = MemoryGate.preflight(server, ownerBilling);
+            if (!decision.allowed()) {
+                return; // not a patron / disabled / over budget → complete no-op
+            }
+
+            // (3) Resolve per-companion scope and store.
+            MemoryScope scope = resolveScope(controller);
+            if (scope == null) {
+                return;
+            }
+            MemoryStore store = lookupStore(server, scope);
+            if (store == null) {
+                return; // world not loaded / provider unset → fail-closed
+            }
+
+            // (4) Build a single-node MergePlan. Content is a bounded, templated phrase assembled
+            //     code-side; cause comes from the already-capped newMood.cause() (never raw JSON).
+            //     MemoryCaps.capContent is applied as the final backstop.
+            String prevLabelName = prevMood.label().name().toLowerCase(java.util.Locale.ROOT);
+            String newLabelName  = newMood.label().name().toLowerCase(java.util.Locale.ROOT);
+            // newMood.cause() was already capped to CAUSE_MAX (120) when CompanionMood was constructed.
+            String cause = newMood.cause();
+            // Build the EVENT content as a short, bounded templated phrase.
+            String rawContent;
+            if (cause != null && !cause.isBlank()) {
+                rawContent = "Felt " + prevLabelName + " then became " + newLabelName + ": " + cause;
+            } else {
+                rawContent = "Felt " + prevLabelName + " then became " + newLabelName;
+            }
+            // Final backstop: capContent so no string exceeds CONTENT_MAX even if future edits drop
+            // the upstream cause cap.
+            String content = MemoryCaps.capContent(rawContent);
+
+            // Importance code-side from intensity (no ImportanceScorer): intensity 1-5 → importance 1-5.
+            int importance = newMood.intensity();
+
+            long nowMs = System.currentTimeMillis();
+            long nowTick = server.getTickCount();
+
+            // Node id keyed on the transition PLUS the timestamp so each distinct transition mints a
+            // distinct EVENT node. Without the timestamp segment every same-direction transition (e.g.
+            // neutral→happy) would share one id and the graph upsert would overwrite the prior event's
+            // content with the newest cause, silently discarding earlier mood history.
+            String nodeId = "mood_event_" + prevLabelName + "_to_" + newLabelName + "_" + nowMs;
+
+            MergePlan plan = MergePlan.builder()
+                    .upsert(new MergePlan.NodeUpsert(
+                            nodeId,
+                            content,
+                            MemoryNodeType.EVENT.wire(),
+                            MemoryCaps.capName("mood: " + prevLabelName + " → " + newLabelName),
+                            List.of(),   // no aliases
+                            List.of(),   // no tags
+                            importance,
+                            nowMs,
+                            nowTick))
+                    .build();
+
+            // (5) Apply on the server thread; dispatch reflection if threshold crossed.
+            server.execute(() -> {
+                try {
+                    MemoryStore applyStore = lookupStore(server, scope);
+                    if (applyStore == null) {
+                        return; // world unloaded between dispatch and apply
+                    }
+                    applyStore.mergeCandidates(plan);
+                    PlayerEngine.LOGGER.info(
+                            "Mood memory: EVENT node minted ({} -> {}) for {}.",
+                            prevLabelName, newLabelName, scope);
+                    maybeDispatchReflection(controller, server, ownerBilling, scope, applyStore);
+                } catch (RuntimeException applyEx) {
+                    PlayerEngine.LOGGER.warn("Mood memory: EVENT apply failed ({})",
+                            applyEx.getClass().getSimpleName());
+                }
+            });
+
+        } catch (RuntimeException e) {
+            // Defensive: must never crash the server thread. Bounded, distilled reason only.
+            PlayerEngine.LOGGER.warn("Mood memory: ingestMoodEventDirectly failed ({})",
                     e.getClass().getSimpleName());
         }
     }
