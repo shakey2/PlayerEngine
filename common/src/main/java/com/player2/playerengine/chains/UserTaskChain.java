@@ -41,6 +41,17 @@ public class UserTaskChain extends SingleTaskChain {
    private Runnable suspendedOnFinish = null;
    /** True while we are re-assigning {@link #suspendedTask} so the resume path is not re-suspended. */
    private boolean resumingSuspended = false;
+   /**
+    * True while we are firing a replaced ACTIVE task's stashed onFinish (the ACTIVE-REPLACE-FINISH
+    * fail-clean). That onFinish can synchronously re-enter {@link #runTask} (e.g. an agentic step's
+    * onComplete advancing to the next step, or a non-tracked command's CommandExecutor chaining its
+    * next part). When it does, the re-entrant inner call installs its own task; this flag suppresses
+    * the inner call's ACTIVE-REPLACE-FINISH so it does not fire the just-installed (never-actually-run)
+    * incoming task's terminal, and — because the fire is the LAST statement of the outer call — the
+    * outer frame has no remaining installation tail to overwrite the inner call's task. Mirrors
+    * {@link #resumingSuspended}.
+    */
+   private boolean firingReplacedTerminal = false;
 
    public UserTaskChain(TaskRunner runner) {
       super(runner);
@@ -180,12 +191,58 @@ public class UserTaskChain extends SingleTaskChain {
                         task.toString(), this.suspendedTask.toString());
                }
             }
+            // FAIL-CLEAN (mirror of TASK-DROP-FINISH in onTaskFinish): the suspended task carries a
+            // stashed StepExecution terminal (suspendedOnFinish). Pre-fix we nulled it WITHOUT firing,
+            // so the suspended step's StepExecution never left RUNNING and hung forever (live: a follow
+            // suspended by a gesture, then discarded by a genuine 'give' — follow_player stuck RUNNING
+            // 571s while User task <Idle>). Fire the stashed onFinish so the dropped step resolves to a
+            // truthful FAILED stop (the dropped task has isFinished()==false, stopped()==true, so the
+            // adapter records FATAL:task_stopped_without_finish; untracked tasks' stashed onFinish is a
+            // harmless no-op). RE-ENTRANCY: capture into a local and null BOTH fields BEFORE .run(), so
+            // the chain sees a clean suspend slot if firing re-enters runTask/onTaskFinish.
+            Runnable droppedSuspendedOnFinish = this.suspendedOnFinish;
             this.suspendedTask = null;
             this.suspendedOnFinish = null;
+            if (droppedSuspendedOnFinish != null) {
+               LOGGER.info("[FollowDiag] SUSPEND-DROP-FINISH: genuine task '{}' discards a suspended task; firing its stashed onFinish to resolve the orphaned step (no resume)",
+                     task.toString());
+               droppedSuspendedOnFinish.run();
+            }
          }
       }
 
-      // Overwrite currentOnFinish AFTER the suspend logic has had a chance to save it above.
+      // TWIN of the SUSPEND-DROP-FINISH fix: a genuine task that DIRECTLY replaces an ACTIVE
+      // (non-suspended) tracked task orphans that active task's StepExecution the same way. setTask()
+      // below calls oldTask.stop(task) (-> stopped()==true, isFinished()==false) but never invokes
+      // onTaskFinish for it, and currentOnFinish (the active task's terminal) is overwritten with the
+      // incoming onFinish WITHOUT firing it — so a tracked active step (e.g. a 'get'/'mine'/'follow')
+      // replaced mid-flight by another genuine command would hang RUNNING forever. We fire the
+      // about-to-be-lost currentOnFinish fail-clean (the adapter records FATAL:task_stopped_without_
+      // finish; untracked tasks' onFinish is a harmless no-op). EXCLUDED, deliberately:
+      //   - gesture suspend (incomingIsGesture): currentOnFinish was just stashed into suspendedOnFinish
+      //     above and is restored/fired on gesture finish — firing here would double-resolve the step.
+      //   - resume (resumingSuspended): the restored terminal must survive the re-run.
+      //   - idle (runningIdleTask): the idle task carries no tracked step terminal to resolve.
+      //   - firingReplacedTerminal: this is a RE-ENTRANT inner call triggered by an outer fire (below);
+      //     the "existingTask" it sees is the outer's just-installed, never-actually-run incoming task,
+      //     whose terminal must NOT be fired here — that would orphan/double-resolve the chain.
+      //
+      // ORDERING (the re-entrancy fix): the replaced terminal is fired LAST, only AFTER the incoming
+      // task is fully installed (currentOnFinish=onFinish AND setTask(task) committed). The old code
+      // fired it FIRST, while mainTask still pointed at the replaced task and before the incoming task
+      // was installed; a synchronous re-entry (agentic onComplete -> next step, or CommandExecutor ->
+      // next part) then ran a nested runTask that installed its own task, only for the OUTER tail
+      // (currentOnFinish=onFinish; setTask(task)) to overwrite it — orphaning the inner step RUNNING
+      // forever (the exact failure this fix prevents). Firing last means the outer frame has no
+      // installation tail after the fire, so a re-entrant inner install survives.
+      Runnable replacedActiveOnFinish = null;
+      if (existingTask != null && !this.runningIdleTask && !this.resumingSuspended
+            && !incomingIsGesture && !this.firingReplacedTerminal) {
+         replacedActiveOnFinish = this.currentOnFinish;
+      }
+
+      // Overwrite currentOnFinish AFTER the suspend logic has had a chance to save it above (and after
+      // the replaced-active terminal has been captured into the local above).
       this.currentOnFinish = onFinish;
 
       if (existingIsFollow && !this.runningIdleTask && !(incomingIsGesture && this.suspendedTask != null)) {
@@ -202,6 +259,23 @@ public class UserTaskChain extends SingleTaskChain {
       this.setTask(task);
       if (mod.getModSettings().failedToLoad()) {
          Debug.logWarning("Settings file failed to load at some point. Check logs for more info, or delete the file to re-load working settings.");
+      }
+
+      // ACTIVE-REPLACE-FINISH, fired LAST: the incoming task is now fully installed (currentOnFinish and
+      // mainTask both point at it). Fire the replaced task's stashed terminal to resolve its orphaned
+      // StepExecution. firingReplacedTerminal guards the re-entrancy: if this fire synchronously
+      // re-enters runTask, that inner call installs its own task and its ACTIVE-REPLACE-FINISH is
+      // suppressed (it would otherwise fire THIS incoming task's never-run terminal); because this fire
+      // is the last statement here, the inner call's installed task is not subsequently overwritten.
+      if (replacedActiveOnFinish != null) {
+         LOGGER.info("[FollowDiag] ACTIVE-REPLACE-FINISH: genuine task '{}' directly replaces active task '{}'; firing the replaced task's onFinish to resolve its step (no resume)",
+               task.toString(), existingTask.toString());
+         this.firingReplacedTerminal = true;
+         try {
+            replacedActiveOnFinish.run();
+         } finally {
+            this.firingReplacedTerminal = false;
+         }
       }
    }
 

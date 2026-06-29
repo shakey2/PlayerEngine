@@ -139,7 +139,7 @@ public class FoodChain extends SingleTaskChain {
                      // Both strings are short, bounded, code-author-controlled literals —
                      // no logs, no stack traces, no unbounded external data (DESIGN.md §3).
                      AiConversationFeedback.enqueueInfo(this.controller,
-                         "I am starving and have no food in my inventory. I cannot eat.");
+                         "You are starving: your own food level is critically low and you have no food in your inventory, so you cannot eat.");
                      this.controller.reportAgenticProgress("I'm starving and out of food.", true);
                   }
                }
