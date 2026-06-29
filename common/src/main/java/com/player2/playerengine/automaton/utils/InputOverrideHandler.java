@@ -18,6 +18,7 @@
 package com.player2.playerengine.automaton.utils;
 
 import com.player2.playerengine.automaton.Baritone;
+import com.player2.playerengine.automaton.api.entity.LivingEntityHungerManager;
 import com.player2.playerengine.automaton.api.utils.IInputOverrideHandler;
 import com.player2.playerengine.automaton.api.utils.input.Input;
 import com.player2.playerengine.automaton.behavior.Behavior;
@@ -30,6 +31,8 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
    private final BlockBreakHelper blockBreakHelper;
    private final BlockPlaceHelper blockPlaceHelper;
    private boolean needsUpdate;
+   // Exhaustion hook: track previous jump state for edge-triggered exhaustion
+   private boolean wasJumping = false;
 
    public InputOverrideHandler(Baritone baritone) {
       super(baritone);
@@ -97,6 +100,24 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
             entity.xxa = (float)(entity.xxa * 0.3);
             entity.zza = (float)(entity.zza * 0.3);
          }
+
+         // Exhaustion hooks: player-faithful drain for jump and swim.
+         // Sprint exhaustion is applied in PathExecutor at the sprint-commit site.
+         // Gate: hungerManager() returns null when the entity is not a hunger provider; addExhaustion is then skipped.
+         boolean jumpNow = this.isInputForcedDown(Input.JUMP);
+         LivingEntityHungerManager hm = this.ctx.hungerManager();
+         if (hm != null) {
+            // Jump: edge-triggered once per jump (sprint-jump = 0.2, regular jump = 0.05)
+            if (jumpNow && !this.wasJumping) {
+               float jumpExhaustion = entity.isSprinting() ? 0.2F : 0.05F;
+               hm.addExhaustion(jumpExhaustion);
+            }
+            // Swim: per-tick while in water and moving horizontally
+            if (entity.isInWater() && (entity.zza != 0.0F || entity.xxa != 0.0F)) {
+               hm.addExhaustion(0.01F);
+            }
+         }
+         this.wasJumping = jumpNow;
 
          this.blockBreakHelper.tick(this.isInputForcedDown(Input.CLICK_LEFT));
          this.blockPlaceHelper.tick(this.isInputForcedDown(Input.CLICK_RIGHT));

@@ -4,13 +4,13 @@ import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.PlayerEngineSettings;
 import com.player2.playerengine.multiversion.FoodComponentWrapper;
 import com.player2.playerengine.multiversion.item.ItemVer;
+import com.player2.playerengine.player2api.AiConversationFeedback;
+import com.player2.playerengine.tasks.misc.EatFoodTask;
 import com.player2.playerengine.tasks.resources.CollectFoodTask;
 import com.player2.playerengine.tasks.speedrun.DragonBreathTracker;
 import com.player2.playerengine.tasks.base.TaskRunner;
-import com.player2.playerengine.util.ItemTarget;
 import com.player2.playerengine.util.helpers.ConfigHelper;
 import com.player2.playerengine.util.helpers.WorldHelper;
-import com.player2.playerengine.automaton.api.utils.input.Input;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.Tuple;
@@ -30,26 +30,43 @@ public class FoodChain extends SingleTaskChain {
    private Optional<Item> cachedPerfectFood = Optional.empty();
    private boolean shouldStop = false;
 
+   // WS8: starving-with-no-food notice fields.
+   // Distinct from the auto-eat threshold — this threshold means the bot is genuinely starving.
+   private static final int STARVING_FOOD_LEVEL = 6;
+   // 2-minute cooldown: this is a sustained idle state notice, not a per-tick degradation.
+   private static final long STARVING_NOTICE_INTERVAL_MS = 120_000L;
+   private long lastStarvingNoticeMs = 0L;
+
    public FoodChain(TaskRunner runner) {
       super(runner);
    }
 
    @Override
    protected void onTaskFinish(PlayerEngineController controller) {
+      // When an EatFoodTask finishes, clear the eating flag and restore shield if needed.
+      if (this.isTryingToEat) {
+         this.isTryingToEat = false;
+         if (controller.getItemStorage().hasItem(Items.SHIELD) && !controller.getItemStorage().hasItemInOffhand(controller, Items.SHIELD)) {
+            controller.getSlotHandler().forceEquipItemToOffhand(Items.SHIELD);
+         }
+      }
    }
 
    private void startEat(PlayerEngineController controller, Item food) {
-      controller.getSlotHandler().forceEquipItem(new ItemTarget(food), true);
-      controller.getBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
-      controller.getExtraBaritoneSettings().setInteractionPaused(true);
+      // WS6: dispatch the animation-aware EatFoodTask instead of holding CLICK_RIGHT.
+      // setTask() is idempotent for the same food (EatFoodTask.isEqual compares foodItem by identity),
+      // so calling this every tick while needsToEat()/requestFillup is true will not restart a
+      // running eat — it only starts a fresh task when the previous one finishes.
+      this.setTask(new EatFoodTask(food));
       this.isTryingToEat = true;
       this.requestFillup = true;
    }
 
    private void stopEat(PlayerEngineController controller) {
       if (this.isTryingToEat) {
-         controller.getBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, false);
-         controller.getExtraBaritoneSettings().setInteractionPaused(false);
+         // WS6: no CLICK_RIGHT to release — the animation task manages its own vanilla use-item state.
+         // Stop any in-progress EatFoodTask so it can call stopUsingItem() if mid-animation.
+         this.setTask(null);
          this.isTryingToEat = false;
          this.requestFillup = false;
          if (controller.getItemStorage().hasItem(Items.SHIELD) && !controller.getItemStorage().hasItemInOffhand(controller, Items.SHIELD)) {
@@ -82,7 +99,11 @@ public class FoodChain extends SingleTaskChain {
             }
          }
 
-         if (this.controller.getModSettings().isAutoEat() && !this.controller.getEntity().isInLava() && !this.shouldStop) {
+         // WS6: gate on both isAutoEat() and isHungerEnabled() — when hunger is disabled,
+         // auto-eat is suppressed (the whole hunger simulation is frozen, so eating is pointless).
+         if (this.controller.getModSettings().isAutoEat()
+               && this.controller.getModSettings().isHungerEnabled()
+               && !this.controller.getEntity().isInLava() && !this.shouldStop) {
             if (this.controller.getMLGBucketChain().doneMLG() && !this.controller.getMLGBucketChain().isFalling(this.controller)) {
                Tuple<Integer, Optional<Item>> calculation = this.calculateFood(this.controller);
                int foodScore = (Integer)calculation.getA();
@@ -97,9 +118,36 @@ public class FoodChain extends SingleTaskChain {
                }
 
                if (hasFood && (this.needsToEat() || this.requestFillup) && this.cachedPerfectFood.isPresent()) {
+                  // WS6: route eating through the animation-aware EatFoodTask.
+                  // One item at a time — the task eats one item, then requestFillup keeps
+                  // re-triggering until getFoodLevel() >= 20.
                   this.startEat(this.controller, this.cachedPerfectFood.get());
                } else {
                   this.stopEat(this.controller);
+               }
+
+               // WS8: starving-with-no-food notice (egress-safe, cooldowned).
+               // Gate: hunger enabled, no food in inventory, and genuinely starving (food <= threshold).
+               // STARVING_FOOD_LEVEL is distinct from alwaysEatWhenBelowHunger — this fires only when
+               // the bot is critically low with nothing to eat.
+               boolean isStarving = this.controller.getBaritone().getEntityContext()
+                                        .hungerManager().getFoodLevel() <= STARVING_FOOD_LEVEL;
+               if (this.controller.getModSettings().isHungerEnabled() && !hasFood && isStarving) {
+                  long now = System.currentTimeMillis();
+                  if (now - this.lastStarvingNoticeMs >= STARVING_NOTICE_INTERVAL_MS) {
+                     this.lastStarvingNoticeMs = now;
+                     // Both strings are short, bounded, code-author-controlled literals —
+                     // no logs, no stack traces, no unbounded external data (DESIGN.md §3).
+                     AiConversationFeedback.enqueueInfo(this.controller,
+                         "I am starving and have no food in my inventory. I cannot eat.");
+                     this.controller.reportAgenticProgress("I'm starving and out of food.", true);
+                  }
+               }
+
+               // When the EatFoodTask is running, return a positive priority to stay active.
+               // Eating is prioritized over collecting food — eat what we have first, then collect.
+               if (this.isTryingToEat && this.mainTask != null && !this.mainTask.isFinished()) {
+                  return 55.0F;
                }
 
                PlayerEngineSettings settings = this.controller.getModSettings();
@@ -122,6 +170,14 @@ public class FoodChain extends SingleTaskChain {
             return Float.NEGATIVE_INFINITY;
          }
       }
+   }
+
+   @Override
+   public boolean isActive() {
+      // FoodChain must always evaluate its priority so that auto-eat can trigger even when no
+      // CollectFoodTask is running (i.e. when mainTask is null). This mirrors the pattern used by
+      // PlayerDefenseChain and MobDefenseChain which also need to fire without a pre-existing task.
+      return true;
    }
 
    @Override

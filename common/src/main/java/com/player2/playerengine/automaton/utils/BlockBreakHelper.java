@@ -17,6 +17,7 @@
 
 package com.player2.playerengine.automaton.utils;
 
+import com.player2.playerengine.automaton.api.entity.LivingEntityHungerManager;
 import com.player2.playerengine.automaton.api.utils.IEntityContext;
 import java.util.Objects;
 import net.minecraft.core.BlockPos;
@@ -58,6 +59,14 @@ public final class BlockBreakHelper {
 
          if (this.ctx.playerController().onPlayerDamageBlock(pos, ((BlockHitResult)trace).getDirection())) {
             this.ctx.entity().swing(InteractionHand.MAIN_HAND);
+            // Exhaustion: block was just broken when the world pos is now empty after the break action.
+            // onPlayerDamageBlock triggers finishMining -> tryBreakBlock -> world.removeBlock when progress >= 10.
+            if (this.ctx.world().isEmptyBlock(pos)) {
+               LivingEntityHungerManager hm = this.ctx.hungerManager();
+               if (hm != null) {
+                  hm.addExhaustion(0.005F);
+               }
+            }
          }
 
          this.ctx.playerController().setHittingBlock(false);

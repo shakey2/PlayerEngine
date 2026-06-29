@@ -20,4 +20,8 @@ public class FoodComponentWrapper {
    public float getSaturationModifier() {
       return this.component.saturation();
    }
+
+   public boolean isAlwaysEdible() {
+      return this.component.canAlwaysEat();
+   }
 }
