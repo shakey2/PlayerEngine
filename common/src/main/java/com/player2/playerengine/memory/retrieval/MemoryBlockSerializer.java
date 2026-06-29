@@ -46,53 +46,46 @@ public final class MemoryBlockSerializer {
     private static final String HEADER = "[Memory]";
 
     /**
-     * Closed-world anti-fabrication footer appended after the bulleted memories in a
+     * Default-behavior-first footer appended after the bulleted memories in a
      * {@link BoundaryVerdict#HAS_MEMORY} block. Static, bounded, author-controlled.
      *
-     * <p><b>Scope (Phase D fixation fix):</b> the HAS_MEMORY body now lists ONLY episodic
-     * {@link MemoryNodeType#EVENT} recall — stable profile facts (favorite colour, who the player is,
-     * etc.) are deliberately excluded from per-turn recall and surface naturally via the relationship
-     * summary in the system block instead. So this footer is scoped to <em>shared-history events</em>:
-     * it frames the listed events as the COMPLETE set of remembered shared history so the model cannot
-     * treat a partial seed match (e.g. the always-present self/owner nodes, or a profile entity that
-     * merely seeded retrieval) as license to agree to a fabricated "remember when…" event. It no longer
-     * claims the list is everything the companion knows about the player — only everything it remembers
-     * <em>happening together</em>.
+     * <p><b>Scope (Phase D fixation fix):</b> the HAS_MEMORY body lists ONLY episodic
+     * {@link MemoryNodeType#EVENT} recall. This footer leads with an unconditional directive to
+     * always act on instructions and new information, then scopes the anti-fabrication boundary
+     * narrowly to the EXPLICIT-ASK case — when the player explicitly asks whether a specific
+     * shared past event is remembered. It must NOT apply to new facts, preferences, tasks, or
+     * instructions the player is stating this turn. Kept byte-stable (prefix-cache) and counted
+     * within the bounded block: {@link #buildHasMemory} reserves cap room for it so the whole
+     * block never exceeds the char cap (DESIGN.md §3 egress bound).
      *
-     * <p><b>ASK vs TELL (Phase D engagement fix):</b> the anti-fabrication boundary fires ONLY for the
-     * RECALL case — when the player ASKS whether a specific past shared event is remembered. It must NOT
-     * be applied to NEW information the player is TELLING the companion this turn (a fresh fact,
-     * preference, or just-happened event): new info is not a false memory, so the model must accept and
-     * acknowledge it rather than deny it. The footer also forbids disengagement entirely — the model
-     * must always respond to what the player just said and never re-greet or change the subject instead
-     * of replying. Kept byte-stable (prefix-cache) and counted within the bounded block:
-     * {@link #buildHasMemory} reserves cap room for it so the whole block never exceeds the char cap
-     * (DESIGN.md §3 egress bound).
+     * <p>Char length: 688. footerReserve = 690 (+2 for separator). bodyCap = 910 at default 1600
+     * total cap (was 1002 at 596-char old footer — still ~11 event lines before truncation).
      */
     public static final String HAS_MEMORY_FOOTER =
-            "The list above is the complete set of past events you remember sharing with this player. "
-            + "Always respond to what the player just said. If they are telling you something NEW (a "
-            + "fact about themselves, a preference, an event), simply accept and acknowledge it — new "
-            + "information is not a false memory. If they ASK whether you remember a specific past event "
-            + "or thing that is NOT listed above, tell them honestly, in your own voice, that you do not "
-            + "recall it, and never invent or play along with a shared memory that is not here. Either "
-            + "way, stay engaged — never ignore the player or change the subject.";
+            "ALWAYS carry out whatever the player just asked or told you — instructions, tasks, and new "
+            + "facts are never filtered through this memory list. A statement like \"today we are testing "
+            + "the hunger system\" or \"go mining\" is an instruction or new information: act on it or "
+            + "acknowledge it directly, never treat it as a memory test and never deflect, ignore, or "
+            + "change the subject. The list above is relevant ONLY if the player EXPLICITLY ASKS whether "
+            + "you remember a specific shared past event (\"do you remember when we...\"). ONLY in that "
+            + "narrow case: if the event is not listed, say honestly in your own voice that you do not "
+            + "recall it — never invent or play along with an event that is not here.";
 
     /**
      * Templated decline note for {@link BoundaryVerdict#NO_MEMORY}. Static, bounded, author-controlled.
-     * Mirrors {@link #HAS_MEMORY_FOOTER}'s ASK-vs-TELL framing: it instructs the model to decline a
-     * RECALL request (the player ASKING about an unstored past event) rather than invent, while still
-     * accepting and acknowledging NEW information the player is TELLING it this turn, and to always stay
-     * engaged (never ignore the player, change the subject, or re-greet). Kept byte-stable so it never
-     * busts the cache with churn.
+     * Leads with an unconditional ALWAYS-ACT directive so instructions and new facts are never
+     * caught by this note, then explains this note fires ONLY because the player appears to be
+     * asking about a specific shared past event that is not stored. Mirrors the narrow ASK-only
+     * scope of {@link #HAS_MEMORY_FOOTER}. Kept byte-stable so it never busts the cache with churn.
+     * Char length: 534.
      */
     public static final String NO_MEMORY_NOTE =
-            "[Memory] You have no stored memory matching what the player just referred to. Always "
-            + "respond to what they actually said. If they are telling you something NEW, accept and "
-            + "acknowledge it as new information. If they are ASKING whether you remember a specific "
-            + "past event or thing, say honestly, in your own in-character voice, that you do not recall "
-            + "it — do not invent or play along with it. Never ignore the player, change the subject, or "
-            + "greet them again instead of replying.";
+            "[Memory] ALWAYS act on whatever the player just said — instructions and new facts require "
+            + "no memory match. This note fires ONLY because the player appears to be asking about a "
+            + "specific shared past event that is not in your memory store. In that case only: say "
+            + "honestly, in your own in-character voice, that you do not recall that event — never invent "
+            + "or play along with a fabricated shared memory. Then engage with whatever else they said or "
+            + "asked; never ignore the player, change the subject, or greet them again instead of replying.";
 
     /**
      * Builds the tail block for the given verdict.
