@@ -46,6 +46,8 @@ public class PlayerEngineSettings implements IFailableConfigFile {
    private boolean autoCloseScreenWhenLookingOrMining = true;
    private boolean extinguishSelfWithWater = true;
    private boolean autoEat = true;
+   private boolean hungerEnabled = true;                     // master gate for the hunger sim + auto-eat
+   private boolean deathByHungerMatchesDifficulty = true;    // true = vanilla difficulty starve; false = no starvation damage
    private boolean autoMLGBucket = true;
    private boolean autoReconnect = true;
    private boolean autoRespawn = true;
@@ -257,6 +259,14 @@ public class PlayerEngineSettings implements IFailableConfigFile {
 
    public boolean isAutoEat() {
       return this.autoEat;
+   }
+
+   public boolean isHungerEnabled() {
+      return this.hungerEnabled;
+   }
+
+   public boolean isDeathByHungerMatchesDifficulty() {
+      return this.deathByHungerMatchesDifficulty;
    }
 
    public boolean isAutoReconnect() {

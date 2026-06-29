@@ -1,6 +1,7 @@
 package com.player2.playerengine.control;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.automaton.api.entity.LivingEntityHungerManager;
 import com.player2.playerengine.eventbus.EventBus;
 import com.player2.playerengine.eventbus.events.BlockBreakingCancelEvent;
 import com.player2.playerengine.eventbus.events.BlockBreakingEvent;
@@ -42,6 +43,13 @@ public class PlayerExtraController {
       if (this.inRange(entity)) {
          this.mod.getPlayer().doHurtTarget(entity);
          this.mod.getPlayer().swing(InteractionHand.MAIN_HAND);
+         // Exhaustion: attacking costs 0.1 per hit (vanilla FoodConstants.EXHAUSTION_ATTACK)
+         if (this.mod.getModSettings().isHungerEnabled()) {
+            LivingEntityHungerManager hm = this.mod.getBaritone().getEntityContext().hungerManager();
+            if (hm != null) {
+               hm.addExhaustion(0.1F);
+            }
+         }
       }
    }
 }

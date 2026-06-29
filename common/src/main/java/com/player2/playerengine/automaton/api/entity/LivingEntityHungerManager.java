@@ -27,12 +27,31 @@ import net.minecraft.world.level.GameRules;
 
 public class LivingEntityHungerManager {
    private int foodLevel = 20;
-   private float foodSaturationLevel = 20.0F;
+   // Vanilla FoodData initialises saturation to 5.0F (not 20.0F); match that so a fresh/respawned bot
+   // experiences saturation drain like a real player rather than starting over-saturated.
+   private float foodSaturationLevel = 5.0F;
    private float exhaustion;
    private int foodTickTimer;
    private int prevFoodLevel = 20;
 
+   // WS1 gate fields — pushed from AutomatoneEntity.tick() via setters before each update().
+   // Defaulting to true preserves existing behaviour until the settings push is wired.
+   private boolean hungerEnabled = true;
+   private boolean deathByHungerMatchesDifficulty = true;
+
+   public void setHungerEnabled(boolean hungerEnabled) {
+      this.hungerEnabled = hungerEnabled;
+   }
+
+   public void setDeathByHungerMatchesDifficulty(boolean deathByHungerMatchesDifficulty) {
+      this.deathByHungerMatchesDifficulty = deathByHungerMatchesDifficulty;
+   }
+
    public void add(int food, float saturationModifier) {
+      // 1.20.1: FoodProperties.getSaturationModifier() is a raw modifier (e.g. 0.6), so vanilla FoodData.eat
+      // computes food * modifier * 2.0F (FoodData.java:28). The * 2.0F here is CORRECT for 1.20.1 — do not
+      // remove it. The 1.21.1 branch legitimately diverges: saturation() there is already the pre-computed
+      // absolute value and must NOT be multiplied again (see 1.21.1 LivingEntityHungerManager, WS7).
       this.foodLevel = Math.min(food + this.foodLevel, 20);
       this.foodSaturationLevel = Math.min(this.foodSaturationLevel + food * saturationModifier * 2.0F, (float)this.foodLevel);
    }
@@ -45,6 +64,11 @@ public class LivingEntityHungerManager {
    }
 
    public void update(LivingEntity player) {
+      // WS2 master gate: when hunger simulation is disabled, freeze the bar entirely (no drain, regen, or starve).
+      if (!this.hungerEnabled) {
+         return;
+      }
+
       Difficulty difficulty = player.level().getDifficulty();
       this.prevFoodLevel = this.foodLevel;
       if (this.exhaustion > 4.0F) {
@@ -75,7 +99,11 @@ public class LivingEntityHungerManager {
       } else if (this.foodLevel <= 0) {
          this.foodTickTimer++;
          if (this.foodTickTimer >= 80) {
-            if (player.getHealth() > 10.0F || difficulty == Difficulty.HARD || player.getHealth() > 1.0F && difficulty == Difficulty.NORMAL) {
+            // WS2 death gate: vanilla difficulty starve conditions kept intact; outer toggle allows
+            // the bar to reach 0 without dealing damage (for servers that want no starvation deaths).
+            if (this.deathByHungerMatchesDifficulty
+                  && (player.getHealth() > 10.0F || difficulty == Difficulty.HARD
+                      || (player.getHealth() > 1.0F && difficulty == Difficulty.NORMAL))) {
                player.hurt(player.damageSources().starve(), 1.0F);
             }
 
@@ -115,6 +143,14 @@ public class LivingEntityHungerManager {
    }
 
    public void addExhaustion(float exhaustion) {
+      // WS3 gate: when hunger is disabled, exhaustion must not accumulate. The external hook sites
+      // (PathExecutor sprint, BlockBreakHelper mine, InputOverrideHandler jump/swim) only hold an
+      // EntityContext and cannot reach isHungerEnabled() cleanly, so the gate lives here — the single
+      // choke point all hooks pass through. Without it, exhaustion would pile up while disabled and
+      // cause a one-shot hunger hit on re-enable.
+      if (!this.hungerEnabled) {
+         return;
+      }
       this.exhaustion = Math.min(this.exhaustion + exhaustion, 40.0F);
    }
 

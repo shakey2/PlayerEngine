@@ -1,6 +1,7 @@
 package com.player2.playerengine.chains;
 
 import com.player2.playerengine.PlayerEngineController;
+import com.player2.playerengine.automaton.api.entity.LivingEntityHungerManager;
 import com.player2.playerengine.eventbus.EventBus;
 import com.player2.playerengine.eventbus.events.EntitySwungEvent;
 import com.player2.playerengine.eventbus.events.PlayerDamageEvent;
@@ -33,6 +34,13 @@ public class PlayerDefenseChain extends SingleTaskChain {
       EventBus.subscribe(PlayerDamageEvent.class, evt -> {
          if (this.controller.getPlayer() == evt.target) {
             this.onPlayerDamage(evt.source.getEntity());
+            // Exhaustion: taking damage costs 0.1 per damage event (vanilla FoodConstants.EXHAUSTION_COMBAT)
+            if (evt.damage > 0 && this.mod.getModSettings().isHungerEnabled()) {
+               LivingEntityHungerManager hm = this.mod.getBaritone().getEntityContext().hungerManager();
+               if (hm != null) {
+                  hm.addExhaustion(0.1F);
+               }
+            }
          }
       });
       EventBus.subscribe(EntitySwungEvent.class, evt -> this.onEntitySwung(evt.entity));

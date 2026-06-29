@@ -219,7 +219,15 @@ public class PathExecutor implements IPathExecutor {
                   this.onTick();
                   return true;
                } else {
-                  this.ctx.entity().setSprinting(this.shouldSprintNextTick());
+                  boolean willSprint = this.shouldSprintNextTick();
+                  this.ctx.entity().setSprinting(willSprint);
+                  // Exhaustion: sprint adds ~0.1/tick (vanilla 0.1 * distance; approximated as flat per-tick)
+                  if (willSprint) {
+                     com.player2.playerengine.automaton.api.entity.LivingEntityHungerManager hm = this.ctx.hungerManager();
+                     if (hm != null) {
+                        hm.addExhaustion(0.1F);
+                     }
+                  }
                   this.ticksOnCurrent++;
                   if (this.ticksOnCurrent > this.currentMovementOriginalCostEstimate + baritone.settings().movementTimeoutTicks.get().intValue()) {
                      this.logDebug(
