@@ -88,6 +88,11 @@ import com.player2.playerengine.modintelligence.enrich.CapabilityEnrichmentServi
 import com.player2.playerengine.modintelligence.query.CapabilityHit;
 import com.player2.playerengine.modintelligence.query.CapabilityQuery;
 import com.player2.playerengine.modintelligence.query.CapabilityQueryService;
+import com.player2.playerengine.help.ArgNote;
+import com.player2.playerengine.help.HelpCoverageVerifier;
+import com.player2.playerengine.help.HelpEntry;
+import com.player2.playerengine.help.HelpRegistry;
+import com.player2.playerengine.help.HelpRenderer;
 
 import java.util.EnumSet;
 import java.util.Locale;
@@ -239,6 +244,7 @@ public class MCCommands {
     }
 
     private static void registerFromDispatch(CommandDispatcher<CommandSourceStack> dispatcher) {
+        contributeHelpEntries();
         dispatcher.register(
                 Commands.literal("playerengine")
                          .then(registerRelog())
@@ -250,7 +256,19 @@ public class MCCommands {
                          .then(registerResolve())
                          .then(registerMemory())
                         .then(registerHelp()));
+        // Coverage authority: walk the live merged dispatcher (both /playerengine and /player2npc
+        // roots are already registered via their CommandRegistrationEvent paths before SERVER_STARTING)
+        // and verify every counted leaf has a HelpEntry. One walk covers both mods.
+        HelpCoverageVerifier.verify(dispatcher);
     }
+
+    /**
+     * {@code /playerengine help [page]} renders the paginated index; {@code help <command> [page]}
+     * renders detail for a command path. {@code <command>} is an English greedy string (never
+     * translated, never routed to a model); a trailing integer token is parsed as the page so a
+     * genuinely overflowing family list can be paged. Renders against {@link CommandSourceStack} so
+     * the server console can run help.
+     */
     /**
      * {@code /playerengine memory status} — OP-only diagnostics for the Phase D graph-RAG memory
      * subsystem. Makes ZERO LLM / Player2 calls on every path: the patron check is a READ-ONLY
@@ -345,13 +363,129 @@ public class MCCommands {
     private static LiteralArgumentBuilder<CommandSourceStack> registerHelp() {
         return Commands.literal("help")
                 .executes(context -> {
-                    LOGGER.info("help command");
-                    Player player = context.getSource().getPlayerOrException();
-
-                    AgentSideEffects.broadcastChatToPlayer(player.level().getServer(),
-                            Component.translatable("message.playerengine.commands.help"), (ServerPlayer) player);
+                    HelpRenderer.index("playerengine", 1, context.getSource());
                     return 1;
-                });
+                })
+                .then(Commands.argument("page", IntegerArgumentType.integer(1))
+                        .executes(context -> {
+                            HelpRenderer.index("playerengine",
+                                    IntegerArgumentType.getInteger(context, "page"), context.getSource());
+                            return 1;
+                        }))
+                .then(Commands.argument("command", StringArgumentType.greedyString())
+                        .executes(context -> {
+                            String raw = StringArgumentType.getString(context, "command");
+                            int page = 1;
+                            String command = raw;
+                            int lastSpace = raw.lastIndexOf(' ');
+                            if (lastSpace > 0) {
+                                String tail = raw.substring(lastSpace + 1);
+                                try {
+                                    page = Integer.parseInt(tail);
+                                    command = raw.substring(0, lastSpace).trim();
+                                } catch (NumberFormatException ignored) {
+                                    // no trailing page token — treat the whole string as the path
+                                }
+                            }
+                            HelpRenderer.detail("playerengine", command, page, context.getSource());
+                            return 1;
+                        }));
+    }
+
+    /**
+     * Contributes a {@link HelpEntry} for every user-facing {@code /playerengine} leaf owned by this
+     * class. The {@code player2}/{@code budget}/{@code chain} leaves are contributed separately by
+     * {@code DefaultCommands} and {@code BudgetConfigCommands}. Registration is idempotent
+     * put-by-path, so re-firing is safe. All keys and usage strings are plain double-quoted String
+     * literals so the Layer-1 lint can parse them positionally. Only human prose lives behind
+     * {@code help.playerengine.*} keys; command names, argument names, and usage stay English.
+     */
+    private static void contributeHelpEntries() {
+        // general
+        HelpRegistry.register(new HelpEntry("playerengine", "relog", "relog",
+                "help.playerengine.relog.short", "help.playerengine.relog.long",
+                List.of(), 0, null, "general"));
+        HelpRegistry.register(new HelpEntry("playerengine", "tpto", "tpto <username>",
+                "help.playerengine.tpto.short", null,
+                List.of(new ArgNote("username", "help.playerengine.tpto.arg.username")), 0, null, "general"));
+        HelpRegistry.register(new HelpEntry("playerengine", "help", "help [<command>] [page]",
+                "help.playerengine.help.short", "help.playerengine.help.long",
+                List.of(new ArgNote("command", "help.playerengine.help.arg.command"),
+                        new ArgNote("page", "help.playerengine.help.arg.page")), 0, null, "general"));
+
+        // diagnostics
+        HelpRegistry.register(new HelpEntry("playerengine", "queue clear", "queue clear [player]",
+                "help.playerengine.queue-clear.short", "help.playerengine.queue-clear.long",
+                List.of(new ArgNote("player", "help.playerengine.queue-clear.arg.player")), 2, null, "diagnostics"));
+        HelpRegistry.register(new HelpEntry("playerengine", "resolve", "resolve <item> [count]",
+                "help.playerengine.resolve.short", "help.playerengine.resolve.long",
+                List.of(new ArgNote("item", "help.playerengine.resolve.arg.item"),
+                        new ArgNote("count", "help.playerengine.resolve.arg.count")), 2, null, "diagnostics"));
+        HelpRegistry.register(new HelpEntry("playerengine", "memory status", "memory status",
+                "help.playerengine.memory-status.short", "help.playerengine.memory-status.long",
+                List.of(), 2, null, "diagnostics"));
+
+        // rag
+        HelpRegistry.register(new HelpEntry("playerengine", "rag retrieve",
+                "rag retrieve [--category <cat>] <goal>",
+                "help.playerengine.rag-retrieve.short", "help.playerengine.rag-retrieve.long",
+                List.of(new ArgNote("goal", "help.playerengine.rag-retrieve.arg.goal"),
+                        new ArgNote("category", "help.playerengine.rag-retrieve.arg.category")), 2, null, "rag"));
+        HelpRegistry.register(new HelpEntry("playerengine", "rag reload", "rag reload",
+                "help.playerengine.rag-reload.short", "help.playerengine.rag-reload.long",
+                List.of(), 2, null, "rag"));
+        HelpRegistry.register(new HelpEntry("playerengine", "rag audit tail", "rag audit tail [n]",
+                "help.playerengine.rag-audit-tail.short", null,
+                List.of(new ArgNote("n", "help.playerengine.rag-audit-tail.arg.n")), 2, null, "rag"));
+        HelpRegistry.register(new HelpEntry("playerengine", "rag reset_learned",
+                "rag reset_learned [toolId] [--all-owners]",
+                "help.playerengine.rag-reset-learned.short", "help.playerengine.rag-reset-learned.long",
+                List.of(new ArgNote("toolId", "help.playerengine.rag-reset-learned.arg.toolId")), 2, null, "rag"));
+        HelpRegistry.register(new HelpEntry("playerengine", "rag reset_learned --all-owners",
+                "rag reset_learned [toolId] --all-owners",
+                "help.playerengine.rag-reset-learned-all-owners.short", null,
+                List.of(), 2, null, "rag"));
+        HelpRegistry.register(new HelpEntry("playerengine", "rag inspect", "rag inspect <toolId>",
+                "help.playerengine.rag-inspect.short", "help.playerengine.rag-inspect.long",
+                List.of(new ArgNote("toolId", "help.playerengine.rag-inspect.arg.toolId")), 2, null, "rag"));
+
+        // routing
+        HelpRegistry.register(new HelpEntry("playerengine", "routing probe",
+                "routing probe <TASK_CLASS> [--simulate-joules <n>] [--simulate-soft-budget]",
+                "help.playerengine.routing-probe.short", "help.playerengine.routing-probe.long",
+                List.of(new ArgNote("taskClass", "help.playerengine.routing-probe.arg.taskClass")), 2, null, "routing"));
+        HelpRegistry.register(new HelpEntry("playerengine", "routing probe --simulate-soft-budget",
+                "routing probe --simulate-soft-budget <TASK_CLASS>",
+                "help.playerengine.routing-probe-simulate-soft-budget.short", null,
+                List.of(), 2, null, "routing"));
+        HelpRegistry.register(new HelpEntry("playerengine",
+                "routing probe --simulate-joules --simulate-soft-budget",
+                "routing probe --simulate-joules <n> --simulate-soft-budget <TASK_CLASS>",
+                "help.playerengine.routing-probe-simulate-joules-soft-budget.short", null,
+                List.of(), 2, null, "routing"));
+
+        // capability / mod intelligence
+        HelpRegistry.register(new HelpEntry("playerengine", "capability status", "capability status",
+                "help.playerengine.capability-status.short", null,
+                List.of(), 2, null, "capability"));
+        HelpRegistry.register(new HelpEntry("playerengine", "capability query", "capability query <text>",
+                "help.playerengine.capability-query.short", null,
+                List.of(new ArgNote("text", "help.playerengine.capability-query.arg.text")), 2, null, "capability"));
+        HelpRegistry.register(new HelpEntry("playerengine", "capability inspect",
+                "capability inspect <kind> <id>",
+                "help.playerengine.capability-inspect.short", null,
+                List.of(new ArgNote("kind", "help.playerengine.capability-inspect.arg.kind"),
+                        new ArgNote("id", "help.playerengine.capability-inspect.arg.id")), 2, null, "capability"));
+        HelpRegistry.register(new HelpEntry("playerengine", "capability rebuild", "capability rebuild [force]",
+                "help.playerengine.capability-rebuild.short", "help.playerengine.capability-rebuild.long",
+                List.of(), 2, null, "capability"));
+        HelpRegistry.register(new HelpEntry("playerengine", "capability rebuild force",
+                "capability rebuild force",
+                "help.playerengine.capability-rebuild-force.short", null,
+                List.of(), 2, null, "capability"));
+        HelpRegistry.register(new HelpEntry("playerengine", "capability enrich", "capability enrich [limit]",
+                "help.playerengine.capability-enrich.short", "help.playerengine.capability-enrich.long",
+                List.of(new ArgNote("limit", "help.playerengine.capability-enrich.arg.limit")), 2, null, "capability"));
     }
 
     /**
@@ -520,7 +654,7 @@ public class MCCommands {
 
         ToolRetriever retriever = resolveRetriever(src);
         if (retriever == null) {
-            src.sendFailure(Component.literal("RAG index not initialized."));
+            src.sendFailure(Component.translatable("message.playerengine.rag.not_initialized"));
             return 0;
         }
 

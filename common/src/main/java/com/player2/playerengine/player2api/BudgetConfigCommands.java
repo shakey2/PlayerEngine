@@ -6,6 +6,10 @@ import com.player2.playerengine.player2api.config.BudgetThresholds;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.config.Player2ServerRuntimeConfig;
 import com.player2.playerengine.player2api.config.PlayerBudgetConfig;
+import com.player2.playerengine.help.ArgNote;
+import com.player2.playerengine.help.HelpEntry;
+import com.player2.playerengine.help.HelpRegistry;
+import java.util.List;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -23,6 +27,55 @@ public final class BudgetConfigCommands {
     private static final String PLAYER_FILE = "player-budget.json";
 
     private BudgetConfigCommands() {}
+
+    /**
+     * Contributes a {@link HelpEntry} for every {@code /playerengine player2 budget …} leaf
+     * (all OP-only, permission 2). Called from {@code DefaultCommands.register} where the budget
+     * brigadier subtree is actually wired. Idempotent put-by-path. Keys and usage are plain String
+     * literals for the Layer-1 lint; only human prose lives behind {@code help.playerengine.*} keys
+     * (config tokens and values stay English).
+     */
+    public static void registerHelpEntries() {
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget soft", "player2 budget soft <value>",
+                "help.playerengine.player2-budget-soft.short", null,
+                List.of(new ArgNote("value", "help.playerengine.player2-budget-soft.arg.value")), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget hard", "player2 budget hard <value>",
+                "help.playerengine.player2-budget-hard.short", null,
+                List.of(new ArgNote("value", "help.playerengine.player2-budget-hard.arg.value")), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget window", "player2 budget window <minutes>",
+                "help.playerengine.player2-budget-window.short", null,
+                List.of(new ArgNote("minutes", "help.playerengine.player2-budget-window.arg.minutes")), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget joules_soft",
+                "player2 budget joules_soft <value>",
+                "help.playerengine.player2-budget-joules_soft.short", null,
+                List.of(new ArgNote("value", "help.playerengine.player2-budget-joules_soft.arg.value")), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget joules_hard",
+                "player2 budget joules_hard <value>",
+                "help.playerengine.player2-budget-joules_hard.short", null,
+                List.of(new ArgNote("value", "help.playerengine.player2-budget-joules_hard.arg.value")), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget joules_refresh",
+                "player2 budget joules_refresh <seconds>",
+                "help.playerengine.player2-budget-joules_refresh.short", null,
+                List.of(new ArgNote("seconds", "help.playerengine.player2-budget-joules_refresh.arg.seconds")), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget fallback_profile",
+                "player2 budget fallback_profile <name>",
+                "help.playerengine.player2-budget-fallback-profile.short", null,
+                List.of(new ArgNote("name", "help.playerengine.player2-budget-fallback-profile.arg.name")), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget fallback_behavior switch",
+                "player2 budget fallback_behavior switch",
+                "help.playerengine.player2-budget-fallback-behavior-switch.short", null,
+                List.of(), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget fallback_behavior stop",
+                "player2 budget fallback_behavior stop",
+                "help.playerengine.player2-budget-fallback-behavior-stop.short", null,
+                List.of(), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget reset", "player2 budget reset",
+                "help.playerengine.player2-budget-reset.short", null,
+                List.of(), 2, null, "budget"));
+        HelpRegistry.register(new HelpEntry("playerengine", "player2 budget status", "player2 budget status",
+                "help.playerengine.player2-budget-status.short", null,
+                List.of(), 2, null, "budget"));
+    }
 
     public static int setSoft(CommandSourceStack source, int value) {
         return setIntField(source, value, Field.SOFT_CALLS);
