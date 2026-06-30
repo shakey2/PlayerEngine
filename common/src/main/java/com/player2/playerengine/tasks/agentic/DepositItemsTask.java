@@ -399,10 +399,8 @@ public final class DepositItemsTask extends Task implements DescribesProgress {
     /**
      * Player-facing progress note via the controller seam (WS1/WS2). Guarded by the run-state
      * terminal flag so a late callback cannot overwrite a failure line. Uses {@code context.controller()}.
-     * The Component is resolved to a String at this boundary because the downstream
-     * {@code reportAgenticProgress} / {@code AgentSideEffects.broadcastChatToPlayer} chain is
-     * String-based; passing {@code Component} throughout this task establishes the translation-key
-     * system for a future full-Component upgrade of that infrastructure.
+     * The {@code Component} is passed through unresolved to the {@code reportAgenticProgress(Component)}
+     * overload so the CLIENT resolves the translation in its own locale.
      */
     private void report(Component message, boolean milestone) {
         if (context == null) {
@@ -411,7 +409,7 @@ public final class DepositItemsTask extends Task implements DescribesProgress {
         if (context.runState() != null && context.runState().isTerminal()) {
             return;
         }
-        context.controller().reportAgenticProgress(message.getString(), milestone);
+        context.controller().reportAgenticProgress(message, milestone);
     }
 
     private double elapsedSec() {

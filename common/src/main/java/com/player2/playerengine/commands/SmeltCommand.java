@@ -59,7 +59,7 @@ public class SmeltCommand extends Command {
         PlayerEngineSettings settings = mod.getModSettings();
         if (!settings.isEnableDeferredSmelt()) {
             // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.disabled").getString(), true);
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.disabled"), true);
             this.finishWithError("Deferred smelting is disabled in the configuration.");
             return;
         }
@@ -77,7 +77,7 @@ public class SmeltCommand extends Command {
 
         if (items.items == null || items.items.length != 1) {
             // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.invalid_args_count").getString(), true);
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.invalid_args_count"), true);
             this.finishWithError("Specify exactly one item to smelt, e.g. `smelt iron 16`.");
             return;
         }
@@ -85,7 +85,7 @@ public class SmeltCommand extends Command {
         Item input = target.getMatches().length == 1 ? target.getMatches()[0] : null;
         if (input == null) {
             // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.invalid_args_concrete").getString(), true);
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.invalid_args_concrete"), true);
             this.finishWithError("Specify a single concrete item to smelt, e.g. `smelt raw_iron 16`.");
             return;
         }
@@ -104,7 +104,7 @@ public class SmeltCommand extends Command {
             if (resolved.isEmpty()) {
                 String name = displayName(input);
                 // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-                mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.no_recipe_preflight", name).getString(), true);
+                mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.no_recipe_preflight", name), true);
                 this.finishWithError("Can't smelt " + name + ": it has no furnace, blast furnace, or smoker recipe.");
                 return;
             }
@@ -138,7 +138,7 @@ public class SmeltCommand extends Command {
             return;
         }
         Component playerLine = playerLine(o);
-        mod.reportAgenticProgress(playerLine.getString(), true);
+        mod.reportAgenticProgress(playerLine, true);
         switch (o.kind()) {
             case CLEAN_SUCCESS ->
                     this.finishWithInfo("smelted " + o.collected() + " " + o.outputName()

@@ -29,7 +29,7 @@ public final class WaypointReportFormatter {
     /**
      * Component variant of {@link #ellieGpsDisabledPlayer()} — use this in player-facing calls
      * so the string is resolved from the translation key rather than a hardcoded literal.
-     * Pass {@code .getString()} until {@code reportAgenticProgress(Component)} is available.
+     * Pass straight into {@code reportAgenticProgress(Component)} so the client resolves it.
      */
     public static Component ellieGpsDisabledPlayerComponent() {
         return Component.translatable("message.playerengine.elliegps.disabled");

@@ -131,7 +131,7 @@ public class DepositStorageSlotCommand extends Command {
             mod.reportAgenticProgress(
                     Component.translatable("message.playerengine.storage.deposit_slot_ok",
                             String.valueOf(task.movedCount()), task.displayId().replace('_', ' '),
-                            String.valueOf(task.containerSlotUsed()), humanKind(rc), humanPos(pos)).getString(),
+                            String.valueOf(task.containerSlotUsed()), humanKind(rc), humanPos(pos)),
                     true);
             Debug.logMessage("storage-tx ok dir=deposit_slot pos=" + ContainerResolver.formatPos(pos)
                     + " kind=" + kindToken(rc) + " slot=" + task.containerSlotUsed()
@@ -163,7 +163,7 @@ public class DepositStorageSlotCommand extends Command {
         String where = pos == null ? "storage" : "the " + humanKind(rc) + " at " + humanPos(pos);
         mod.reportAgenticProgress(
                 Component.translatable("message.playerengine.storage.deposit_fail",
-                        where, failures.get(0).detail()).getString(),
+                        where, failures.get(0).detail()),
                 true);
         Debug.logWarning("storage-tx fail code=" + failures.get(0).code().token()
                 + " pos=" + (pos == null ? "?" : ContainerResolver.formatPos(pos))
