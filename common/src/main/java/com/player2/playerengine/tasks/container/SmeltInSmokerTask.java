@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -139,14 +140,14 @@ public class SmeltInSmokerTask extends ResourceTask {
                   String itemName = currentTarget.getItem().getMatches()[0].getDescription().getString();
                   // Distinguish "gathered but still short" from "no acquirable fuel type to even try" so
                   // the model is never told we tried to gather when no gather ran (truthfulness).
-                  String playerTail = this.fuelGatherRan
-                     ? " — gathered more fuel but it still wasn't enough."
-                     : " — out of fuel and no fuel was available to gather.";
+                  Component playerTailComp = this.fuelGatherRan
+                     ? Component.translatable("message.playerengine.smoker.partial_tail_gathered")
+                     : Component.translatable("message.playerengine.smoker.partial_tail_nofuel");
                   String modelTail = this.fuelGatherRan
                      ? ", gathered fuel but still short"
                      : ", no acquirable fuel type (coal needs a pickaxe; no logs/planks reachable)";
                   controller.reportAgenticProgress(
-                     "Cooked " + smelted + " of " + batchCount + " " + itemName + playerTail, true);
+                     Component.translatable("message.playerengine.smoker.partial", smelted, batchCount, itemName, playerTailComp), true);
                   this.recordFailureReason(
                      "smoke incomplete: cooked " + smelted + "/" + batchCount + " " + itemName + modelTail);
                   this.stop(this);

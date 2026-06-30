@@ -18,6 +18,7 @@ import com.player2.playerengine.player2api.AiConversationFeedback;
 import com.player2.playerengine.tasks.container.ScanContainerTask;
 import com.player2.playerengine.util.Debug;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
@@ -57,7 +58,7 @@ public class AuditWaypointCommand extends Command {
     protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
         // Guard 1: EllieGPS enabled
         if (!mod.getModSettings().getEllieGpsEnabled()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayer(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayerComponent(), true);
             this.finishWithError(WaypointReportFormatter.ellieGpsDisabledModel());
             return;
         }
@@ -65,7 +66,7 @@ public class AuditWaypointCommand extends Command {
         // One-time operator note if the store was quarantined (Decision 14)
         EllieGPSStore quarantineStore = EllieGPSStore.get();
         if (quarantineStore != null && quarantineStore.consumeQuarantineNote()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNote(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNoteComponent(), true);
         }
 
         // Guard 2: parse coordinates
@@ -104,7 +105,7 @@ public class AuditWaypointCommand extends Command {
         if (existingRecord == null) {
             String msg = "no waypoint at " + posStr + " in " + dimensionId
                     + "; use create_waypoint " + x + " " + y + " " + z + " to register it first";
-            mod.reportAgenticProgress("couldn't audit waypoint - " + msg, true);
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.elliegps.audit_failed", msg), true);
             this.finishWithError("waypoint_not_found: " + msg);
             return;
         }
@@ -127,7 +128,7 @@ public class AuditWaypointCommand extends Command {
             EllieGPSStore liveStore = EllieGPSStore.get();
             if (liveStore == null) {
                 mod.reportAgenticProgress(
-                        "EllieGPS: store no longer available; audit not saved.", true);
+                        Component.translatable("message.playerengine.elliegps.audit_store_unavailable"), true);
                 this.finishWithError("elliegps_store_unavailable: no active EllieGPS store");
                 return;
             }
@@ -171,7 +172,7 @@ public class AuditWaypointCommand extends Command {
                     modelMsg += " " + WaypointReportFormatter.descriptionPolishScheduledNote();
                 }
                 AiConversationFeedback.enqueueInfo(mod, modelMsg);
-                mod.reportAgenticProgress(successMsg, true);
+                mod.reportAgenticProgress(WaypointReportFormatter.waypointRegisteredComponent(snapshotPos, itemTypes, kwCount, snapshotOmitted), true);
                 Debug.logMessage("waypoint-audit ok id=" + refreshed.id
                         + " snapshotOmitted=" + snapshotOmitted
                         + " bot=" + mod.getEntity().getName().getString());
@@ -192,7 +193,7 @@ public class AuditWaypointCommand extends Command {
                     // (the store persists and reindexes internally)
                     liveStore.markStale(capturedRecord.id, true);
                     String staleMsg = WaypointReportFormatter.waypointStaleMissing(posStr);
-                    mod.reportAgenticProgress(staleMsg, true);
+                    mod.reportAgenticProgress(WaypointReportFormatter.waypointStaleMissingComponent(posStr), true);
                     this.finishWithNote(staleMsg);
                 } else {
                     failEarly(mod, failure.code(), failure.detail());
@@ -206,7 +207,7 @@ public class AuditWaypointCommand extends Command {
         Debug.logWarning("waypoint-audit fail code=" + code.token()
                 + " detail=" + detail
                 + " bot=" + mod.getEntity().getName().getString());
-        mod.reportAgenticProgress("couldn't audit waypoint - " + detail, true);
+        mod.reportAgenticProgress(Component.translatable("message.playerengine.elliegps.audit_failed", detail), true);
         this.finishWithError(code.token() + ": " + detail);
     }
 }
