@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -105,7 +106,8 @@ public class ScanStorageCommand extends Command {
                 }
                 String errorText = ScanReportFormatter.transferFailure(entryFailures);
                 logScanFail(mod, "args", errorText);
-                mod.reportAgenticProgress("couldn't scan storage - " + errorText, true);
+                mod.reportAgenticProgress(
+                        Component.translatable("message.playerengine.storage.scan_fail", errorText), true);
                 this.finishWithError(errorText);
                 return;
             }
@@ -154,7 +156,8 @@ public class ScanStorageCommand extends Command {
     /** Dual-audience failure before a target pos is even known (arg-shape problems). */
     private void failBeforeTarget(PlayerEngineController mod, StorageAccessCode code, String detail) {
         logScanFail(mod, "code=" + code.token(), detail);
-        mod.reportAgenticProgress("couldn't scan storage - " + detail, true);
+        mod.reportAgenticProgress(
+                Component.translatable("message.playerengine.storage.scan_fail", detail), true);
         this.finishWithError(code.token() + ": " + detail);
     }
 
@@ -164,8 +167,8 @@ public class ScanStorageCommand extends Command {
         logScanFail(mod, "code=" + code.token() + " pos=" + ContainerResolver.formatPos(pos)
                 + " mode=" + mode.token(), detail);
         mod.reportAgenticProgress(
-                "couldn't scan the container at " + pos.getX() + " " + pos.getY() + " " + pos.getZ()
-                        + " - " + detail,
+                Component.translatable("message.playerengine.storage.scan_fail_at",
+                        pos.getX(), pos.getY(), pos.getZ(), detail),
                 true);
         this.finishWithError(code.token() + ": " + detail);
     }

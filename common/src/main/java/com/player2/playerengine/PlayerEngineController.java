@@ -698,6 +698,70 @@ public class PlayerEngineController {
       lastAgenticReportMessage = message;
    }
 
+   /**
+    * Client-localized agentic progress broadcast (non-milestone). Convenience overload that applies
+    * the {@link #MIN_REPORT_INTERVAL_MS} throttle. See {@link #reportAgenticProgress(Component, boolean)}.
+    */
+   public void reportAgenticProgress(Component message) {
+      reportAgenticProgress(message, false);
+   }
+
+   /**
+    * Component variant of {@link #reportAgenticProgress(String, boolean)}: the player-facing
+    * {@code message} is passed UNRESOLVED into the prefix template's {@code %2$s} arg so the CLIENT
+    * resolves the translation (the {@code String} overload resolves on the server, always en_us).
+    * Throttle/dedup behavior is preserved — dedup keys on {@code message.getString()}, the same
+    * English text the {@code String} path used.
+    *
+    * @param message   pre-built deterministic progress/failure {@link Component} (no model call)
+    * @param milestone when true, bypass the interval throttle (still deduplicated)
+    */
+   public void reportAgenticProgress(Component message, boolean milestone) {
+      // 1. null guard.
+      if (message == null) {
+         return;
+      }
+      // 1b. blank guard / dedup key (resolved server-side only for throttle/dedup, NOT broadcast).
+      String dedupKey = message.getString();
+      if (dedupKey.isBlank()) {
+         return;
+      }
+      // 2. resolve server — there is no getServer() on the controller; use getPlayer().getServer().
+      MinecraftServer server = (getPlayer() != null) ? getPlayer().getServer() : null;
+      if (server == null) {
+         return;
+      }
+      // 3. resolve target ServerPlayer. getOwner() returns Player (NOT ServerPlayer), so the
+      //    instanceof-cast is required; fall back to the nearest player; else no-op.
+      ServerPlayer target;
+      if (getOwner() instanceof ServerPlayer sp) {
+         target = sp;
+      } else {
+         target = getClosestPlayer().orElse(null);
+      }
+      if (target == null) {
+         return;
+      }
+      long now = System.currentTimeMillis();
+      // 4. throttle (non-milestone only): skip if too soon after the last broadcast.
+      if (!milestone && (now - lastAgenticReportMs) < MIN_REPORT_INTERVAL_MS) {
+         return;
+      }
+      // 5. dedup: skip identical consecutive messages (applies to milestones too).
+      if (dedupKey.equals(lastAgenticReportMessage)) {
+         return;
+      }
+      // 6. broadcast via the single existing player-chat path; the UNRESOLVED message is nested as the
+      //    prefix template's %2$s arg so the client resolves the whole thing in its own locale.
+      AgentSideEffects.broadcastChatToPlayer(server,
+            Component.translatable("message.playerengine.agent.progress_prefix",
+                  agenticReportBotName(), message),
+            target);
+      // 7. update throttle/dedup state.
+      lastAgenticReportMs = now;
+      lastAgenticReportMessage = dedupKey;
+   }
+
    /** Short bot name used as the {@code [<botName>] } prefix on agentic progress/failure lines. */
    private String agenticReportBotName() {
       Character character = this.getAIPersistantData() != null ? this.getAIPersistantData().getCharacter() : null;

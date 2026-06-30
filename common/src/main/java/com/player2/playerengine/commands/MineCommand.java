@@ -65,7 +65,7 @@ public class MineCommand extends Command {
 
         if (blockId == null || blockId.isBlank()) {
             // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-            mod.reportAgenticProgress(Component.translatable("message.playerengine.mine.specify_block").getString(), true);
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.mine.specify_block"), true);
             this.finishWithError("Specify a block to mine, e.g. `mine iron_ore 8`.");
             return;
         }
@@ -100,7 +100,7 @@ public class MineCommand extends Command {
             return;
         }
         Component playerLine = playerLine(o, count);
-        mod.reportAgenticProgress(playerLine.getString(), true);
+        mod.reportAgenticProgress(playerLine, true);
         switch (o.kind()) {
             case CLEAN_SUCCESS ->
                     this.finishWithInfo("mined " + o.mined() + " " + o.blockId());

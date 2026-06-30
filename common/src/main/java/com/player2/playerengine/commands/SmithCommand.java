@@ -63,7 +63,7 @@ public class SmithCommand extends Command {
         PlayerEngineSettings settings = mod.getModSettings();
         if (!settings.isEnableSmithing()) {
             // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.disabled").getString(), true);
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.disabled"), true);
             this.finishWithError("Smithing is disabled in the configuration.");
             return;
         }
@@ -81,7 +81,7 @@ public class SmithCommand extends Command {
 
         if (items.items == null || items.items.length != 1) {
             // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.invalid_args_count").getString(), true);
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.invalid_args_count"), true);
             this.finishWithError("Specify exactly one item to upgrade, e.g. `smith netherite_pickaxe`.");
             return;
         }
@@ -89,7 +89,7 @@ public class SmithCommand extends Command {
         Item output = target.getMatches().length == 1 ? target.getMatches()[0] : null;
         if (output == null) {
             // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.invalid_args_concrete").getString(), true);
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.invalid_args_concrete"), true);
             this.finishWithError("Specify a single concrete item to upgrade, e.g. `smith netherite_pickaxe`.");
             return;
         }
@@ -109,7 +109,7 @@ public class SmithCommand extends Command {
             if (resolved.isEmpty()) {
                 String name = displayName(output);
                 // Player sees the localized form; model keeps a fixed English token (cardinal rule).
-                mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.no_recipe_preflight", name).getString(), true);
+                mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.no_recipe_preflight", name), true);
                 this.finishWithError("Can't upgrade " + name
                         + ": nothing in the smithing registry produces it.");
                 return;
@@ -145,7 +145,7 @@ public class SmithCommand extends Command {
             return;
         }
         Component playerLine = playerLine(o);
-        mod.reportAgenticProgress(playerLine.getString(), true);
+        mod.reportAgenticProgress(playerLine, true);
         switch (o.kind()) {
             case CLEAN_SUCCESS ->
                     this.finishWithInfo("upgraded " + o.collected() + " x " + o.outputName());

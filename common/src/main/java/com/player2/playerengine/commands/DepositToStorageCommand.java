@@ -125,7 +125,7 @@ public class DepositToStorageCommand extends Command {
                     ScanReportFormatter.TransferDirection.DEPOSIT, rc, task.entryOutcomes());
             mod.reportAgenticProgress(
                     Component.translatable("message.playerengine.storage.deposit_ok",
-                            humanItems(task.entryOutcomes()), humanKind(rc), humanPos(pos)).getString(),
+                            humanItems(task.entryOutcomes()), humanKind(rc), humanPos(pos)),
                     true);
             Debug.logMessage("storage-tx ok dir=deposit pos=" + ContainerResolver.formatPos(pos)
                     + " kind=" + kindToken(rc) + " moved=" + movedSummary(task.entryOutcomes())
@@ -138,7 +138,7 @@ public class DepositToStorageCommand extends Command {
             mod.reportAgenticProgress(
                     Component.translatable("message.playerengine.storage.deposit_partial",
                             humanItems(task.entryOutcomes()), humanKind(rc), humanPos(pos),
-                            firstShortReason(task.entryOutcomes())).getString(),
+                            firstShortReason(task.entryOutcomes())),
                     true);
             Debug.logMessage("storage-tx partial dir=deposit pos=" + ContainerResolver.formatPos(pos)
                     + " kind=" + kindToken(rc) + " code=" + task.code().token()
@@ -172,7 +172,7 @@ public class DepositToStorageCommand extends Command {
         String where = pos == null ? "storage" : "the " + humanKind(rc) + " at " + humanPos(pos);
         mod.reportAgenticProgress(
                 Component.translatable("message.playerengine.storage.deposit_fail",
-                        where, failures.get(0).detail()).getString(),
+                        where, failures.get(0).detail()),
                 true);
         Debug.logWarning("storage-tx fail code=" + failures.get(0).code().token()
                 + " pos=" + (pos == null ? "?" : ContainerResolver.formatPos(pos))

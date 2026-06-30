@@ -52,7 +52,7 @@ public class LocateWaypointsCommand extends Command {
     protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
         // Guard 1: EllieGPS enabled
         if (!mod.getModSettings().getEllieGpsEnabled()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayerComponent().getString(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayerComponent(), true);
             this.finishWithError(WaypointReportFormatter.ellieGpsDisabledModel());
             return;
         }
@@ -60,7 +60,7 @@ public class LocateWaypointsCommand extends Command {
         // One-time operator note if the store was quarantined (Decision 14)
         EllieGPSStore quarantineStore = EllieGPSStore.get();
         if (quarantineStore != null && quarantineStore.consumeQuarantineNote()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNoteComponent().getString(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNoteComponent(), true);
         }
 
         // Guard 2: query terms — join all arg units into a single query string
@@ -90,7 +90,7 @@ public class LocateWaypointsCommand extends Command {
         if (index == null) {
             // Index not yet built — return honest empty result, not an error
             // Player path: translatable; model path: English String (separate for AI truthfulness)
-            mod.reportAgenticProgress(WaypointReportFormatter.noWaypointsMatchComponent().getString(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.noWaypointsMatchComponent(), true);
             this.finishWithNote(WaypointReportFormatter.noWaypointsMatch());
             return;
         }
@@ -110,7 +110,7 @@ public class LocateWaypointsCommand extends Command {
         }
 
         if (results.isEmpty()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.noWaypointsMatchComponent().getString(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.noWaypointsMatchComponent(), true);
             this.finishWithNote(WaypointReportFormatter.noWaypointsMatch());
             return;
         }
@@ -135,7 +135,7 @@ public class LocateWaypointsCommand extends Command {
         // Player path: translatable summary line
         mod.reportAgenticProgress(
                 Component.translatable("message.playerengine.elliegps.locate_found",
-                        results.size(), query).getString(),
+                        results.size(), query),
                 true);
         Debug.logMessage("waypoint-locate ok query=\"" + query + "\" hits=" + results.size()
                 + " dimension=" + dimensionId
@@ -162,7 +162,7 @@ public class LocateWaypointsCommand extends Command {
                 + " bot=" + mod.getEntity().getName().getString());
         // Player path: translatable prefix; detail stays English (shared with model — not localized)
         mod.reportAgenticProgress(
-                Component.translatable("message.playerengine.elliegps.locate_fail", detail).getString(),
+                Component.translatable("message.playerengine.elliegps.locate_fail", detail),
                 true);
         // Model path: English token:detail for AI truthfulness
         this.finishWithError(code.token() + ": " + detail);
