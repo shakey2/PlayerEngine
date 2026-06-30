@@ -1,5 +1,8 @@
 package com.player2.playerengine.agentic.elliegps;
 
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+
 /**
  * Centralised formatter for all AI-visible and player-visible EllieGPS strings (Part C5, WS5).
  *
@@ -23,6 +26,15 @@ public final class WaypointReportFormatter {
         return "EllieGPS is disabled (ellieGpsEnabled=false in settings).";
     }
 
+    /**
+     * Component variant of {@link #ellieGpsDisabledPlayer()} — use this in player-facing calls
+     * so the string is resolved from the translation key rather than a hardcoded literal.
+     * Pass {@code .getString()} until {@code reportAgenticProgress(Component)} is available.
+     */
+    public static Component ellieGpsDisabledPlayerComponent() {
+        return Component.translatable("message.playerengine.elliegps.disabled");
+    }
+
     /** Model-facing message when EllieGPS is disabled. */
     public static String ellieGpsDisabledModel() {
         return "EllieGPS is disabled; command refused. Check ellieGpsEnabled setting.";
@@ -34,15 +46,34 @@ public final class WaypointReportFormatter {
 
     /**
      * Success line for {@code create_waypoint}. Returned to both player and model.
+     * <p>Use {@link #waypointRegisteredComponent(String, int, int, boolean)} for the
+     * player-facing call so the string resolves from the translation key.
      *
-     * @param pos         formatted position string, e.g. {@code "(120,64,-35)"}
-     * @param itemTypes   number of distinct item types in the snapshot (or 0 for keyword-only)
-     * @param kwCount     number of keywords assigned
+     * @param pos             formatted position string, e.g. {@code "(120,64,-35)"}
+     * @param itemTypes       number of distinct item types in the snapshot (or 0 for keyword-only)
+     * @param kwCount         number of keywords assigned
      * @param snapshotOmitted true when the slot threshold was exceeded
      */
     public static String waypointRegistered(String pos, int itemTypes, int kwCount, boolean snapshotOmitted) {
         return "waypoint registered at " + pos + ": " + itemTypes + " item types, " + kwCount + " keywords"
                 + (snapshotOmitted ? " (snapshot omitted: slots > threshold)" : "");
+    }
+
+    /**
+     * Component variant of {@link #waypointRegistered(String, int, int, boolean)} for the
+     * player-facing path. Returns either {@code message.playerengine.elliegps.waypoint_registered}
+     * or {@code message.playerengine.elliegps.waypoint_registered_no_snapshot} depending on
+     * {@code snapshotOmitted}.
+     */
+    public static MutableComponent waypointRegisteredComponent(String pos, int itemTypes, int kwCount,
+            boolean snapshotOmitted) {
+        if (snapshotOmitted) {
+            return Component.translatable(
+                    "message.playerengine.elliegps.waypoint_registered_no_snapshot",
+                    pos, itemTypes, kwCount);
+        }
+        return Component.translatable(
+                "message.playerengine.elliegps.waypoint_registered", pos, itemTypes, kwCount);
     }
 
     // -------------------------------------------------------------------------
@@ -54,9 +85,19 @@ public final class WaypointReportFormatter {
         return "waypoint at " + pos + " in " + dimensionId + " deleted.";
     }
 
+    /** Component variant of {@link #waypointDeleted(String, String)} for the player-facing path. */
+    public static Component waypointDeletedComponent(String pos, String dimensionId) {
+        return Component.translatable("message.playerengine.elliegps.waypoint_deleted", pos, dimensionId);
+    }
+
     /** Error: no record found at the given position. */
     public static String noWaypointAt(String pos, String dimensionId) {
         return "no waypoint at " + pos + " in " + dimensionId + ".";
+    }
+
+    /** Component variant of {@link #noWaypointAt(String, String)} for the player-facing path. */
+    public static Component noWaypointAtComponent(String pos, String dimensionId) {
+        return Component.translatable("message.playerengine.elliegps.no_waypoint_at", pos, dimensionId);
     }
 
     // -------------------------------------------------------------------------
@@ -113,6 +154,11 @@ public final class WaypointReportFormatter {
         return "no waypoints match the query in this dimension.";
     }
 
+    /** Component variant of {@link #noWaypointsMatch()} for the player-facing path. */
+    public static Component noWaypointsMatchComponent() {
+        return Component.translatable("message.playerengine.elliegps.no_waypoints_match");
+    }
+
     // -------------------------------------------------------------------------
     // Auto-hook / degradation
     // -------------------------------------------------------------------------
@@ -140,6 +186,11 @@ public final class WaypointReportFormatter {
         return "refused: " + pos + " is an un-opened worldgen loot chest; waypoint not registered.";
     }
 
+    /** Component variant of {@link #refusedWorldgenLoot(String)} for the player-facing path. */
+    public static Component refusedWorldgenLootComponent(String pos) {
+        return Component.translatable("message.playerengine.elliegps.refused_worldgen_loot", pos);
+    }
+
     /**
      * Both-audience refusal when the classifier returned UNKNOWN on an explicit create
      * (Decision 4 conservative default: an unevaluated Tier 2 is never overridden).
@@ -149,6 +200,11 @@ public final class WaypointReportFormatter {
                 + " (worldgen check unavailable); waypoint not registered.";
     }
 
+    /** Component variant of {@link #refusedOriginUnverified(String)} for the player-facing path. */
+    public static Component refusedOriginUnverifiedComponent(String pos) {
+        return Component.translatable("message.playerengine.elliegps.refused_origin_unverified", pos);
+    }
+
     /**
      * Note appended to the create success feedback when the Tier 3 structure-piece verdict was
      * overridden by explicit create intent (Decision 4 explicit-create policy; the override is
@@ -156,6 +212,11 @@ public final class WaypointReportFormatter {
      */
     public static String structureOverrideNote() {
         return "note: this chest is inside a structure's bounds; registered by explicit request.";
+    }
+
+    /** Component variant of {@link #structureOverrideNote()} for the player-facing path. */
+    public static Component structureOverrideNoteComponent() {
+        return Component.translatable("message.playerengine.elliegps.structure_override_note");
     }
 
     // -------------------------------------------------------------------------
@@ -169,6 +230,11 @@ public final class WaypointReportFormatter {
      */
     public static String quarantineNote() {
         return "EllieGPS: previous waypoints.json was corrupt and quarantined; store started empty.";
+    }
+
+    /** Component variant of {@link #quarantineNote()} for the player-facing path. */
+    public static Component quarantineNoteComponent() {
+        return Component.translatable("message.playerengine.elliegps.quarantine_note");
     }
 
     // -------------------------------------------------------------------------

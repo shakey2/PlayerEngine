@@ -15,6 +15,7 @@ import com.player2.playerengine.tasks.container.SlotPreciseTransactionTask;
 import com.player2.playerengine.util.Debug;
 import java.util.List;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 
 /**
  * {@code withdraw_storage_slot <x> <y> <z> <containerSlot> <count> [botSlot]} — slot-precise
@@ -130,9 +131,9 @@ public class WithdrawStorageSlotCommand extends Command {
                     ScanReportFormatter.TransferDirection.WITHDRAW, rc, task.containerSlotUsed(),
                     task.displayId(), task.movedCount(), task.botSlotUsed());
             mod.reportAgenticProgress(
-                    "took " + task.movedCount() + " " + task.displayId().replace('_', ' ')
-                            + " from slot " + task.containerSlotUsed() + " of the " + humanKind(rc)
-                            + " at " + humanPos(pos), true);
+                    Component.translatable("message.playerengine.storage.withdraw_slot_ok",
+                            String.valueOf(task.movedCount()), task.displayId().replace('_', ' '),
+                            String.valueOf(task.containerSlotUsed()), humanKind(rc), humanPos(pos)).getString(), true);
             Debug.logMessage("storage-tx ok dir=withdraw_slot pos=" + ContainerResolver.formatPos(pos)
                     + " kind=" + kindToken(rc) + " slot=" + task.containerSlotUsed()
                     + " moved=" + task.displayId() + ":" + task.movedCount() + " bot=" + botName(mod));
@@ -168,7 +169,9 @@ public class WithdrawStorageSlotCommand extends Command {
         String text = ScanReportFormatter.transferFailure(failures);
         String where = pos == null ? "storage" : "the " + humanKind(rc) + " at " + humanPos(pos);
         mod.reportAgenticProgress(
-                "couldn't withdraw from " + where + " - " + failures.get(0).detail(), true);
+                Component.translatable("message.playerengine.storage.withdraw_fail",
+                        where, failures.get(0).detail()).getString(),
+                true);
         Debug.logWarning("storage-tx fail code=" + failures.get(0).code().token()
                 + " pos=" + (pos == null ? "?" : ContainerResolver.formatPos(pos))
                 + " kind=" + kindToken(rc)

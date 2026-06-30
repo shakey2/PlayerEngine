@@ -43,6 +43,7 @@ import com.player2.playerengine.player2api.manager.TTSManager;
 import com.player2.playerengine.util.ExecutorShutdown;
 import com.player2.playerengine.player2api.Event;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
 import dev.architectury.networking.NetworkManager;
@@ -170,7 +171,8 @@ public final class PlayerEngine {
                      username, message.length(), com.player2.playerengine.player2api.utils.SttLogging.messagePreview(message));
                ConversationManager.onUserChatMessage(new Event.UserMessage(message, username, true));
                AgentSideEffects.broadcastChatToAllPlayers(context.getPlayer().getServer(),
-                     String.format("<%s> %s", context.getPlayer().getName().getString(), message));
+                     Component.translatable("message.playerengine.chat.player_message",
+                           context.getPlayer().getName().getString(), message));
             });
       NetworkManager.registerReceiver(NetworkManager.Side.C2S,
             new ResourceLocation("playerengine", "request_stt"),
@@ -271,7 +273,7 @@ public final class PlayerEngine {
                   net.minecraft.server.MinecraftServer server = sender.getServer();
                   if (server != null) {
                      AgentSideEffects.broadcastChatToAllPlayers(server,
-                           String.format("Some of %s's speech didn't play.", botData.getName()));
+                           Component.translatable("message.playerengine.agent.partial_speech", botData.getName()));
                   }
                   botData.reportPartialSpeechToModel();
                }

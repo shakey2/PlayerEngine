@@ -10,6 +10,8 @@ import java.util.Optional;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.vehicle.Boat;
@@ -51,7 +53,8 @@ public class FollowPlayerTask extends Task {
    /** True while a DEFENDER break-off has been reported and not yet cleared (reset within followDistance). */
    private boolean lastDefenderBrokeOff = false;
    private long lastDegradationReportMs = 0L;
-   private String lastDegradationMessage = null;
+   /** Translation key of the last player-facing degradation sent; used for dedup in place of the raw message string. */
+   private String lastDegradationKey = null;
 
    public FollowPlayerTask(String playerName, double followDistance) {
       this.playerName = playerName;
@@ -153,7 +156,7 @@ public class FollowPlayerTask extends Task {
          // within the leash we cannot fully shake the threat — say so to both audiences so the model
          // never claims it got fully away or that it fought. Throttled/deduped on the player line below.
          this.reportDegradation(mod,
-               "Something's after me — I'm trying to keep close to you.",
+               "message.playerengine.follow.coward_fleeing",
                "follow(COWARD): a hostile is pursuing me; I am fleeing while staying within leash of you "
                      + "and not fighting it.");
       } else {
@@ -161,7 +164,7 @@ public class FollowPlayerTask extends Task {
          // The leash wins over evasion: cornered between danger and the follow target. Report to both
          // audiences (DESIGN.md §3) so the model never claims it got fully away or that it fought.
          this.reportDegradation(mod,
-               "I can't get away without leaving you behind — staying close instead.",
+               "message.playerengine.follow.coward_cornered",
                "follow(COWARD): cornered — a threat is near but I am at my leash limit from you, so I "
                      + "stopped fleeing and stayed close instead of running off (I did not fight it).");
       }
@@ -189,7 +192,7 @@ public class FollowPlayerTask extends Task {
             this.lastDefenderBrokeOff = true;
          }
          this.reportDegradation(mod,
-               "I stopped chasing it to stay near you.",
+               "message.playerengine.follow.defender_broke_off",
                "follow(DEFENDER): I reached my max-chase limit from you while fighting, so I broke off "
                      + "the chase and am returning to stay near you.");
       } else if (this.lastDefenderBrokeOff && distToTarget <= this.followDistance) {
@@ -200,24 +203,38 @@ public class FollowPlayerTask extends Task {
 
    /**
     * Throttled best-effort degradation report reaching BOTH audiences (DESIGN.md §3): the player via
-    * the controller's existing owner-scoped chat path ({@code reportAgenticProgress} →
-    * {@code AgentSideEffects.broadcastChatToPlayer}) and the model via {@code AiConversationFeedback}
+    * a translatable {@link Component} sent directly to the owner's {@code displayClientMessage} (so the
+    * CLIENT resolves the translation in its own locale), and the model via {@code AiConversationFeedback}
     * (an {@code InfoMessage} on this companion's queue, surfaced on the next LLM round). Follow has no
     * open command boundary for an in-task degradation, so the model channel is the conversation
-    * feedback queue rather than a command {@code finishWithNote}. Throttled/deduped on the player
-    * message so sustained danger/chase does not spam either channel.
+    * feedback queue rather than a command {@code finishWithNote}. Throttled/deduped on the translation
+    * key so sustained danger/chase does not spam either channel.
+    *
+    * @param playerKey    the translation key for the player-facing message (used as the dedup token
+    *                     AND resolved to a {@link Component} so the client renders it in its own locale)
+    * @param modelMessage the bounded, curated English string for the model's info queue (never localized)
     */
-   private void reportDegradation(PlayerEngineController mod, String playerMessage, String modelMessage) {
+   private void reportDegradation(PlayerEngineController mod, String playerKey, String modelMessage) {
       long now = System.currentTimeMillis();
-      if (playerMessage.equals(this.lastDegradationMessage)
+      if (playerKey.equals(this.lastDegradationKey)
             && (now - this.lastDegradationReportMs) < MIN_REPORT_INTERVAL_MS) {
          return;
       }
       this.lastDegradationReportMs = now;
-      this.lastDegradationMessage = playerMessage;
-      // Player channel (milestone=true: this task already gates, so don't let the controller interval
-      // swallow a degradation; the controller still dedups identical consecutive lines).
-      mod.reportAgenticProgress(playerMessage, true);
+      this.lastDegradationKey = playerKey;
+      // Player channel: send as a translatable Component so the CLIENT resolves the locale.
+      // Owner resolution mirrors PlayerEngineController#reportAgenticProgress (instanceof first,
+      // then closest-player fallback) without routing through the String-based API which would
+      // collapse the Component back to an en_us literal before it reaches the network layer.
+      ServerPlayer target;
+      if (mod.getOwner() instanceof ServerPlayer sp) {
+         target = sp;
+      } else {
+         target = mod.getClosestPlayer().orElse(null);
+      }
+      if (target != null) {
+         target.displayClientMessage(Component.translatable(playerKey), false);
+      }
       // Model channel (truthfulness): a short, curated, bounded phrase — never logs/stack/unbounded text.
       AiConversationFeedback.enqueueInfo(mod, modelMessage);
    }

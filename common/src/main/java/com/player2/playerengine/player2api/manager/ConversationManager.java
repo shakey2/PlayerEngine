@@ -148,8 +148,6 @@ public class ConversationManager {
 
     // ## Callbacks (need to register these externally)
 
-    private static final String USER_BLACKLIST_CALL_BY_NAME_MSG = "The owner of this bot has blacklisted you.";
-
     private static void maybeNotifyUserBlacklistCallByName(MinecraftServer server, String speakerName,
             HashSet<UUID> notifiedBotOwnerUuids, AgentConversationData blockedTarget) {
         if (server == null || speakerName == null || speakerName.isBlank()) {
@@ -165,7 +163,7 @@ public class ConversationManager {
         }
         for (ServerPlayer sp : server.getPlayerList().getPlayers()) {
             if (sp.getGameProfile().getName().equalsIgnoreCase(speakerName.trim())) {
-                sp.sendSystemMessage(Component.literal(USER_BLACKLIST_CALL_BY_NAME_MSG));
+                sp.sendSystemMessage(Component.translatable("message.playerengine.blacklist.user_blocked"));
                 return;
             }
         }

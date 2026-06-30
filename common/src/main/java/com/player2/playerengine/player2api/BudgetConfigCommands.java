@@ -38,19 +38,20 @@ public final class BudgetConfigCommands {
             source.sendFailure(target.failure());
             return 0;
         }
+        Component fieldLabel = Component.translatable("message.playerengine.budget.field.window_minutes", minutes);
         if (target.useServerFile()) {
             var c = Player2ServerConfigHolder.get();
             c.setBudgetWindowMinutes(minutes);
             Player2ServerConfigHolder.validateAndFix(c);
             Player2ServerConfigHolder.save();
             BudgetTracker.resetAll();
-            sendSaved(source, "budgetWindowMinutes=" + minutes + " (windows reset)", SERVER_FILE);
+            sendSaved(source, fieldLabel, SERVER_FILE);
         } else {
             PlayerBudgetConfig cfg = PlayerBudgetConfigHolder.load(target.server(), target.playerUuid());
             cfg.setBudgetWindowMinutes(minutes);
             PlayerBudgetConfigHolder.save(target.server(), target.playerUuid(), cfg);
             BudgetTracker.resetAll();
-            sendSaved(source, "budgetWindowMinutes=" + minutes + " (windows reset)", PLAYER_FILE);
+            sendSaved(source, fieldLabel, PLAYER_FILE);
         }
         return 1;
     }
@@ -69,17 +70,18 @@ public final class BudgetConfigCommands {
             source.sendFailure(target.failure());
             return 0;
         }
+        Component fieldLabel = Component.translatable("message.playerengine.budget.field.joules_refresh", seconds);
         if (target.useServerFile()) {
             var c = Player2ServerConfigHolder.get();
             c.setJoulesRefreshIntervalSeconds(seconds);
             Player2ServerConfigHolder.validateAndFix(c);
             Player2ServerConfigHolder.save();
-            sendSaved(source, "joulesRefreshIntervalSeconds=" + seconds, SERVER_FILE);
+            sendSaved(source, fieldLabel, SERVER_FILE);
         } else {
             PlayerBudgetConfig cfg = PlayerBudgetConfigHolder.load(target.server(), target.playerUuid());
             cfg.setJoulesRefreshIntervalSeconds(seconds);
             PlayerBudgetConfigHolder.save(target.server(), target.playerUuid(), cfg);
-            sendSaved(source, "joulesRefreshIntervalSeconds=" + seconds, PLAYER_FILE);
+            sendSaved(source, fieldLabel, PLAYER_FILE);
         }
         return 1;
     }
@@ -91,7 +93,8 @@ public final class BudgetConfigCommands {
         Player2ServerConfigHolder.save();
         ProfileUrlResolver.invalidateCache();
         String display = profileName == null ? "none" : profileName;
-        sendSaved(source, "fallbackProfile=" + display + " (profile cache cleared)", SERVER_FILE);
+        Component fieldLabel = Component.translatable("message.playerengine.budget.field.fallback_profile", display);
+        sendSaved(source, fieldLabel, SERVER_FILE);
         return 1;
     }
 
@@ -100,7 +103,7 @@ public final class BudgetConfigCommands {
         c.setBudgetFallbackBehavior(BudgetFallbackBehavior.SWITCH_PROFILE);
         Player2ServerConfigHolder.validateAndFix(c);
         Player2ServerConfigHolder.save();
-        sendSaved(source, "budgetFallbackBehavior=SWITCH_PROFILE", SERVER_FILE);
+        sendSaved(source, Component.translatable("message.playerengine.budget.field.fallback_behavior_switch"), SERVER_FILE);
         return 1;
     }
 
@@ -109,14 +112,14 @@ public final class BudgetConfigCommands {
         c.setBudgetFallbackBehavior(BudgetFallbackBehavior.HARD_STOP);
         Player2ServerConfigHolder.validateAndFix(c);
         Player2ServerConfigHolder.save();
-        sendSaved(source, "budgetFallbackBehavior=HARD_STOP", SERVER_FILE);
+        sendSaved(source, Component.translatable("message.playerengine.budget.field.fallback_behavior_stop"), SERVER_FILE);
         return 1;
     }
 
     public static int status(CommandSourceStack source) {
         MinecraftServer server = source.getServer();
         if (server == null) {
-            source.sendFailure(Component.literal("No server."));
+            source.sendFailure(Component.translatable("message.playerengine.budget.error.no_server"));
             return 0;
         }
         Target target = resolveTarget(source);
@@ -129,45 +132,55 @@ public final class BudgetConfigCommands {
                 : PlayerBudgetConfigHolder.load(server, target.playerUuid());
         Player2ServerRuntimeConfig serverCfg = Player2ServerConfigHolder.get();
 
-        source.sendSuccess(() -> Component.literal("=== Budget Status ==="), false);
+        source.sendSuccess(() -> Component.translatable("message.playerengine.budget.status.header"), false);
         String fileNote = target.useServerFile() ? SERVER_FILE : PLAYER_FILE;
-        source.sendSuccess(() -> Component.literal("Thresholds from: " + fileNote), false);
-        source.sendSuccess(() -> Component.literal(
-                "Call limits: soft=" + thresholds.getSoftBudgetCallsPerWindow()
-                        + " hard=" + thresholds.getHardBudgetCallsPerWindow()
-                        + " window=" + thresholds.getBudgetWindowMinutes() + "min"), false);
-        source.sendSuccess(() -> Component.literal(
-                "Joules thresholds: soft=" + thresholds.getSoftJoulesThreshold()
-                        + " hard=" + thresholds.getHardJoulesThreshold()
-                        + " refresh=" + thresholds.getJoulesRefreshIntervalSeconds() + "s"), false);
-        source.sendSuccess(() -> Component.literal(
-                "Fallback (server-wide): profile=" + serverCfg.getFallbackProfile()
-                        + " behavior=" + serverCfg.getBudgetFallbackBehavior()), false);
+        source.sendSuccess(() -> Component.translatable("message.playerengine.budget.status.thresholds_from", fileNote), false);
+        source.sendSuccess(() -> Component.translatable(
+                "message.playerengine.budget.status.call_limits",
+                thresholds.getSoftBudgetCallsPerWindow(),
+                thresholds.getHardBudgetCallsPerWindow(),
+                thresholds.getBudgetWindowMinutes()), false);
+        source.sendSuccess(() -> Component.translatable(
+                "message.playerengine.budget.status.joules_thresholds",
+                thresholds.getSoftJoulesThreshold(),
+                thresholds.getHardJoulesThreshold(),
+                thresholds.getJoulesRefreshIntervalSeconds()), false);
+        source.sendSuccess(() -> Component.translatable(
+                "message.playerengine.budget.status.fallback",
+                serverCfg.getFallbackProfile(),
+                serverCfg.getBudgetFallbackBehavior()), false);
 
         var windows = BudgetTracker.statusSnapshot(serverCfg);
         if (windows.isEmpty()) {
-            source.sendSuccess(() -> Component.literal("No active call windows."), false);
+            source.sendSuccess(() -> Component.translatable("message.playerengine.budget.status.no_call_windows"), false);
         } else {
             long now = System.currentTimeMillis();
             for (var entry : windows.entrySet()) {
                 var snap = entry.getValue();
                 long resets = Math.max(0, snap.windowEndMs() - now) / 1000L;
-                source.sendSuccess(() -> Component.literal(
-                        "  " + entry.getKey() + ": calls=" + snap.callCount()
-                                + " resets_in=" + resets + "s"), false);
+                source.sendSuccess(() -> Component.translatable(
+                        "message.playerengine.budget.status.call_window_entry",
+                        entry.getKey(),
+                        snap.callCount(),
+                        resets), false);
             }
         }
         var joulesSnaps = JoulesCache.statusSnapshot();
         if (joulesSnaps.isEmpty()) {
-            source.sendSuccess(() -> Component.literal("No cached Joules data."), false);
+            source.sendSuccess(() -> Component.translatable("message.playerengine.budget.status.no_joules_data"), false);
         } else {
             for (var entry : joulesSnaps.entrySet()) {
                 var snap = entry.getValue();
                 long ageS = (System.currentTimeMillis() - snap.refreshedAtMs) / 1000L;
-                source.sendSuccess(() -> Component.literal(
-                        "  " + entry.getKey() + ": joules=" + snap.joulesDisplay()
-                                + " patron=" + (snap.patronTier.isEmpty() ? "none" : snap.patronTier)
-                                + " age=" + ageS + "s"), false);
+                Component patronDisplay = snap.patronTier.isEmpty()
+                        ? Component.translatable("message.playerengine.budget.status.patron_none")
+                        : Component.literal(snap.patronTier);
+                source.sendSuccess(() -> Component.translatable(
+                        "message.playerengine.budget.status.joules_entry",
+                        entry.getKey(),
+                        snap.joulesDisplay(),
+                        patronDisplay,
+                        ageS), false);
             }
         }
         return 1;
@@ -183,11 +196,11 @@ public final class BudgetConfigCommands {
             source.sendFailure(target.failure());
             return 0;
         }
-        String label = switch (field) {
-            case SOFT_CALLS -> "softBudgetCallsPerWindow=" + value + " (0=disabled)";
-            case HARD_CALLS -> "hardBudgetCallsPerWindow=" + value + " (0=disabled)";
-            case SOFT_JOULES -> "softJoulesThreshold=" + value + " (0=disabled)";
-            case HARD_JOULES -> "hardJoulesThreshold=" + value + " (0=disabled)";
+        Component label = switch (field) {
+            case SOFT_CALLS -> Component.translatable("message.playerengine.budget.field.soft_calls", value);
+            case HARD_CALLS -> Component.translatable("message.playerengine.budget.field.hard_calls", value);
+            case SOFT_JOULES -> Component.translatable("message.playerengine.budget.field.soft_joules", value);
+            case HARD_JOULES -> Component.translatable("message.playerengine.budget.field.hard_joules", value);
         };
         if (target.useServerFile()) {
             var c = Player2ServerConfigHolder.get();
@@ -222,8 +235,8 @@ public final class BudgetConfigCommands {
         }
     }
 
-    private static void sendSaved(CommandSourceStack source, String message, String fileLabel) {
-        source.sendSuccess(() -> Component.literal(message + " (saved to " + fileLabel + ")."), false);
+    private static void sendSaved(CommandSourceStack source, Component fieldLabel, String fileLabel) {
+        source.sendSuccess(() -> Component.translatable("message.playerengine.budget.saved", fieldLabel, fileLabel), false);
     }
 
     private static Target resolveTarget(CommandSourceStack source) {
@@ -236,8 +249,7 @@ public final class BudgetConfigCommands {
         } catch (Exception ignored) {
         }
         if (!serverFile && uuid == null) {
-            return Target.failure(Component.literal(
-                    "Run this budget command as a player on a dedicated server (per-player player-budget.json)."));
+            return Target.failure(Component.translatable("message.playerengine.budget.error.player_only"));
         }
         return new Target(server, uuid, serverFile, null);
     }

@@ -6,7 +6,7 @@ import com.player2.playerengine.commands.base.Arg;
 import com.player2.playerengine.commands.base.ArgParser;
 import com.player2.playerengine.commands.base.Command;
 import com.player2.playerengine.commands.base.CommandException;
-import com.player2.playerengine.player2api.AgentSideEffects;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -41,15 +41,15 @@ public class SetFollowModeCommand extends Command {
         this.finishWithNote(modelNoteFor(mode));
     }
 
-    private static String playerLineFor(FollowMode mode) {
+    private static Component playerLineFor(FollowMode mode) {
         switch (mode) {
             case COWARD:
-                return "I'll keep my head down and stay close — I won't fight monsters.";
+                return Component.translatable("message.playerengine.follow_mode.coward");
             case DEFENDER:
-                return "I'll stay close and fight off any hostiles that threaten us.";
+                return Component.translatable("message.playerengine.follow_mode.defender");
             case NORMAL:
             default:
-                return "Back to normal following.";
+                return Component.translatable("message.playerengine.follow_mode.normal");
         }
     }
 
@@ -68,13 +68,13 @@ public class SetFollowModeCommand extends Command {
         }
     }
 
-    private static void broadcastToOwner(PlayerEngineController mod, String message) {
+    private static void broadcastToOwner(PlayerEngineController mod, Component message) {
         MinecraftServer server = mod.getWorld() != null ? mod.getWorld().getServer() : null;
         if (server != null && mod.getOwner() != null) {
             UUID ownerUuid = mod.getOwner().getUUID();
             ServerPlayer ownerPlayer = server.getPlayerList().getPlayer(ownerUuid);
             if (ownerPlayer != null) {
-                AgentSideEffects.broadcastChatToPlayer(server, message, ownerPlayer);
+                ownerPlayer.displayClientMessage(message, false);
             }
         }
     }

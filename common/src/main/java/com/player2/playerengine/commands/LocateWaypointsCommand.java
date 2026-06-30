@@ -16,6 +16,7 @@ import com.player2.playerengine.player2api.AiConversationFeedback;
 import com.player2.playerengine.retrieval.RetrievalHit;
 import com.player2.playerengine.util.Debug;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 
 import java.util.ArrayList;
@@ -51,7 +52,7 @@ public class LocateWaypointsCommand extends Command {
     protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
         // Guard 1: EllieGPS enabled
         if (!mod.getModSettings().getEllieGpsEnabled()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayer(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayerComponent().getString(), true);
             this.finishWithError(WaypointReportFormatter.ellieGpsDisabledModel());
             return;
         }
@@ -59,7 +60,7 @@ public class LocateWaypointsCommand extends Command {
         // One-time operator note if the store was quarantined (Decision 14)
         EllieGPSStore quarantineStore = EllieGPSStore.get();
         if (quarantineStore != null && quarantineStore.consumeQuarantineNote()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNote(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNoteComponent().getString(), true);
         }
 
         // Guard 2: query terms — join all arg units into a single query string
@@ -88,9 +89,9 @@ public class LocateWaypointsCommand extends Command {
         EllieGPSWaypointIndex index = EllieGPSWaypointIndex.getCurrent();
         if (index == null) {
             // Index not yet built — return honest empty result, not an error
-            String msg = WaypointReportFormatter.noWaypointsMatch();
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithNote(msg);
+            // Player path: translatable; model path: English String (separate for AI truthfulness)
+            mod.reportAgenticProgress(WaypointReportFormatter.noWaypointsMatchComponent().getString(), true);
+            this.finishWithNote(WaypointReportFormatter.noWaypointsMatch());
             return;
         }
 
@@ -109,9 +110,8 @@ public class LocateWaypointsCommand extends Command {
         }
 
         if (results.isEmpty()) {
-            String msg = WaypointReportFormatter.noWaypointsMatch();
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithNote(msg);
+            mod.reportAgenticProgress(WaypointReportFormatter.noWaypointsMatchComponent().getString(), true);
+            this.finishWithNote(WaypointReportFormatter.noWaypointsMatch());
             return;
         }
 
@@ -130,12 +130,13 @@ public class LocateWaypointsCommand extends Command {
         }
 
         String payload = String.join("\n", lines);
+        // Model path: raw hit lines in English (NOT localized — model reasons in English)
         AiConversationFeedback.enqueueInfo(mod, payload);
-        // Locate results are model-only (like scan_storage success); no milestone chat spam.
-        // But we do send a brief player note per the dual-audience rule (informational, not
-        // milestone): one condensed line so the player knows the command ran.
-        mod.reportAgenticProgress("EllieGPS: found " + results.size()
-                + " waypoint(s) matching \"" + query + "\"", true);
+        // Player path: translatable summary line
+        mod.reportAgenticProgress(
+                Component.translatable("message.playerengine.elliegps.locate_found",
+                        results.size(), query).getString(),
+                true);
         Debug.logMessage("waypoint-locate ok query=\"" + query + "\" hits=" + results.size()
                 + " dimension=" + dimensionId
                 + " bot=" + mod.getEntity().getName().getString());
@@ -159,7 +160,11 @@ public class LocateWaypointsCommand extends Command {
         Debug.logWarning("waypoint-locate fail code=" + code.token()
                 + " detail=" + detail
                 + " bot=" + mod.getEntity().getName().getString());
-        mod.reportAgenticProgress("couldn't locate waypoints - " + detail, true);
+        // Player path: translatable prefix; detail stays English (shared with model — not localized)
+        mod.reportAgenticProgress(
+                Component.translatable("message.playerengine.elliegps.locate_fail", detail).getString(),
+                true);
+        // Model path: English token:detail for AI truthfulness
         this.finishWithError(code.token() + ": " + detail);
     }
 }

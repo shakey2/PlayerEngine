@@ -16,6 +16,7 @@ import com.player2.playerengine.tasks.cooking.resolver.CookingRecipeAccessImpl;
 import com.player2.playerengine.util.ItemTarget;
 import java.util.Optional;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.Item;
 
@@ -57,9 +58,9 @@ public class SmeltCommand extends Command {
     protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
         PlayerEngineSettings settings = mod.getModSettings();
         if (!settings.isEnableDeferredSmelt()) {
-            String msg = "Deferred smelting is disabled in the configuration.";
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.disabled").getString(), true);
+            this.finishWithError("Deferred smelting is disabled in the configuration.");
             return;
         }
 
@@ -75,17 +76,17 @@ public class SmeltCommand extends Command {
         }
 
         if (items.items == null || items.items.length != 1) {
-            String msg = "Specify exactly one item to smelt, e.g. `smelt iron 16`.";
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.invalid_args_count").getString(), true);
+            this.finishWithError("Specify exactly one item to smelt, e.g. `smelt iron 16`.");
             return;
         }
         ItemTarget target = items.items[0];
         Item input = target.getMatches().length == 1 ? target.getMatches()[0] : null;
         if (input == null) {
-            String msg = "Specify a single concrete item to smelt, e.g. `smelt raw_iron 16`.";
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.invalid_args_concrete").getString(), true);
+            this.finishWithError("Specify a single concrete item to smelt, e.g. `smelt raw_iron 16`.");
             return;
         }
 
@@ -102,9 +103,9 @@ public class SmeltCommand extends Command {
                     COOKING_RECIPE_ACCESS.resolveAny(world.getRecipeManager(), input, world.registryAccess());
             if (resolved.isEmpty()) {
                 String name = displayName(input);
-                String msg = "Can't smelt " + name + ": it has no furnace, blast furnace, or smoker recipe.";
-                mod.reportAgenticProgress(msg, true);
-                this.finishWithError(msg);
+                // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+                mod.reportAgenticProgress(Component.translatable("message.playerengine.smelt.no_recipe_preflight", name).getString(), true);
+                this.finishWithError("Can't smelt " + name + ": it has no furnace, blast furnace, or smoker recipe.");
                 return;
             }
         }
@@ -136,8 +137,8 @@ public class SmeltCommand extends Command {
             this.finish();
             return;
         }
-        String playerLine = playerLine(o);
-        mod.reportAgenticProgress(playerLine, true);
+        Component playerLine = playerLine(o);
+        mod.reportAgenticProgress(playerLine.getString(), true);
         switch (o.kind()) {
             case CLEAN_SUCCESS ->
                     this.finishWithInfo("smelted " + o.collected() + " " + o.outputName()
@@ -175,24 +176,29 @@ public class SmeltCommand extends Command {
     }
 
     /** Concise, human-readable player chat line for each terminal outcome. */
-    private static String playerLine(Outcome o) {
+    private static Component playerLine(Outcome o) {
         String out = displayName(o.outputItem());
         return switch (o.kind()) {
-            case CLEAN_SUCCESS -> "Smelted " + o.collected() + " x " + out + ".";
-            case PARTIAL_OUT_OF_FUEL -> "Smelted " + o.collected() + " of " + o.expected() + " x "
-                    + out + " — ran out of fuel.";
-            case NO_FUEL -> "Couldn't smelt — no fuel available (need about " + o.fuelNeeded() + ").";
-            case TAMPERED -> "The furnace contents changed while I was away — collected what I could ("
-                    + o.collected() + ").";
-            case FURNACE_GONE -> "The furnace I was using is gone — couldn't finish.";
-            case STALLED_RETRYING -> "The furnace chunk stopped ticking, so it can't finish on its own. I"
-                    + " smelted " + o.collected() + " of " + o.expected() + " — ask me to smelt again near"
-                    + " the furnace to finish the rest.";
-            case STALLED_TIMEOUT -> "Gave up smelting — the furnace chunk wasn't ticking and the job timed out.";
-            case FURNACE_IN_USE -> "That furnace already has something in it — I didn't load anything to"
-                    + " avoid mixing batches.";
-            case NO_RECIPE -> "I can't smelt that — it has no furnace, blast furnace, or smoker recipe.";
-            case SETUP_FAILED -> "Couldn't start the smelt (" + o.reasonLabel() + ").";
+            case CLEAN_SUCCESS -> Component.translatable(
+                    "message.playerengine.smelt.result.success", o.collected(), out);
+            case PARTIAL_OUT_OF_FUEL -> Component.translatable(
+                    "message.playerengine.smelt.result.partial_fuel", o.collected(), o.expected(), out);
+            case NO_FUEL -> Component.translatable(
+                    "message.playerengine.smelt.result.no_fuel", o.fuelNeeded());
+            case TAMPERED -> Component.translatable(
+                    "message.playerengine.smelt.result.tampered", o.collected());
+            case FURNACE_GONE -> Component.translatable(
+                    "message.playerengine.smelt.result.furnace_gone");
+            case STALLED_RETRYING -> Component.translatable(
+                    "message.playerengine.smelt.result.stalled_retrying", o.collected(), o.expected());
+            case STALLED_TIMEOUT -> Component.translatable(
+                    "message.playerengine.smelt.result.stalled_timeout");
+            case FURNACE_IN_USE -> Component.translatable(
+                    "message.playerengine.smelt.result.furnace_in_use");
+            case NO_RECIPE -> Component.translatable(
+                    "message.playerengine.smelt.result.no_recipe");
+            case SETUP_FAILED -> Component.translatable(
+                    "message.playerengine.smelt.result.setup_failed", o.reasonLabel());
         };
     }
 

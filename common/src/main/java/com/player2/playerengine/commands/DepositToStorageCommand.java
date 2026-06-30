@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 
 /**
  * {@code deposit_to_storage <x> <y> <z> <items...>} — precise, validation-first deposit from the
@@ -123,8 +124,9 @@ public class DepositToStorageCommand extends Command {
             String receipt = ScanReportFormatter.transferReceipt(
                     ScanReportFormatter.TransferDirection.DEPOSIT, rc, task.entryOutcomes());
             mod.reportAgenticProgress(
-                    "stored " + humanItems(task.entryOutcomes()) + " in the " + humanKind(rc)
-                            + " at " + humanPos(pos), true);
+                    Component.translatable("message.playerengine.storage.deposit_ok",
+                            humanItems(task.entryOutcomes()), humanKind(rc), humanPos(pos)).getString(),
+                    true);
             Debug.logMessage("storage-tx ok dir=deposit pos=" + ContainerResolver.formatPos(pos)
                     + " kind=" + kindToken(rc) + " moved=" + movedSummary(task.entryOutcomes())
                     + " bot=" + botName(mod));
@@ -134,8 +136,10 @@ public class DepositToStorageCommand extends Command {
             String receipt = ScanReportFormatter.transferReceipt(
                     ScanReportFormatter.TransferDirection.DEPOSIT, rc, task.entryOutcomes());
             mod.reportAgenticProgress(
-                    "stored " + humanItems(task.entryOutcomes()) + " in the " + humanKind(rc)
-                            + " at " + humanPos(pos) + " (" + firstShortReason(task.entryOutcomes()) + ")", true);
+                    Component.translatable("message.playerengine.storage.deposit_partial",
+                            humanItems(task.entryOutcomes()), humanKind(rc), humanPos(pos),
+                            firstShortReason(task.entryOutcomes())).getString(),
+                    true);
             Debug.logMessage("storage-tx partial dir=deposit pos=" + ContainerResolver.formatPos(pos)
                     + " kind=" + kindToken(rc) + " code=" + task.code().token()
                     + " moved=" + movedSummary(task.entryOutcomes()) + " bot=" + botName(mod));
@@ -167,7 +171,9 @@ public class DepositToStorageCommand extends Command {
         String text = ScanReportFormatter.transferFailure(failures);
         String where = pos == null ? "storage" : "the " + humanKind(rc) + " at " + humanPos(pos);
         mod.reportAgenticProgress(
-                "couldn't deposit to " + where + " - " + failures.get(0).detail(), true);
+                Component.translatable("message.playerengine.storage.deposit_fail",
+                        where, failures.get(0).detail()).getString(),
+                true);
         Debug.logWarning("storage-tx fail code=" + failures.get(0).code().token()
                 + " pos=" + (pos == null ? "?" : ContainerResolver.formatPos(pos))
                 + " kind=" + kindToken(rc)

@@ -86,17 +86,12 @@ public final class ModIntelligenceSpendSafety {
 
     public static Component messageFor(DeferReason reason, int queueSize, ModelBlacklistSnapshot blacklist) {
         return switch (reason) {
-            case BLACKLIST_INVALID -> Component.literal(
-                    "[ModIntelligence] Enrichment blocked: model_blacklist.json is invalid ("
-                            + (blacklist.error() != null ? blacklist.error() : "unknown error")
-                            + "). Fix playerengine/data/mod_intelligence/model_blacklist.json (singleplayer: "
-                            + "modIntelligenceBypassModelBlacklist in server_player2.json).");
-            case LARGE_QUEUE_NO_BUDGET -> Component.literal(
-                    "[ModIntelligence] Enrichment deferred: queue has " + queueSize
-                            + " items (>20) but no spending limits are configured. Set at least one of "
-                            + "soft/hard call or Joules limits (/playerengine player2 budget …; on dedicated "
-                            + "servers use per-player player-budget.json). Singleplayer only: "
-                            + "modIntelligenceBypassLargeQueueBudgetGate in server_player2.json.");
+            case BLACKLIST_INVALID -> Component.translatable(
+                    "message.playerengine.mod_intelligence.preflight_blacklist_invalid",
+                    blacklist.error() != null ? blacklist.error() : "unknown error");
+            case LARGE_QUEUE_NO_BUDGET -> Component.translatable(
+                    "message.playerengine.mod_intelligence.preflight_no_budget",
+                    queueSize);
         };
     }
 
@@ -109,18 +104,17 @@ public final class ModIntelligenceSpendSafety {
 
     public static void notifyBatchAbort(MinecraftServer server, String abortCode, String detail) {
         Component msg = switch (abortCode) {
-            case "model_blacklisted" -> Component.literal(
-                    "[ModIntelligence] Enrichment stopped: model is blacklisted"
-                            + (detail != null && !detail.isBlank() ? " (" + detail + ")" : "")
-                            + ". Edit playerengine/data/mod_intelligence/model_blacklist.json (singleplayer: "
-                            + "modIntelligenceBypassModelBlacklist in server_player2.json).");
-            case "model_missing" -> Component.literal(
-                    "[ModIntelligence] Enrichment stopped: completion response had no model field "
-                            + "(required when blacklist is non-empty).");
-            case "model_blacklist_invalid" -> Component.literal(
-                    "[ModIntelligence] Enrichment stopped: model blacklist invalid"
-                            + (detail != null && !detail.isBlank() ? " (" + detail + ")" : "") + ".");
-            default -> Component.literal("[ModIntelligence] Enrichment stopped: " + abortCode);
+            case "model_blacklisted" -> Component.translatable(
+                    "message.playerengine.mod_intelligence.batch_abort.model_blacklisted",
+                    detail != null && !detail.isBlank() ? " (" + detail + ")" : "");
+            case "model_missing" -> Component.translatable(
+                    "message.playerengine.mod_intelligence.batch_abort.model_missing");
+            case "model_blacklist_invalid" -> Component.translatable(
+                    "message.playerengine.mod_intelligence.batch_abort.model_blacklist_invalid",
+                    detail != null && !detail.isBlank() ? " (" + detail + ")" : "");
+            default -> Component.translatable(
+                    "message.playerengine.mod_intelligence.batch_abort.unknown",
+                    abortCode);
         };
         LOGGER.warn("ModIntelligence enrichment: stopping batch ({})", abortCode);
         notifyPlayer(server, msg);

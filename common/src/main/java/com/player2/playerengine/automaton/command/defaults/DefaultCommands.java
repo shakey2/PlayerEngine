@@ -130,11 +130,11 @@ public final class DefaultCommands {
          String toDisplay = BaritoneAPI.getGlobalSettings().censorRanCommands.get() ? command + " ..." : msg;
          source.sendSuccess(
             () -> {
-               MutableComponent component = Component.literal(String.format("> %s", toDisplay));
+               MutableComponent component = Component.translatable("message.playerengine.commands.echo_prefix", toDisplay);
                component.setStyle(
                   component.getStyle()
                      .applyFormat(ChatFormatting.WHITE)
-                     .withHoverEvent(new HoverEvent(Action.SHOW_TEXT, Component.literal("Click to rerun command")))
+                     .withHoverEvent(new HoverEvent(Action.SHOW_TEXT, Component.translatable("message.playerengine.commands.echo_hover")))
                      .withClickEvent(new ClickEvent(net.minecraft.network.chat.ClickEvent.Action.RUN_COMMAND, "/automatone " + msg))
                );
                return component;
@@ -146,7 +146,7 @@ public final class DefaultCommands {
 
    public static boolean runCommand(CommandSourceStack source, String msg, IBaritone baritone) throws CommandException {
       if (msg.trim().equalsIgnoreCase("damn")) {
-         source.sendSuccess(() -> Component.literal("daniel"), false);
+         source.sendSuccess(() -> Component.translatable("message.playerengine.commands.easter_egg"), false);
          return false;
       } else if (msg.trim().equalsIgnoreCase("orderpizza")) {
          PlayerEngine.LOGGER.fatal("No pizza :(");
@@ -202,7 +202,7 @@ public final class DefaultCommands {
                }
                Player2ServerConfigHolder.load();
                syncPlayer2ConfigToAllPlayers(ctx.getSource());
-               ctx.getSource().sendSuccess(() -> Component.literal("Reloaded Player2 server config (server files)."), false);
+               ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.config.reload_success"), false);
                return 1;
             }))
             .then(Commands.literal("payer")
@@ -215,7 +215,7 @@ public final class DefaultCommands {
                      Player2ServerConfigHolder.validateAndFix(c);
                      Player2ServerConfigHolder.save();
                      syncPlayer2ConfigToAllPlayers(ctx.getSource());
-                     ctx.getSource().sendSuccess(() -> Component.literal("Server payer mode: PROMPTER_PAYS (server config saved)."), false);
+                     ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.config.payer_prompter"), false);
                      return 1;
                   }))
                   .then(Commands.literal("owner").executes(ctx -> {
@@ -227,7 +227,7 @@ public final class DefaultCommands {
                      Player2ServerConfigHolder.validateAndFix(c);
                      Player2ServerConfigHolder.save();
                      syncPlayer2ConfigToAllPlayers(ctx.getSource());
-                     ctx.getSource().sendSuccess(() -> Component.literal("Server payer mode: OWNER_PAYS_ALL (server config saved)."), false);
+                     ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.config.payer_owner"), false);
                      return 1;
                   })))
             .then(Commands.literal("dedicated")
@@ -241,7 +241,7 @@ public final class DefaultCommands {
                      Player2ServerConfigHolder.validateAndFix(c);
                      Player2ServerConfigHolder.save();
                      syncPlayer2ConfigToAllPlayers(ctx.getSource());
-                     ctx.getSource().sendSuccess(() -> Component.literal("Server dedicatedClientProxy=" + v + " (server config saved)."), false);
+                     ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.config.dedicated", v), false);
                      return 1;
                   })))
             .then(Commands.literal("owner_offline_continue")
@@ -255,7 +255,7 @@ public final class DefaultCommands {
                      Player2ServerConfigHolder.validateAndFix(c);
                      Player2ServerConfigHolder.save();
                      syncPlayer2ConfigToAllPlayers(ctx.getSource());
-                     ctx.getSource().sendSuccess(() -> Component.literal("Server ownerOfflineServerContinuation=" + v + " (server config saved)."), false);
+                     ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.config.owner_offline_continue", v), false);
                      return 1;
                   })))
             .then(Commands.literal("call_by_name")
@@ -268,7 +268,7 @@ public final class DefaultCommands {
                      c.setCallByNameChat(v);
                      Player2ServerConfigHolder.validateAndFix(c);
                      Player2ServerConfigHolder.save();
-                     ctx.getSource().sendSuccess(() -> Component.literal("Server callByNameChat=" + v + " (server config saved)."), false);
+                     ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.config.call_by_name", v), false);
                      return 1;
                   })))
             .then(Commands.literal("npc_max_spawn")
@@ -281,7 +281,7 @@ public final class DefaultCommands {
                      c.setMaxSpawnedCompanionsPerPlayer(v);
                      Player2ServerConfigHolder.validateAndFix(c);
                      Player2ServerConfigHolder.save();
-                     ctx.getSource().sendSuccess(() -> Component.literal("Server maxSpawnedCompanionsPerPlayer=" + v + " (server config saved)."), false);
+                     ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.config.npc_max_spawn", v), false);
                      return 1;
                   })))
             .then(Commands.literal("npc_max_stored_ids")
@@ -294,7 +294,7 @@ public final class DefaultCommands {
                      c.setMaxStoredCharacterIdsPerPlayer(v);
                      Player2ServerConfigHolder.validateAndFix(c);
                      Player2ServerConfigHolder.save();
-                     ctx.getSource().sendSuccess(() -> Component.literal("Server maxStoredCharacterIdsPerPlayer=" + v + " (0=unlimited; server config saved)."), false);
+                     ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.config.npc_max_stored_ids", v), false);
                      return 1;
                   })))
             .then(Commands.literal("budget")
@@ -355,7 +355,7 @@ public final class DefaultCommands {
                      BudgetTracker.resetAll();
                      JoulesCache.invalidateAll();
                      ProfileUrlResolver.invalidateCache();
-                     ctx.getSource().sendSuccess(() -> Component.literal("Budget windows, Joules cache, and profile cache cleared."), false);
+                     ctx.getSource().sendSuccess(() -> Component.translatable("message.playerengine.budget.reset_success"), false);
                      return 1;
                   }))
                   .then(Commands.literal("status").executes(ctx -> {
@@ -369,15 +369,14 @@ public final class DefaultCommands {
                      int pruned = PlayerEngineController.pruneStaleControllers(source.getServer());
                      var controllers = PlayerEngineController.staticControllers;
                      if (controllers.isEmpty()) {
-                        source.sendSuccess(() -> Component.literal(
-                              pruned > 0
-                                    ? "No active PlayerEngine bots (pruned " + pruned + " stale entries)."
-                                    : "No active PlayerEngine bots."), false);
+                        source.sendSuccess(() -> pruned > 0
+                              ? Component.translatable("message.playerengine.chain.no_active_bots_pruned", pruned)
+                              : Component.translatable("message.playerengine.chain.no_active_bots"), false);
                         return 1;
                      }
                      if (pruned > 0) {
-                        source.sendSuccess(() -> Component.literal(
-                              "Pruned " + pruned + " stale controller(s) from registry."), false);
+                        source.sendSuccess(() -> Component.translatable(
+                              "message.playerengine.chain.pruned_controllers", pruned), false);
                      }
                      for (var entry : controllers.entrySet()) {
                         PlayerEngineController bot = entry.getValue();
@@ -385,68 +384,73 @@ public final class DefaultCommands {
                            continue;
                         }
                         String botName = bot.getChainStatusDisplayName();
-                        source.sendSuccess(() -> Component.literal("=== Chain Status: " + botName + " ==="), false);
+                        source.sendSuccess(() -> Component.translatable("message.playerengine.chain.status_header", botName), false);
                         com.player2.playerengine.agentic.AgenticRunRegistry
                               .snapshot(bot.getEntity().getUUID())
                               .ifPresent(run -> {
-                                 source.sendSuccess(() -> Component.literal(
-                                       "Agentic run: " + run.runId() + " [" + run.state() + "] "
-                                             + run.goalSummary()), false);
-                                 source.sendSuccess(() -> Component.literal(
-                                       "  planning: " + run.planningSource()
-                                             + " step[" + run.activeStepIndex() + "]="
-                                             + run.activeStepKind()), false);
+                                 source.sendSuccess(() -> Component.translatable(
+                                       "message.playerengine.chain.agentic_run",
+                                       run.runId(), run.state(), run.goalSummary()), false);
+                                 source.sendSuccess(() -> Component.translatable(
+                                       "message.playerengine.chain.planning_info",
+                                       run.planningSource(), run.activeStepIndex(), run.activeStepKind()), false);
                                  if (run.lastMessage() != null && !run.lastMessage().isBlank()) {
-                                    source.sendSuccess(() -> Component.literal(
-                                          "  progress: " + run.lastMessage()), false);
+                                    source.sendSuccess(() -> Component.translatable(
+                                          "message.playerengine.chain.progress", run.lastMessage()), false);
                                  }
                                  if (run.storageTargetSummary() != null && !run.storageTargetSummary().isBlank()) {
-                                    source.sendSuccess(() -> Component.literal(
-                                          "  storage target: " + run.storageTargetSummary()), false);
+                                    source.sendSuccess(() -> Component.translatable(
+                                          "message.playerengine.chain.storage_target", run.storageTargetSummary()), false);
                                  }
                                  if (run.storageProgress() != null && !run.storageProgress().isBlank()) {
-                                    source.sendSuccess(() -> Component.literal(
-                                          "  storage phase: " + run.storageProgress()), false);
+                                    source.sendSuccess(() -> Component.translatable(
+                                          "message.playerengine.chain.storage_phase", run.storageProgress()), false);
                                  }
                                  if (run.depositProgress() != null && !run.depositProgress().isBlank()) {
-                                    source.sendSuccess(() -> Component.literal(
-                                          "  deposit phase: " + run.depositProgress()), false);
+                                    source.sendSuccess(() -> Component.translatable(
+                                          "message.playerengine.chain.deposit_phase", run.depositProgress()), false);
                                  }
                                  if (run.labelProgress() != null && !run.labelProgress().isBlank()) {
-                                    source.sendSuccess(() -> Component.literal(
-                                          "  label phase: " + run.labelProgress()), false);
+                                    source.sendSuccess(() -> Component.translatable(
+                                          "message.playerengine.chain.label_phase", run.labelProgress()), false);
                                  }
                               });
                         var execOpt = bot.getStepExecutorAdapter().getActiveExecution();
                         if (execOpt.isEmpty()) {
-                           source.sendSuccess(() -> Component.literal("No step has run yet."), false);
+                           source.sendSuccess(() -> Component.translatable("message.playerengine.chain.no_step_yet"), false);
                            continue;
                         }
                         StepExecution exec = execOpt.get();
                         if (exec.getState() == StepState.RUNNING) {
                            long secs = exec.getElapsedMs() / 1000L;
-                           source.sendSuccess(() -> Component.literal(
-                                   "Active step:    " + exec.getStepId() + " / " + exec.getStepKind() + " [RUNNING] (" + secs + "s)"), false);
+                           source.sendSuccess(() -> Component.translatable(
+                                   "message.playerengine.chain.active_step",
+                                   exec.getStepId(), exec.getStepKind(), secs), false);
                            String last = exec.getLastLogEntry();
-                           source.sendSuccess(() -> Component.literal("Last log entry: " + last), false);
+                           source.sendSuccess(() -> Component.translatable(
+                                   "message.playerengine.chain.last_log_entry", last), false);
                         } else {
-                           source.sendSuccess(() -> Component.literal(
-                                   "Last step: " + exec.getStepId() + " / " + exec.getStepKind() + " [" + exec.getState() + "]"), false);
+                           source.sendSuccess(() -> Component.translatable(
+                                   "message.playerengine.chain.last_step",
+                                   exec.getStepId(), exec.getStepKind(), exec.getState()), false);
                         }
                         com.player2.playerengine.tasks.base.Task userTask = bot.getUserTaskChain().getCurrentTask();
                         if (userTask != null) {
-                           source.sendSuccess(() -> Component.literal("User task: " + userTask), false);
+                           source.sendSuccess(() -> Component.translatable(
+                                   "message.playerengine.chain.user_task", userTask), false);
                            if (userTask instanceof com.player2.playerengine.tasks.crafting.DescribesProgress progress) {
-                              source.sendSuccess(() -> Component.literal("Progress: " + progress.describeProgress()), false);
+                              source.sendSuccess(() -> Component.translatable(
+                                      "message.playerengine.chain.task_progress", progress.describeProgress()), false);
                            }
                            String tree = userTask.getTaskTree();
                            if (tree != null && !tree.isBlank()) {
-                              source.sendSuccess(() -> Component.literal("Task tree: " + tree), false);
+                              source.sendSuccess(() -> Component.translatable(
+                                      "message.playerengine.chain.task_tree", tree), false);
                            }
                         }
-                        source.sendSuccess(() -> Component.literal("--- Full log ---"), false);
+                        source.sendSuccess(() -> Component.translatable("message.playerengine.chain.full_log_divider"), false);
                         for (String logEntry : exec.getLog()) {
-                           source.sendSuccess(() -> Component.literal("  " + logEntry), false);
+                           source.sendSuccess(() -> Component.translatable("message.playerengine.chain.log_entry", logEntry), false);
                         }
                      }
                      return 1;
@@ -480,8 +484,7 @@ public final class DefaultCommands {
     */
    private static boolean isLogicalServer(CommandSourceStack source) {
       if (source.getLevel().isClientSide()) {
-         source.sendFailure(Component.literal(
-               "Player2 admin commands apply to the server's playerengine/ files and only run on the logical server."));
+         source.sendFailure(Component.translatable("message.playerengine.commands.server_only"));
          return false;
       }
       return true;
@@ -514,7 +517,7 @@ public final class DefaultCommands {
       }
       MinecraftServer server = source.getServer();
       if (server == null) {
-         source.sendFailure(Component.literal("No server."));
+         source.sendFailure(Component.translatable("message.playerengine.commands.no_server"));
          return 0;
       }
       Baritone baritone = findAnyBaritone(server);
@@ -522,7 +525,7 @@ public final class DefaultCommands {
          try {
             boolean ok = new BaritoneCommandManager(baritone).execute(source, BaritoneCommandManager.expand(rawCommand));
             if (!ok) {
-               source.sendFailure(Component.literal("Unknown command."));
+               source.sendFailure(Component.translatable("message.playerengine.commands.unknown_command"));
                return 0;
             }
             return 1;
@@ -536,24 +539,19 @@ public final class DefaultCommands {
          return 1;
       }
       if (cmd.equalsIgnoreCase("version")) {
-         source.sendSuccess(() -> Component.literal("[PlayerEngine] Automatone (spawn an Automaton NPC for full version/help)."), false);
+         source.sendSuccess(() -> Component.translatable("message.playerengine.commands.version_no_npc"), false);
          return 1;
       }
-      source.sendFailure(Component.literal(
-            "No Automaton NPC in any loaded dimension — Baritone commands need an in-world executor. "
-                  + "Use /playerengine player2 ... for server billing/proxy settings."));
+      source.sendFailure(Component.translatable("message.playerengine.commands.no_automaton_npc"));
       return 0;
    }
 
    private static void sendConsoleBaritoneFallbackHelp(CommandSourceStack source) {
-      source.sendSuccess(() -> Component.literal("=== PlayerEngine (no in-world Automaton) ==="), false);
-      source.sendSuccess(() -> Component.literal(
-            "Server admin: /playerengine player2 reload | payer prompter|owner | dedicated <true|false> | owner_offline_continue <true|false> | call_by_name <true|false>"), false);
-      source.sendSuccess(() -> Component.literal(
-            "Budget: /playerengine player2 budget soft|hard|window|joules_soft|joules_hard|joules_refresh|fallback_profile|fallback_behavior|reset|status"), false);
-      source.sendSuccess(() -> Component.literal(
-            "Chain diagnostics: /playerengine player2 chain status"), false);
-      source.sendSuccess(() -> Component.literal("In-game (as a player): /playerengine help — or load an Automaton for full console Baritone routing."), false);
+      source.sendSuccess(() -> Component.translatable("message.playerengine.commands.console_help_header"), false);
+      source.sendSuccess(() -> Component.translatable("message.playerengine.commands.console_help_admin"), false);
+      source.sendSuccess(() -> Component.translatable("message.playerengine.commands.console_help_budget"), false);
+      source.sendSuccess(() -> Component.translatable("message.playerengine.commands.console_help_chain"), false);
+      source.sendSuccess(() -> Component.translatable("message.playerengine.commands.console_help_ingame"), false);
    }
 
    private static int runCommand(CommandSourceStack source, Entity target, String command) throws CommandSyntaxException {
