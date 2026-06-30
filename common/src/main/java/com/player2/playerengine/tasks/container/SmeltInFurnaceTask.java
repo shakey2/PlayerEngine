@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -214,15 +215,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
                   // enough, vs (b) no acquirable fuel type existed to even try (coal needs a pickaxe;
                   // no logs/planks reachable). Saying "couldn't gather more" when no gather ran is a
                   // truthfulness bug for the model.
-                  String playerTail = this.fuelGatherRan
-                     ? " — gathered more fuel but it still wasn't enough."
-                     : " — out of fuel and no fuel was available to gather.";
+                  Component playerTailComp = this.fuelGatherRan
+                     ? Component.translatable("message.playerengine.furnace.partial_tail_gathered")
+                     : Component.translatable("message.playerengine.furnace.partial_tail_nofuel");
                   String modelTail = this.fuelGatherRan
                      ? ", gathered fuel but still short"
                      : ", no acquirable fuel type (coal needs a pickaxe; no logs/planks reachable)";
                   // Player channel (milestone bypasses the throttle); distinct human string.
                   controller.reportAgenticProgress(
-                     "Smelted " + smelted + " of " + batchCount + " " + itemName + playerTail, true);
+                     Component.translatable("message.playerengine.furnace.partial", smelted, batchCount, itemName, playerTailComp), true);
                   // Model channel (distinct machine string), aggregated up the wrapper by ResourceTask.getFailureReason().
                   this.recordFailureReason(
                      "smelt incomplete: smelted " + smelted + "/" + batchCount + " " + itemName + modelTail);

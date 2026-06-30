@@ -113,6 +113,15 @@ public final class WaypointReportFormatter {
                 + "; use delete_waypoint " + pos + " to remove it.";
     }
 
+    /**
+     * Component variant of {@link #waypointStaleMissing(String)} for the player-facing path.
+     * {@code pos} is passed as both {@code %1$s} and {@code %2$s} to match the String variant.
+     * Pass straight into {@code reportAgenticProgress(Component)} so the client resolves it.
+     */
+    public static MutableComponent waypointStaleMissingComponent(String pos) {
+        return Component.translatable("message.playerengine.elliegps.waypoint_stale_missing", pos, pos);
+    }
+
     // -------------------------------------------------------------------------
     // compare_waypoint
     // -------------------------------------------------------------------------
@@ -122,6 +131,14 @@ public final class WaypointReportFormatter {
      */
     public static String noSnapshotStored() {
         return "no snapshot stored; run audit_waypoint to record one.";
+    }
+
+    /**
+     * Component variant of {@link #noSnapshotStored()} for the player-facing path.
+     * Pass straight into {@code reportAgenticProgress(Component)} so the client resolves it.
+     */
+    public static MutableComponent noSnapshotStoredComponent() {
+        return Component.translatable("message.playerengine.elliegps.no_snapshot_stored");
     }
 
     /**

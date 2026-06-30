@@ -221,5 +221,21 @@
   "message.playerengine.storage.withdraw_partial": "took %1$s from the %2$s at %3$s (%4$s)",
   "message.playerengine.storage.withdraw_fail": "couldn't withdraw from %1$s - %2$s",
   "message.playerengine.storage.deposit_slot_ok": "stored %1$s %2$s in slot %3$s of the %4$s at %5$s",
-  "message.playerengine.storage.withdraw_slot_ok": "took %1$s %2$s from slot %3$s of the %4$s at %5$s"
+  "message.playerengine.storage.withdraw_slot_ok": "took %1$s %2$s from slot %3$s of the %4$s at %5$s",
+
+  "message.playerengine.food.starving": "I'm starving and out of food.",
+
+  "message.playerengine.smoker.partial": "Cooked %1$s of %2$s %3$s%4$s",
+  "message.playerengine.smoker.partial_tail_gathered": " — gathered more fuel but it still wasn't enough.",
+  "message.playerengine.smoker.partial_tail_nofuel": " — out of fuel and no fuel was available to gather.",
+
+  "message.playerengine.furnace.partial": "Smelted %1$s of %2$s %3$s%4$s",
+  "message.playerengine.furnace.partial_tail_gathered": " — gathered more fuel but it still wasn't enough.",
+  "message.playerengine.furnace.partial_tail_nofuel": " — out of fuel and no fuel was available to gather.",
+
+  "message.playerengine.elliegps.audit_store_unavailable": "EllieGPS: store no longer available; audit not saved.",
+  "message.playerengine.elliegps.audit_failed": "couldn't audit waypoint - %s",
+  "message.playerengine.elliegps.compare_failed": "couldn't compare waypoint - %s",
+  "message.playerengine.elliegps.waypoint_stale_missing": "waypoint stale: no container at %1$s; use delete_waypoint %2$s to remove it.",
+  "message.playerengine.elliegps.no_snapshot_stored": "no snapshot stored; run audit_waypoint to record one."
 }

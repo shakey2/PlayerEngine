@@ -6,6 +6,7 @@ import com.player2.playerengine.multiversion.FoodComponentWrapper;
 import com.player2.playerengine.multiversion.item.ItemVer;
 import com.player2.playerengine.player2api.AiConversationFeedback;
 import com.player2.playerengine.tasks.misc.EatFoodTask;
+import net.minecraft.network.chat.Component;
 import com.player2.playerengine.tasks.resources.CollectFoodTask;
 import com.player2.playerengine.tasks.speedrun.DragonBreathTracker;
 import com.player2.playerengine.tasks.base.TaskRunner;
@@ -140,7 +141,7 @@ public class FoodChain extends SingleTaskChain {
                      // no logs, no stack traces, no unbounded external data (DESIGN.md §3).
                      AiConversationFeedback.enqueueInfo(this.controller,
                          "You are starving: your own food level is critically low and you have no food in your inventory, so you cannot eat.");
-                     this.controller.reportAgenticProgress("I'm starving and out of food.", true);
+                     this.controller.reportAgenticProgress(Component.translatable("message.playerengine.food.starving"), true);
                   }
                }
 
