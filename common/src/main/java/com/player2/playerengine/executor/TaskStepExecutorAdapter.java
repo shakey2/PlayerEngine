@@ -124,9 +124,8 @@ public class TaskStepExecutorAdapter implements IStepExecutorAdapter {
                     // Never leak the raw state-machine string to the player \u2014 send a concise human line.
                     Player owner = mod.getOwner();
                     if (owner instanceof ServerPlayer sp) {
-                        sp.sendSystemMessage(Component.literal(
-                                "I lost you \u2014 looks like you died or left. "
-                                + "I'll wait here; tell me to follow again when you're ready."));
+                        sp.sendSystemMessage(Component.translatable(
+                                "message.playerengine.follow.target_lost"));
                     }
                 } else if (!lastEntry.contains("CANCELLED_")) {
                     String msg = "[PlayerEngine] Step '" + exec.getStepKind()
@@ -135,7 +134,9 @@ public class TaskStepExecutorAdapter implements IStepExecutorAdapter {
                     Player owner = mod.getOwner();
                     if (owner instanceof ServerPlayer sp) {
                         sp.sendSystemMessage(
-                                Component.literal(msg).withStyle(ChatFormatting.RED));
+                                Component.translatable("message.playerengine.executor.step_stopped_unexpectedly",
+                                        exec.getStepKind(), lastEntry)
+                                        .withStyle(ChatFormatting.RED));
                     }
                 }
             }

@@ -108,9 +108,7 @@ public class Player2HTTPUtils {
                 LOGGER.warn("User {} is out of Joules (same account after reauth)", player.getName().getString());
                 JoulesCache.invalidate(authKey.playerUuid().toString());
                 if (player instanceof ServerPlayer serverPlayer) {
-                    serverPlayer.sendSystemMessage(Component.literal(
-                            "Insufficient Joules. Please top up your account at https://player2.game"
-                    ).withStyle(ChatFormatting.RED));
+                    serverPlayer.sendSystemMessage(Component.translatable("message.playerengine.budget.insufficient_joules").withStyle(ChatFormatting.RED));
                 }
                 throw new Exception(StopReason.USER_ACTION_REQUIRED.name() + ":insufficient_joules_402");
             }

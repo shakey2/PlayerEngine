@@ -57,12 +57,13 @@ public class AgentSideEffects {
         java.util.List<MarkerParser.SegmentBoundary> pendingBoundaries = sendingCharacterData.getPendingSegmentActions();
         boolean hasPendingGesture = pendingBoundaries != null && !pendingBoundaries.isEmpty();
         if (hasText) {
-            String message = String.format("<%s> %s", sendingCharacterData.getName(), characterMessage.message());
+            Component chatLine = Component.translatable("message.playerengine.chat.character_message",
+                    sendingCharacterData.getName(), characterMessage.message());
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 // if you are an owner, or close, send to player.
                 // if(sendingCharacterData.isOwner(player.getUUID()) ||
                 // isClose(sendingCharacterData, player) ){
-                broadcastChatToPlayer(server, message, player);
+                broadcastChatToPlayer(server, chatLine, player);
                 // }
             }
         }
@@ -90,9 +91,8 @@ public class AgentSideEffects {
             // did not (DESIGN.md §3). Audience-tailored: short line for the player, full note for the model.
             java.util.List<String> invalidMarkers = sendingCharacterData.getPendingInvalidMarkers();
             if (invalidMarkers != null && !invalidMarkers.isEmpty()) {
-                String line = String.format("%s tried to gesture '%s' but doesn't know it.",
-                        sendingCharacterData.getName(), String.join("', '", invalidMarkers));
-                broadcastChatToAllPlayers(server, line);
+                broadcastChatToAllPlayers(server, Component.translatable("message.playerengine.agent.invalid_gesture",
+                        sendingCharacterData.getName(), String.join("', '", invalidMarkers)));
             }
             ConversationManager.onAICharacterMessage(characterMessage,
                     characterMessage.sendingCharacterData().getUUID());
@@ -245,6 +245,11 @@ public class AgentSideEffects {
     public static void broadcastChatToPlayer(MinecraftServer server, String message, ServerPlayer player) {
         player.displayClientMessage(Component.literal(message), false);
     }
+
+    public static void broadcastChatToPlayer(MinecraftServer server, Component message, ServerPlayer player) {
+        player.displayClientMessage(message, false);
+    }
+
     private static void broadcastErrorMsgToPlayer(MinecraftServer server, String message, ServerPlayer player) {
         MutableComponent output = Component.literal(message);
         output.setStyle(output.getStyle().applyFormat(ChatFormatting.RED));
@@ -252,6 +257,12 @@ public class AgentSideEffects {
     }
 
     public static void broadcastChatToAllPlayers(MinecraftServer server, String message) {
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            broadcastChatToPlayer(server, message, player);
+        }
+    }
+
+    public static void broadcastChatToAllPlayers(MinecraftServer server, Component message) {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             broadcastChatToPlayer(server, message, player);
         }
@@ -291,18 +302,17 @@ public class AgentSideEffects {
      * otherwise it degrades to a generic honest retraction. Best-effort: any parse failure falls back
      * to the generic line, never throws.
      */
-    private static String playerCorrectionFor(String commandWithPrefix, CommandExecutor cmdExecutor,
+    private static Component playerCorrectionFor(String commandWithPrefix, CommandExecutor cmdExecutor,
                                               String enrichedMessage) {
         String rawName = rawCommandName(commandWithPrefix, cmdExecutor);
         String suggestion = extractSuggestion(enrichedMessage);
         if (rawName != null && suggestion != null) {
-            return "(correction: I couldn't do that — there's no '" + rawName + "' command; trying '"
-                    + suggestion + "'.)";
+            return Component.translatable("message.playerengine.agent.correction_with_suggestion", rawName, suggestion);
         }
         if (rawName != null) {
-            return "(correction: I couldn't do that — there's no '" + rawName + "' command.)";
+            return Component.translatable("message.playerengine.agent.correction_no_suggestion", rawName);
         }
-        return "(correction: that action didn't go through.)";
+        return Component.translatable("message.playerengine.agent.correction_fallback");
     }
 
     /** Raw first command name as the model emitted it (no alias resolution — the player hears the

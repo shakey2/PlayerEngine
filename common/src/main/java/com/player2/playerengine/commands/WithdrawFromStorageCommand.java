@@ -1,5 +1,6 @@
 package com.player2.playerengine.commands;
 
+import net.minecraft.network.chat.Component;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.commands.base.Arg;
 import com.player2.playerengine.commands.base.ArgParser;
@@ -123,8 +124,9 @@ public class WithdrawFromStorageCommand extends Command {
             String receipt = ScanReportFormatter.transferReceipt(
                     ScanReportFormatter.TransferDirection.WITHDRAW, rc, task.entryOutcomes());
             mod.reportAgenticProgress(
-                    "took " + humanItems(task.entryOutcomes()) + " from the " + humanKind(rc)
-                            + " at " + humanPos(pos), true);
+                    Component.translatable("message.playerengine.storage.withdraw_ok",
+                            humanItems(task.entryOutcomes()), humanKind(rc), humanPos(pos)).getString(),
+                    true);
             Debug.logMessage("storage-tx ok dir=withdraw pos=" + ContainerResolver.formatPos(pos)
                     + " kind=" + kindToken(rc) + " moved=" + movedSummary(task.entryOutcomes())
                     + " bot=" + botName(mod));
@@ -134,8 +136,10 @@ public class WithdrawFromStorageCommand extends Command {
             String receipt = ScanReportFormatter.transferReceipt(
                     ScanReportFormatter.TransferDirection.WITHDRAW, rc, task.entryOutcomes());
             mod.reportAgenticProgress(
-                    "took " + humanItems(task.entryOutcomes()) + " from the " + humanKind(rc)
-                            + " at " + humanPos(pos) + " (" + firstShortReason(task.entryOutcomes()) + ")", true);
+                    Component.translatable("message.playerengine.storage.withdraw_partial",
+                            humanItems(task.entryOutcomes()), humanKind(rc), humanPos(pos),
+                            firstShortReason(task.entryOutcomes())).getString(),
+                    true);
             Debug.logMessage("storage-tx partial dir=withdraw pos=" + ContainerResolver.formatPos(pos)
                     + " kind=" + kindToken(rc) + " code=" + task.code().token()
                     + " moved=" + movedSummary(task.entryOutcomes()) + " bot=" + botName(mod));
@@ -167,7 +171,9 @@ public class WithdrawFromStorageCommand extends Command {
         String text = ScanReportFormatter.transferFailure(failures);
         String where = pos == null ? "storage" : "the " + humanKind(rc) + " at " + humanPos(pos);
         mod.reportAgenticProgress(
-                "couldn't withdraw from " + where + " - " + failures.get(0).detail(), true);
+                Component.translatable("message.playerengine.storage.withdraw_fail",
+                        where, failures.get(0).detail()).getString(),
+                true);
         Debug.logWarning("storage-tx fail code=" + failures.get(0).code().token()
                 + " pos=" + (pos == null ? "?" : ContainerResolver.formatPos(pos))
                 + " kind=" + kindToken(rc)

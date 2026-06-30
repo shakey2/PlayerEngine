@@ -223,13 +223,12 @@ public class Player2APIService {
                  && JoulesCache.shouldSendHardMessage(billingKey);
          if ((callWasFirst || joulesWasFirst) && payerToNotify != null) {
             if (callResult == BudgetTracker.BudgetCheckResult.HARD_LIMIT) {
-               payerToNotify.sendSystemMessage(Component.literal(
-                       "[PlayerEngine] AI call budget hard limit reached. No new AI requests until window resets (~"
-                               + thresholds.getBudgetWindowMinutes() + " min)."
+               payerToNotify.sendSystemMessage(Component.translatable(
+                       "message.playerengine.budget.hard_limit_calls", thresholds.getBudgetWindowMinutes()
                ).withStyle(ChatFormatting.RED));
             } else {
-               payerToNotify.sendSystemMessage(Component.literal(
-                       "[PlayerEngine] Joules balance too low to continue. No new AI requests until balance is restored."
+               payerToNotify.sendSystemMessage(Component.translatable(
+                       "message.playerengine.budget.hard_limit_joules"
                ).withStyle(ChatFormatting.RED));
             }
          }
@@ -245,9 +244,8 @@ public class Player2APIService {
             boolean shouldMsg = BudgetTracker.shouldSendSoftMessage(billingKey)
                     || JoulesCache.shouldSendSoftMessage(billingKey);
             if (shouldMsg && payerToNotify != null) {
-               payerToNotify.sendSystemMessage(Component.literal(
-                       "[PlayerEngine] AI budget soft limit reached. AI requests paused. "
-                               + "Use /player2npc budget reset to resume."
+               payerToNotify.sendSystemMessage(Component.translatable(
+                       "message.playerengine.budget.soft_limit_paused"
                ).withStyle(ChatFormatting.YELLOW));
             }
             throw new Exception(StopReason.BUDGET_HARD_LIMIT.name() + ":soft_limit_hard_stop");
@@ -259,8 +257,8 @@ public class Player2APIService {
             boolean shouldMsg = BudgetTracker.shouldSendSoftMessage(billingKey)
                     || JoulesCache.shouldSendSoftMessage(billingKey);
             if (shouldMsg && payerToNotify != null) {
-               payerToNotify.sendSystemMessage(Component.literal(
-                       "[PlayerEngine] AI budget soft limit reached. Switching to fallback profile: " + fallbackProfile + "."
+               payerToNotify.sendSystemMessage(Component.translatable(
+                       "message.playerengine.budget.soft_limit_switch", fallbackProfile
                ).withStyle(ChatFormatting.YELLOW));
             }
             Player2HTTPUtils.setProfileBaseUrlOverride(profileUrl.get());

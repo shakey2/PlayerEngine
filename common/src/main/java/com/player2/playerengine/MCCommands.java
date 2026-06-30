@@ -348,16 +348,8 @@ public class MCCommands {
                     LOGGER.info("help command");
                     Player player = context.getSource().getPlayerOrException();
 
-                    String message = """
-                        Help: here are the following
-                        - 'playerengine relog':
-                        - 'help': displays this help
-                        - 'tpto <username>': teleports you to AI
-                        - 'queue clear [player]': (OP) drop pending AI work; optional scope to one player's bots
-                        - 'list': lists AI usernames
-                    """;
-
-                    AgentSideEffects.broadcastChatToPlayer(player.level().getServer(), message, (ServerPlayer) player);
+                    AgentSideEffects.broadcastChatToPlayer(player.level().getServer(),
+                            Component.translatable("message.playerengine.commands.help"), (ServerPlayer) player);
                     return 1;
                 });
     }
@@ -394,7 +386,12 @@ public class MCCommands {
         String body = String.format("%s: drained %d conversation queue(s), shut down %d LLM bucket(s).",
                 label, summary.queuesCleared(), summary.bucketsShutdown());
         LOGGER.info(body);
-        src.sendSuccess(() -> Component.literal(body), true);
+        src.sendSuccess(() -> targetName != null
+                ? Component.translatable("message.playerengine.commands.queue_clear_scoped",
+                        targetName, summary.queuesCleared(), summary.bucketsShutdown())
+                : Component.translatable("message.playerengine.commands.queue_clear",
+                        summary.queuesCleared(), summary.bucketsShutdown()),
+                true);
     }
 
     /**
@@ -420,10 +417,14 @@ public class MCCommands {
                             MinecraftServer server = ctx.getSource().getServer();
                             RagIndex.reloadAll(server);
                             ToolRetriever global = RagIndex.getGlobal();
-                            String msg = "RAG reload complete. Global index: "
+                            String logMsg = "RAG reload complete. Global index: "
                                     + (global != null ? global.documentCount() + " docs" : "FAILED");
-                            LOGGER.info(msg);
-                            ctx.getSource().sendSuccess(() -> Component.literal(msg), true);
+                            LOGGER.info(logMsg);
+                            Component displayMsg = global != null
+                                    ? Component.translatable("message.playerengine.rag.reload_complete",
+                                            global.documentCount())
+                                    : Component.translatable("message.playerengine.rag.reload_failed");
+                            ctx.getSource().sendSuccess(() -> displayMsg, true);
                             return 1;
                         }))
                 .then(Commands.literal("audit")
@@ -441,14 +442,14 @@ public class MCCommands {
 
                                     ToolRetriever retriever = resolveRetriever(src);
                                     if (retriever == null) {
-                                        src.sendFailure(Component.literal("RAG index not initialized."));
+                                        src.sendFailure(Component.translatable("message.playerengine.rag.not_initialized"));
                                         return 0;
                                     }
 
                                     ToolDocument merged = retriever.getRegistry().getDocument(toolId);
                                     if (merged == null) {
-                                        src.sendFailure(Component.literal(
-                                                "No tool found with id '" + toolId + "'."));
+                                        src.sendFailure(Component.translatable(
+                                                "message.playerengine.rag.inspect_tool_not_found", toolId));
                                         return 0;
                                     }
 
@@ -614,13 +615,12 @@ public class MCCommands {
         try {
             taskClass = AiTaskClass.valueOf(taskClassRaw.toUpperCase());
         } catch (IllegalArgumentException e) {
-            src.sendFailure(Component.literal("Unknown task class: " + taskClassRaw
-                    + ". Use RETRIEVAL, RERANKING, SUMMARIZATION, PLANNING, or DECISION."));
+            src.sendFailure(Component.translatable("message.playerengine.routing.unknown_task_class", taskClassRaw));
             return 0;
         }
 
         if (PlayerEngineController.staticAPIServices.isEmpty()) {
-            src.sendFailure(Component.literal("No Player2 API service registered (no active bots)."));
+            src.sendFailure(Component.translatable("message.playerengine.commands.no_active_bots"));
             return 0;
         }
         Player2APIService apiService = PlayerEngineController.staticAPIServices.values().iterator().next();
@@ -734,7 +734,9 @@ public class MCCommands {
         MinecraftServer server = ctx.getSource().getServer();
         List<String> lines = AliasLearningService.auditTail(server, n);
         String body = String.join("\n", lines);
-        ctx.getSource().sendSuccess(() -> Component.literal(body.isEmpty() ? "(no rows)" : body), false);
+        ctx.getSource().sendSuccess(() -> body.isEmpty()
+                ? Component.translatable("message.playerengine.rag.audit_no_rows")
+                : Component.literal(body), false);
         return 1;
     }
 
@@ -770,16 +772,15 @@ public class MCCommands {
                 ServerPlayer player = src.getPlayerOrException();
                 ownerUuid = player.getUUID();
             } catch (Exception e) {
-                src.sendFailure(Component.literal(
-                        "Console must use reset_learned --all-owners or specify owner context via player."));
+                src.sendFailure(Component.translatable("message.playerengine.rag.reset_learned_console_error"));
                 return 0;
             }
         }
         int count = AliasLearningService.resetLearned(server, ownerUuid, toolId);
         String scope = allOwners ? "all owners" : ("owner " + ownerUuid);
         String tool = toolId != null ? (" tool=" + toolId) : " (all tools)";
-        String msg = "Reset learned overlays for " + scope + tool + " (" + count + " owner dir(s) touched).";
-        src.sendSuccess(() -> Component.literal(msg), true);
+        src.sendSuccess(() -> Component.translatable("message.playerengine.rag.reset_learned_success",
+                scope, tool, count), true);
         return 1;
     }
 
@@ -914,7 +915,8 @@ public class MCCommands {
         CapabilitySubjectKind kind = CapabilitySubjectKind.valueOf(kindRaw.toUpperCase(Locale.ROOT));
         Optional<CapabilityMap> map = ModIntelligenceService.queryService().get(kind, id);
         if (map.isEmpty()) {
-            src.sendFailure(Component.literal("No capability map for " + kind + " " + id));
+            src.sendFailure(Component.translatable("message.playerengine.capability.inspect_not_found",
+                    kind, id));
             return 0;
         }
         CapabilityMap m = map.get();
@@ -931,7 +933,7 @@ public class MCCommands {
 
     private static int capabilityRebuild(CommandSourceStack src, boolean force) {
         MinecraftServer server = src.getServer();
-        src.sendSuccess(() -> Component.literal("ModIntelligence rebuild started (async)"), false);
+        src.sendSuccess(() -> Component.translatable("message.playerengine.capability.rebuild_started"), false);
         PlayerEngine.getExecutor().execute(() -> ModIntelligenceService.runIngestion(server, force));
         return 1;
     }
@@ -943,17 +945,17 @@ public class MCCommands {
      */
     private static int capabilityEnrich(CommandSourceStack src, Integer limit) {
         if (!Player2ServerConfigHolder.get().isModIntelligenceEnrichmentEnabled()) {
-            src.sendFailure(Component.literal("Enrichment disabled in server_player2.json"));
+            src.sendFailure(Component.translatable("message.playerengine.capability.enrich_disabled"));
             return 0;
         }
         MinecraftServer server = src.getServer();
         int queued = ModIntelligenceService.status().getQueuedEnrichments();
         if (queued == 0) {
-            src.sendFailure(Component.literal("ModIntelligence enrichment queue is empty"));
+            src.sendFailure(Component.translatable("message.playerengine.capability.enrich_queue_empty"));
             return 0;
         }
         if (!ModIntelligenceEnrichmentClient.isBillingAvailable(server)) {
-            src.sendFailure(Component.literal("ModIntelligence enrichment: billing unavailable (log in or join as payer)"));
+            src.sendFailure(Component.translatable("message.playerengine.capability.enrich_billing_unavailable"));
             return 0;
         }
         ModelBlacklist.ModelBlacklistSnapshot blacklist = ModelBlacklist.load();
@@ -978,31 +980,30 @@ public class MCCommands {
         ModIntelligenceService.ScheduleResult result = ModIntelligenceService.scheduleEnrichmentBatch(server, limit);
         return switch (result) {
             case STARTED -> {
-                src.sendSuccess(() -> Component.literal(
-                        "ModIntelligence enrichment batch started (queued=" + queued + ", limit: " + limitText + ")"), false);
+                src.sendSuccess(() -> Component.translatable(
+                        "message.playerengine.capability.enrich_batch_started", queued, limitText), false);
                 yield 1;
             }
             case ALREADY_RUNNING -> {
                 String pendingText = limit == null
                         ? "config-limit"
                         : (limit <= 0 ? "unlimited" : limit + "-limit");
-                src.sendSuccess(() -> Component.literal(
-                        "ModIntelligence enrichment: a batch is already running; your " + pendingText
-                                + " batch will start when it finishes (queued=" + queued + ")"), false);
+                src.sendSuccess(() -> Component.translatable(
+                        "message.playerengine.capability.enrich_already_running",
+                        pendingText, queued), false);
                 yield 1;
             }
             case NOTHING_QUEUED -> {
-                src.sendFailure(Component.literal("ModIntelligence enrichment: nothing queued for enrichment"));
+                src.sendFailure(Component.translatable("message.playerengine.capability.enrich_nothing_queued"));
                 yield 0;
             }
             case DISABLED -> {
-                src.sendFailure(Component.literal(
-                        "ModIntelligence enrichment is disabled in config (server_player2.json)"));
+                src.sendFailure(Component.translatable("message.playerengine.capability.enrich_disabled_config"));
                 yield 0;
             }
             case BILLING_UNAVAILABLE -> {
-                src.sendFailure(Component.literal(
-                        "ModIntelligence enrichment: billing not available yet — join a world or wait for the stored token"));
+                src.sendFailure(Component.translatable(
+                        "message.playerengine.capability.enrich_billing_not_yet"));
                 yield 0;
             }
         };
@@ -1039,7 +1040,8 @@ public class MCCommands {
                 ? BuiltInRegistries.ITEM.getOptional(id)
                 : Optional.empty();
         if (targetOpt.isEmpty()) {
-            src.sendFailure(Component.literal("Unknown item: '" + itemName + "' (parsed as '" + qualified + "')."));
+            src.sendFailure(Component.translatable("message.playerengine.resolve.unknown_item",
+                    itemName, qualified));
             return 0;
         }
         Item target = targetOpt.get();
@@ -1047,7 +1049,7 @@ public class MCCommands {
         // Acquire a live bot controller via the existing staticAPIServices pattern (resolver reads the
         // bot's current inventory through it). No API call is made.
         if (PlayerEngineController.staticAPIServices.isEmpty()) {
-            src.sendFailure(Component.literal("No Player2 API service registered (no active bots)."));
+            src.sendFailure(Component.translatable("message.playerengine.commands.no_active_bots"));
             return 0;
         }
         Player2APIService apiService = PlayerEngineController.staticAPIServices.values().iterator().next();

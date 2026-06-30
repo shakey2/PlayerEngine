@@ -1,5 +1,6 @@
 package com.player2.playerengine.commands;
 
+import net.minecraft.network.chat.Component;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.PlayerEngineSettings;
 import com.player2.playerengine.commands.base.Arg;
@@ -61,9 +62,9 @@ public class SmithCommand extends Command {
     protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
         PlayerEngineSettings settings = mod.getModSettings();
         if (!settings.isEnableSmithing()) {
-            String msg = "Smithing is disabled in the configuration.";
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.disabled").getString(), true);
+            this.finishWithError("Smithing is disabled in the configuration.");
             return;
         }
 
@@ -79,17 +80,17 @@ public class SmithCommand extends Command {
         }
 
         if (items.items == null || items.items.length != 1) {
-            String msg = "Specify exactly one item to upgrade, e.g. `smith netherite_pickaxe`.";
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.invalid_args_count").getString(), true);
+            this.finishWithError("Specify exactly one item to upgrade, e.g. `smith netherite_pickaxe`.");
             return;
         }
         ItemTarget target = items.items[0];
         Item output = target.getMatches().length == 1 ? target.getMatches()[0] : null;
         if (output == null) {
-            String msg = "Specify a single concrete item to upgrade, e.g. `smith netherite_pickaxe`.";
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.invalid_args_concrete").getString(), true);
+            this.finishWithError("Specify a single concrete item to upgrade, e.g. `smith netherite_pickaxe`.");
             return;
         }
 
@@ -107,10 +108,10 @@ public class SmithCommand extends Command {
                     SMITHING_RECIPE_ACCESS.resolve(world.getRecipeManager(), output, world.registryAccess());
             if (resolved.isEmpty()) {
                 String name = displayName(output);
-                String msg = "Can't upgrade " + name
-                        + ": nothing in the smithing registry produces it.";
-                mod.reportAgenticProgress(msg, true);
-                this.finishWithError(msg);
+                // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+                mod.reportAgenticProgress(Component.translatable("message.playerengine.smith.no_recipe_preflight", name).getString(), true);
+                this.finishWithError("Can't upgrade " + name
+                        + ": nothing in the smithing registry produces it.");
                 return;
             }
         }
@@ -143,8 +144,8 @@ public class SmithCommand extends Command {
             this.finish();
             return;
         }
-        String playerLine = playerLine(o);
-        mod.reportAgenticProgress(playerLine, true);
+        Component playerLine = playerLine(o);
+        mod.reportAgenticProgress(playerLine.getString(), true);
         switch (o.kind()) {
             case CLEAN_SUCCESS ->
                     this.finishWithInfo("upgraded " + o.collected() + " x " + o.outputName());
@@ -176,29 +177,27 @@ public class SmithCommand extends Command {
     }
 
     /** Concise, human-readable player chat line for each terminal outcome. */
-    private static String playerLine(Outcome o) {
+    private static Component playerLine(Outcome o) {
         String out = displayName(o.outputItem());
         return switch (o.kind()) {
-            case CLEAN_SUCCESS ->
-                    "Upgraded " + o.collected() + " x " + out + ".";
-            case PARTIAL ->
-                    "Upgraded " + o.collected() + " of " + o.expected() + " x " + out
-                            + " — could not gather all required inputs.";
-            case TAMPERED ->
-                    "The smithing run was interrupted — completed " + o.collected() + " of "
-                            + o.expected() + " x " + out + ".";
-            case NO_RECIPE ->
-                    "I can't upgrade " + out + " — nothing in the smithing registry produces it.";
-            case NO_TABLE ->
-                    "Couldn't upgrade " + out + " — no smithing table reachable or placeable.";
-            case MISSING_TEMPLATE ->
-                    "Couldn't upgrade " + out + " — template item unavailable (" + o.reasonLabel() + ").";
-            case MISSING_BASE ->
-                    "Couldn't upgrade " + out + " — base item unavailable (" + o.reasonLabel() + ").";
-            case MISSING_ADDITION ->
-                    "Couldn't upgrade " + out + " — upgrade material unavailable (" + o.reasonLabel() + ").";
-            case SETUP_FAILED ->
-                    "Couldn't start the upgrade of " + out + " (" + o.reasonLabel() + ").";
+            case CLEAN_SUCCESS -> Component.translatable(
+                    "message.playerengine.smith.result.success", o.collected(), out);
+            case PARTIAL -> Component.translatable(
+                    "message.playerengine.smith.result.partial", o.collected(), o.expected(), out);
+            case TAMPERED -> Component.translatable(
+                    "message.playerengine.smith.result.tampered", o.collected(), o.expected(), out);
+            case NO_RECIPE -> Component.translatable(
+                    "message.playerengine.smith.result.no_recipe", out);
+            case NO_TABLE -> Component.translatable(
+                    "message.playerengine.smith.result.no_table", out);
+            case MISSING_TEMPLATE -> Component.translatable(
+                    "message.playerengine.smith.result.missing_template", out, o.reasonLabel());
+            case MISSING_BASE -> Component.translatable(
+                    "message.playerengine.smith.result.missing_base", out, o.reasonLabel());
+            case MISSING_ADDITION -> Component.translatable(
+                    "message.playerengine.smith.result.missing_addition", out, o.reasonLabel());
+            case SETUP_FAILED -> Component.translatable(
+                    "message.playerengine.smith.result.setup_failed", out, o.reasonLabel());
         };
     }
 

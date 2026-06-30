@@ -13,6 +13,7 @@ import com.player2.playerengine.containeraccess.StorageAccessCode;
 import com.player2.playerengine.player2api.AiConversationFeedback;
 import com.player2.playerengine.util.Debug;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 
 /**
@@ -42,7 +43,7 @@ public class DeleteWaypointCommand extends Command {
     protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
         // Guard 1: EllieGPS enabled
         if (!mod.getModSettings().getEllieGpsEnabled()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayer(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayerComponent().getString(), true);
             this.finishWithError(WaypointReportFormatter.ellieGpsDisabledModel());
             return;
         }
@@ -50,7 +51,7 @@ public class DeleteWaypointCommand extends Command {
         // One-time operator note if the store was quarantined (Decision 14)
         EllieGPSStore quarantineStore = EllieGPSStore.get();
         if (quarantineStore != null && quarantineStore.consumeQuarantineNote()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNote(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNoteComponent().getString(), true);
         }
 
         // Guard 2: parse coordinates
@@ -90,9 +91,10 @@ public class DeleteWaypointCommand extends Command {
         // Look up by position in current dimension (matches canonical OR secondary)
         WaypointRecord record = store.byPosition(dimensionId, pos);
         if (record == null) {
-            String msg = WaypointReportFormatter.noWaypointAt(posStr, dimensionId);
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            // Player path: translatable Component; model path: English String (separate for AI truthfulness)
+            mod.reportAgenticProgress(
+                    WaypointReportFormatter.noWaypointAtComponent(posStr, dimensionId).getString(), true);
+            this.finishWithError(WaypointReportFormatter.noWaypointAt(posStr, dimensionId));
             return;
         }
 
@@ -100,9 +102,10 @@ public class DeleteWaypointCommand extends Command {
         String deletedId = record.id;
         store.delete(deletedId);
 
-        String successMsg = WaypointReportFormatter.waypointDeleted(posStr, dimensionId);
-        AiConversationFeedback.enqueueInfo(mod, successMsg);
-        mod.reportAgenticProgress(successMsg, true);
+        // Model path: English String; player path: translatable Component (separate audiences)
+        AiConversationFeedback.enqueueInfo(mod, WaypointReportFormatter.waypointDeleted(posStr, dimensionId));
+        mod.reportAgenticProgress(
+                WaypointReportFormatter.waypointDeletedComponent(posStr, dimensionId).getString(), true);
         Debug.logMessage("waypoint-delete ok id=" + deletedId
                 + " bot=" + mod.getEntity().getName().getString());
         this.finish();
@@ -113,7 +116,11 @@ public class DeleteWaypointCommand extends Command {
         Debug.logWarning("waypoint-delete fail code=" + code.token()
                 + " detail=" + detail
                 + " bot=" + mod.getEntity().getName().getString());
-        mod.reportAgenticProgress("couldn't delete waypoint - " + detail, true);
+        // Player path: translatable prefix; detail stays English (shared with model — not localized)
+        mod.reportAgenticProgress(
+                Component.translatable("message.playerengine.elliegps.delete_fail", detail).getString(),
+                true);
+        // Model path: English token:detail for AI truthfulness
         this.finishWithError(code.token() + ": " + detail);
     }
 }

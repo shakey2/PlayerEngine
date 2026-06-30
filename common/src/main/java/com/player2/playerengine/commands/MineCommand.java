@@ -1,5 +1,6 @@
 package com.player2.playerengine.commands;
 
+import net.minecraft.network.chat.Component;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.commands.base.Arg;
 import com.player2.playerengine.commands.base.ArgParser;
@@ -63,9 +64,9 @@ public class MineCommand extends Command {
         }
 
         if (blockId == null || blockId.isBlank()) {
-            String msg = "Specify a block to mine, e.g. `mine iron_ore 8`.";
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            // Player sees the localized form; model keeps a fixed English token (cardinal rule).
+            mod.reportAgenticProgress(Component.translatable("message.playerengine.mine.specify_block").getString(), true);
+            this.finishWithError("Specify a block to mine, e.g. `mine iron_ore 8`.");
             return;
         }
 
@@ -98,8 +99,8 @@ public class MineCommand extends Command {
             this.finish();
             return;
         }
-        String playerLine = playerLine(o, count);
-        mod.reportAgenticProgress(playerLine, true);
+        Component playerLine = playerLine(o, count);
+        mod.reportAgenticProgress(playerLine.getString(), true);
         switch (o.kind()) {
             case CLEAN_SUCCESS ->
                     this.finishWithInfo("mined " + o.mined() + " " + o.blockId());
@@ -124,26 +125,28 @@ public class MineCommand extends Command {
     }
 
     /** Concise, human-readable player chat line for each terminal outcome. */
-    private static String playerLine(Outcome o, int count) {
-        String block = display(o.blockId());
+    private static Component playerLine(Outcome o, int count) {
+        Component block = display(o.blockId());
         return switch (o.kind()) {
-            case CLEAN_SUCCESS -> "Mined " + o.mined() + " x " + block + ".";
-            case PARTIAL_NO_DROPS -> "Mined " + o.mined() + " " + block + " but " + o.noDrops()
-                    + " gave no drops (tool too weak).";
-            case PARTIAL_TIMEOUT -> "Mined " + o.mined() + " of " + count + " " + block
-                    + " before timing out.";
-            case PARTIAL_RANGE_EXHAUSTED -> "Mined " + o.mined() + " " + block
-                    + " — no more within reach.";
-            case PARTIAL_DROPS_LOST -> "Mined " + o.mined() + " " + block + " — " + o.lostDrops()
-                    + " drop(s) were lost (unreachable).";
-            case FAILED -> "Couldn't mine " + block + " (" + readable(o.reasonToken()) + ").";
+            case CLEAN_SUCCESS -> Component.translatable(
+                    "message.playerengine.mine.success", o.mined(), block);
+            case PARTIAL_NO_DROPS -> Component.translatable(
+                    "message.playerengine.mine.partial_no_drops", o.mined(), block, o.noDrops());
+            case PARTIAL_TIMEOUT -> Component.translatable(
+                    "message.playerengine.mine.partial_timeout", o.mined(), count, block);
+            case PARTIAL_RANGE_EXHAUSTED -> Component.translatable(
+                    "message.playerengine.mine.partial_range_exhausted", o.mined(), block);
+            case PARTIAL_DROPS_LOST -> Component.translatable(
+                    "message.playerengine.mine.partial_drops_lost", o.mined(), block, o.lostDrops());
+            case FAILED -> Component.translatable(
+                    "message.playerengine.mine.failed", block, readable(o.reasonToken()));
         };
     }
 
     /** Strips the namespace and replaces underscores with spaces for a human-readable block name. */
-    private static String display(String id) {
+    private static Component display(String id) {
         if (id == null || id.isBlank()) {
-            return "that block";
+            return Component.translatable("message.playerengine.mine.block_fallback");
         }
         String s = id.trim();
         int colon = s.indexOf(':');
@@ -153,7 +156,7 @@ public class MineCommand extends Command {
         if (s.startsWith("#")) {
             s = s.substring(1);
         }
-        return s.replace('_', ' ');
+        return Component.literal(s.replace('_', ' '));
     }
 
     /**

@@ -5,8 +5,8 @@ import com.player2.playerengine.commands.base.Arg;
 import com.player2.playerengine.commands.base.ArgParser;
 import com.player2.playerengine.commands.base.Command;
 import com.player2.playerengine.commands.base.CommandException;
-import com.player2.playerengine.player2api.AgentSideEffects;
 import com.player2.playerengine.tasks.movement.BodyLanguageTask;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -32,9 +32,8 @@ public class BodyLanguageCommand extends Command {
                 UUID ownerUuid = mod.getOwner().getUUID();
                 ServerPlayer ownerPlayer = server.getPlayerList().getPlayer(ownerUuid);
                 if (ownerPlayer != null) {
-                    AgentSideEffects.broadcastChatToPlayer(server,
-                            "I don't know that gesture: '" + action + "'.",
-                            ownerPlayer);
+                    ownerPlayer.displayClientMessage(
+                            Component.translatable("message.playerengine.bodylang.unknown_gesture", action), false);
                 }
             }
             this.finishWithError(

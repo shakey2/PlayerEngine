@@ -63,7 +63,7 @@ public class AuthenticationManager {
             if (p2Key != null) {
                 LOGGER.info("Detected relogin for {}", authKey);
                 if (TokenStorage.getToken(username, clientId).isEmpty()) {
-                    player.sendSystemMessage(Component.literal("Authentication for mod '" + clientId + "' successful!"));
+                    player.sendSystemMessage(Component.translatable("message.playerengine.auth.success", clientId));
                 }
 //                    else {
 //                        player.sendSystemMessage(Component.literal("Reauthentication for mod '" + clientId + "' successful!"));
@@ -117,14 +117,14 @@ public class AuthenticationManager {
                 String verificationUriComplete = deviceCodeResponse.get("verificationUriComplete").getAsString();
                 int interval = deviceCodeResponse.get("interval").getAsInt();
 
-                player.sendSystemMessage(Component.literal(String.format("To use AI features from mod '%s', please authorize here: %s", clientId, verificationUriComplete)).withStyle(Style.EMPTY.withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_URL, verificationUriComplete))));
-                player.sendSystemMessage(Component.literal("If this server is hosted remotely (no Player2 app on the server), ask an admin to run /playerengine player2 dedicated true after you finish signing in."));
+                player.sendSystemMessage(Component.translatable("message.playerengine.auth.authorize_prompt", clientId, verificationUriComplete).withStyle(Style.EMPTY.withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_URL, verificationUriComplete))));
+                player.sendSystemMessage(Component.translatable("message.playerengine.auth.dedicated_hint"));
 
                 startPolling(player, clientId, deviceCode, interval, authFuture);
 
             } catch (Exception e) {
                 LOGGER.error("Authentication failed for {}", authKey, e);
-                player.sendSystemMessage(Component.literal("Authentication process for mod '" + clientId + "' failed."));
+                player.sendSystemMessage(Component.translatable("message.playerengine.auth.failed", clientId));
                 authFuture.completeExceptionally(e);
                 ongoingAuths.remove(authKey);
             }
@@ -171,7 +171,7 @@ public class AuthenticationManager {
         String username = player.getName().getString();
 
         TokenStorage.storeToken(username, clientId, token);
-        player.sendSystemMessage(Component.literal("Authentication for mod '" + clientId + "' successful!"));
+        player.sendSystemMessage(Component.translatable("message.playerengine.auth.success", clientId));
         authFuture.complete(token);
         stopPolling(authKey);
         ongoingAuths.remove(authKey);

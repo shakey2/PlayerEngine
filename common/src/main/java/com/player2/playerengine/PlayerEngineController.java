@@ -58,6 +58,7 @@ import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.util.Playground;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -338,11 +339,11 @@ public class PlayerEngineController {
          if (ownerPlayer != null && ownerPlayer.getServer() != null) {
             Character character = this.getAIPersistantData() != null
                   ? this.getAIPersistantData().getCharacter() : null;
-            String name = character != null && character.shortName() != null
-                  ? character.shortName() : "Your companion";
+            Component nameComponent = character != null && character.shortName() != null
+                  ? Component.literal(character.shortName())
+                  : Component.translatable("message.playerengine.agent.companion_default_name");
             AgentSideEffects.broadcastChatToPlayer(ownerPlayer.getServer(),
-                  name + " was despawned while a task was running — the task has been stopped and will"
-                        + " not resume.",
+                  Component.translatable("message.playerengine.agent.despawned_with_task", nameComponent),
                   ownerPlayer);
          }
       }
@@ -688,7 +689,10 @@ public class PlayerEngineController {
          return;
       }
       // 6. broadcast via the single existing player-chat path, prefixed with the bot name.
-      AgentSideEffects.broadcastChatToPlayer(server, "[" + agenticReportBotName() + "] " + message, target);
+      AgentSideEffects.broadcastChatToPlayer(server,
+            Component.translatable("message.playerengine.agent.progress_prefix",
+                  agenticReportBotName(), message),
+            target);
       // 7. update throttle/dedup state.
       lastAgenticReportMs = now;
       lastAgenticReportMessage = message;

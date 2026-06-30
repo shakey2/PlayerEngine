@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.Item;
@@ -184,7 +185,7 @@ public final class DepositItemsTask extends Task implements DescribesProgress {
         }
         phase = Phase.DEPOSITING;
         updateProgress("depositing " + targets.length + " item type(s) into " + formatPos(targetPos));
-        report("moving to chest at " + formatPos(targetPos) + " to deposit", false);
+        report(Component.translatable("message.playerengine.deposit.progress.moving", formatPos(targetPos)), false);
         return null;
     }
 
@@ -205,7 +206,7 @@ public final class DepositItemsTask extends Task implements DescribesProgress {
         // Mirror live progress from the core so describeProgress()/setDepositProgress stay identical.
         this.depositedCount = depositCore.depositedCount();
         updateProgress("depositing (" + (initialHeldCount - heldCount()) + "/" + initialHeldCount + ")");
-        report("depositing " + (initialHeldCount - heldCount()) + "/" + initialHeldCount, false);
+        report(Component.translatable("message.playerengine.deposit.progress.depositing", (initialHeldCount - heldCount()), initialHeldCount), false);
         return depositCore;
     }
 
@@ -336,7 +337,7 @@ public final class DepositItemsTask extends Task implements DescribesProgress {
         depositCore = null;
         updateProgress(reason);
         // Mid-step actionable note (milestone), emitted before the executor's terminal("failed", ...).
-        report("deposit failed: " + describeDepositFailure(reason), true);
+        report(Component.translatable("message.playerengine.deposit.failed", describeDepositFailureComponent(reason)), true);
         this.controller.log("[Agentic] deposit_items failed: " + reason);
         // Self-stop so SingleTaskChain takes the forced-stop path (stopped()==true while
         // isFinished()==false) and reaches onTaskFinish; the adapter records FAILED and
@@ -352,36 +353,39 @@ public final class DepositItemsTask extends Task implements DescribesProgress {
      * cases are stated explicitly as partial so the player is not misled into thinking all items were
      * stored. Reuses the existing vocabulary; adds no new failure codes.
      */
-    private String describeDepositOutcome(String message) {
+    private Component describeDepositOutcome(String message) {
         if (message == null) {
-            return "deposit done";
+            return Component.translatable("message.playerengine.deposit.success.done");
         }
         if (message.equals("partial: container_full")) {
-            return "stored " + depositedCount + ", some items left (chest full)";
+            return Component.translatable("message.playerengine.deposit.success.partial_container_full", depositedCount);
         }
         if (message.startsWith("partial: ") && message.endsWith(" remaining")) {
             String n = message.substring("partial: ".length(), message.length() - " remaining".length());
-            return "stored " + depositedCount + ", " + n + " item(s) left";
+            return Component.translatable("message.playerengine.deposit.success.partial_remaining", depositedCount, n);
         }
         if (message.equals("nothing_to_deposit")) {
             // Tailored player line (DESIGN.md §3): the no-op nearly always means the requested item
             // was never in inventory and agentic cannot mine/gather it. Tell the player how to fix it
             // in one step instead of a bare "nothing to deposit" that reads like a silent failure.
-            return "nothing to deposit (I don't have that item — try 'get <item> <count>' first)";
+            return Component.translatable("message.playerengine.deposit.success.nothing_to_deposit");
         }
-        return message;
+        if (message.startsWith("deposited ")) {
+            return Component.translatable("message.playerengine.deposit.success.deposited", depositedCount);
+        }
+        return Component.literal(message);
     }
 
-    /** Maps a deposit failure-vocabulary code to a concise player-readable cause. Reuses, never redefines. */
-    private static String describeDepositFailure(String reason) {
+    /** Maps a deposit failure-vocabulary code to a concise player-readable Component. Reuses, never redefines. */
+    private static Component describeDepositFailureComponent(String reason) {
         return switch (reason) {
-            case "no_storage_target" -> "no storage chest target";
-            case "target_wrong_dimension" -> "chest is in another dimension";
-            case "target_block_changed" -> "the chest is gone";
-            case "unreachable" -> "could not reach the chest";
-            case "container_full" -> "the chest is full";
-            case "timeout" -> "timed out";
-            default -> reason;
+            case "no_storage_target" -> Component.translatable("message.playerengine.deposit.fail.no_storage_target");
+            case "target_wrong_dimension" -> Component.translatable("message.playerengine.deposit.fail.wrong_dimension");
+            case "target_block_changed" -> Component.translatable("message.playerengine.deposit.fail.block_changed");
+            case "unreachable" -> Component.translatable("message.playerengine.deposit.fail.unreachable");
+            case "container_full" -> Component.translatable("message.playerengine.deposit.fail.container_full");
+            case "timeout" -> Component.translatable("message.playerengine.deposit.fail.timeout");
+            default -> Component.literal(reason);
         };
     }
 
@@ -395,15 +399,19 @@ public final class DepositItemsTask extends Task implements DescribesProgress {
     /**
      * Player-facing progress note via the controller seam (WS1/WS2). Guarded by the run-state
      * terminal flag so a late callback cannot overwrite a failure line. Uses {@code context.controller()}.
+     * The Component is resolved to a String at this boundary because the downstream
+     * {@code reportAgenticProgress} / {@code AgentSideEffects.broadcastChatToPlayer} chain is
+     * String-based; passing {@code Component} throughout this task establishes the translation-key
+     * system for a future full-Component upgrade of that infrastructure.
      */
-    private void report(String message, boolean milestone) {
+    private void report(Component message, boolean milestone) {
         if (context == null) {
             return;
         }
         if (context.runState() != null && context.runState().isTerminal()) {
             return;
         }
-        context.controller().reportAgenticProgress(message, milestone);
+        context.controller().reportAgenticProgress(message.getString(), milestone);
     }
 
     private double elapsedSec() {

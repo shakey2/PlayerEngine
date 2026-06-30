@@ -20,6 +20,8 @@ import com.player2.playerengine.player2api.AiConversationFeedback;
 import com.player2.playerengine.tasks.container.ScanContainerTask;
 import com.player2.playerengine.util.Debug;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
@@ -65,7 +67,8 @@ public class CreateWaypointCommand extends Command {
     protected void call(PlayerEngineController mod, ArgParser parser) throws CommandException {
         // Guard 1: EllieGPS enabled (checked first, before any parsing or store access)
         if (!mod.getModSettings().getEllieGpsEnabled()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayer(), true);
+            // Player path: translatable Component (.getString() bridges until reportAgenticProgress(Component) exists)
+            mod.reportAgenticProgress(WaypointReportFormatter.ellieGpsDisabledPlayerComponent().getString(), true);
             this.finishWithError(WaypointReportFormatter.ellieGpsDisabledModel());
             return;
         }
@@ -74,7 +77,7 @@ public class CreateWaypointCommand extends Command {
         // first EllieGPS command that runs, then never again (the consume clears the flag).
         EllieGPSStore quarantineStore = EllieGPSStore.get();
         if (quarantineStore != null && quarantineStore.consumeQuarantineNote()) {
-            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNote(), true);
+            mod.reportAgenticProgress(WaypointReportFormatter.quarantineNoteComponent().getString(), true);
         }
 
         // Guard 2: parse coordinates
@@ -127,20 +130,21 @@ public class CreateWaypointCommand extends Command {
         WaypointOriginEvidence.Verdict verdict = WaypointOriginClassifier.classify(
                 level, canonicalPos, secondaryPos);
         if (verdict == WaypointOriginEvidence.Verdict.REJECT_WORLDGEN) {
-            String msg = WaypointReportFormatter.refusedWorldgenLoot(
-                    ContainerResolver.formatPos(canonicalPos));
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            String canonPosStr = ContainerResolver.formatPos(canonicalPos);
+            // Player path: translatable; model path: English String (separate to preserve AI truthfulness)
+            mod.reportAgenticProgress(
+                    WaypointReportFormatter.refusedWorldgenLootComponent(canonPosStr).getString(), true);
+            this.finishWithError(WaypointReportFormatter.refusedWorldgenLoot(canonPosStr));
             return;
         }
         // UNKNOWN: the classifier could not evaluate (Tier 2 unevaluable). The explicit-create
         // policy only licenses overriding Tier 3 — an unevaluated Tier 2 falls under the
         // conservative do-not-register default (Decision 4), so refuse here as well.
         if (verdict == WaypointOriginEvidence.Verdict.UNKNOWN) {
-            String msg = WaypointReportFormatter.refusedOriginUnverified(
-                    ContainerResolver.formatPos(canonicalPos));
-            mod.reportAgenticProgress(msg, true);
-            this.finishWithError(msg);
+            String canonPosStr = ContainerResolver.formatPos(canonicalPos);
+            mod.reportAgenticProgress(
+                    WaypointReportFormatter.refusedOriginUnverifiedComponent(canonPosStr).getString(), true);
+            this.finishWithError(WaypointReportFormatter.refusedOriginUnverified(canonPosStr));
             return;
         }
         // Tier 3 (REJECT_STRUCTURE) is overridden by explicit create intent (Decision 4);
@@ -162,7 +166,9 @@ public class CreateWaypointCommand extends Command {
                 EllieGPSStore liveStore = EllieGPSStore.get();
                 if (liveStore == null) {
                     mod.reportAgenticProgress(
-                            "EllieGPS: store no longer available; waypoint not saved.", true);
+                            Component.translatable("message.playerengine.elliegps.store_unavailable")
+                                    .getString(),
+                            true);
                     this.finishWithError("elliegps_store_unavailable: no active EllieGPS store");
                     return;
                 }
@@ -190,21 +196,27 @@ public class CreateWaypointCommand extends Command {
                 }
                 int kwCount = (record.keywords != null) ? record.keywords.size() : 0;
                 String posStr = ContainerResolver.formatPos(snapshot.canonicalPos());
-                String successMsg = WaypointReportFormatter.waypointRegistered(
+
+                // Model feedback — English String, separate from player path (AI truthfulness)
+                String modelMsg = WaypointReportFormatter.waypointRegistered(
                         posStr, itemTypes, kwCount, snapshotOmitted);
                 if (structureOverride) {
                     // Decision 4: the Tier 3 override must be noted in feedback (both audiences)
-                    successMsg += " " + WaypointReportFormatter.structureOverrideNote();
+                    modelMsg += " " + WaypointReportFormatter.structureOverrideNote();
                 }
-
-                // Model feedback (with polish note if async polish was dispatched)
-                String modelMsg = successMsg;
                 if (mod.getModSettings().getEllieGpsUseModelDescription()) {
                     modelMsg += " " + WaypointReportFormatter.descriptionPolishScheduledNote();
                 }
                 AiConversationFeedback.enqueueInfo(mod, modelMsg);
-                // Player milestone
-                mod.reportAgenticProgress(successMsg, true);
+
+                // Player milestone — Component.translatable for i18n; two keys cover the
+                // snapshotOmitted branch. .getString() bridges until reportAgenticProgress(Component) exists.
+                MutableComponent playerMsg = WaypointReportFormatter.waypointRegisteredComponent(
+                        posStr, itemTypes, kwCount, snapshotOmitted);
+                if (structureOverride) {
+                    playerMsg.append(" ").append(WaypointReportFormatter.structureOverrideNoteComponent());
+                }
+                mod.reportAgenticProgress(playerMsg.getString(), true);
                 Debug.logMessage("waypoint-create ok id=" + record.id
                         + " snapshotOmitted=" + snapshotOmitted
                         + " kw=" + kwCount
@@ -231,7 +243,11 @@ public class CreateWaypointCommand extends Command {
         Debug.logWarning("waypoint-create fail code=" + code.token()
                 + " detail=" + detail
                 + " bot=" + mod.getEntity().getName().getString());
-        mod.reportAgenticProgress("couldn't create waypoint - " + detail, true);
+        // Player path: translatable prefix; detail stays English (shared with model — not localized)
+        mod.reportAgenticProgress(
+                Component.translatable("message.playerengine.elliegps.create_fail", detail).getString(),
+                true);
+        // Model path: English token:detail for AI truthfulness
         this.finishWithError(code.token() + ": " + detail);
     }
 }
