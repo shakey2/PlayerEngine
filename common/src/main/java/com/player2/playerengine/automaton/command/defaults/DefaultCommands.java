@@ -28,6 +28,9 @@ import com.player2.playerengine.player2api.ProfileUrlResolver;
 import com.player2.playerengine.player2api.config.Player2PayerMode;
 import com.player2.playerengine.player2api.config.Player2ServerConfigHolder;
 import com.player2.playerengine.player2api.network.Player2ServerNetworking;
+import com.player2.playerengine.help.ArgNote;
+import com.player2.playerengine.help.HelpEntry;
+import com.player2.playerengine.help.HelpRegistry;
 import com.player2.playerengine.automaton.Baritone;
 import com.player2.playerengine.automaton.api.BaritoneAPI;
 import com.player2.playerengine.automaton.api.IBaritone;
@@ -194,6 +197,10 @@ public final class DefaultCommands {
    }
 
    private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
+      // Contribute help metadata for every /playerengine player2/chain leaf, and delegate the
+      // budget sub-leaves to BudgetConfigCommands. Idempotent put-by-path, safe to re-fire.
+      contributePlayer2Help();
+      BudgetConfigCommands.registerHelpEntries();
       LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal(PlayerEngine.MOD_ID).requires(s -> s.hasPermission(2));
       root.then(Commands.literal("player2")
             .then(Commands.literal("reload").executes(ctx -> {
@@ -466,6 +473,42 @@ public final class DefaultCommands {
                return runBaritoneWithoutExecutorEntity(source, sub);
             }));
       dispatcher.register(root);
+   }
+
+   /**
+    * Contributes a {@link HelpEntry} for every {@code /playerengine player2 …} and
+    * {@code /playerengine player2 chain …} leaf (all OP-only, permission 2). The greedy
+    * {@code <command>} Baritone relay deliberately gets no entry — it is an argument-passthrough
+    * with no literal leaves to document. Keys and usage are plain String literals for the Layer-1
+    * lint; only human prose lives behind {@code help.playerengine.*} keys.
+    */
+   private static void contributePlayer2Help() {
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 reload", "player2 reload",
+            "help.playerengine.player2-reload.short", null, List.of(), 2, null, "config"));
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 payer prompter", "player2 payer prompter",
+            "help.playerengine.player2-payer-prompter.short", null, List.of(), 2, null, "config"));
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 payer owner", "player2 payer owner",
+            "help.playerengine.player2-payer-owner.short", null, List.of(), 2, null, "config"));
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 dedicated", "player2 dedicated <value>",
+            "help.playerengine.player2-dedicated.short", "help.playerengine.player2-dedicated.long",
+            List.of(new ArgNote("value", "help.playerengine.player2-dedicated.arg.value")), 2, null, "config"));
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 owner_offline_continue",
+            "player2 owner_offline_continue <value>",
+            "help.playerengine.player2-owner-offline-continue.short", null,
+            List.of(new ArgNote("value", "help.playerengine.player2-owner-offline-continue.arg.value")), 2, null, "config"));
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 call_by_name", "player2 call_by_name <value>",
+            "help.playerengine.player2-call-by-name.short", null,
+            List.of(new ArgNote("value", "help.playerengine.player2-call-by-name.arg.value")), 2, null, "config"));
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 npc_max_spawn", "player2 npc_max_spawn <value>",
+            "help.playerengine.player2-npc-max-spawn.short", null,
+            List.of(new ArgNote("value", "help.playerengine.player2-npc-max-spawn.arg.value")), 2, null, "config"));
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 npc_max_stored_ids",
+            "player2 npc_max_stored_ids <value>",
+            "help.playerengine.player2-npc-max-stored-ids.short", null,
+            List.of(new ArgNote("value", "help.playerengine.player2-npc-max-stored-ids.arg.value")), 2, null, "config"));
+      HelpRegistry.register(new HelpEntry("playerengine", "player2 chain status", "player2 chain status",
+            "help.playerengine.player2-chain-status.short", "help.playerengine.player2-chain-status.long",
+            List.of(), 2, null, "diagnostics"));
    }
 
    private static void syncPlayer2ConfigToAllPlayers(CommandSourceStack source) {
