@@ -141,6 +141,26 @@ public final class MemoryGraph {
         return updated;
     }
 
+    /**
+     * Directly sets a node's embedding {@code vector} + {@code vectorModel} in place (W8c dense embed
+     * apply), preserving every other field and its incident edges. Unlike {@link #mergeNode}, this
+     * FORCE-REPLACES the vector — {@code mergeNode}'s union keeps the existing vector, so it cannot
+     * re-embed a node into a new model space. No-op if the node is absent. Server thread only.
+     *
+     * @return the updated node, or {@code null} if absent
+     */
+    public MemoryNode setNodeVector(String nodeId, float[] vector, String vectorModel) {
+        MemoryNode n = nodes.get(nodeId);
+        if (n == null) return null;
+        MemoryNode updated = new MemoryNode(n.id(), n.content(), n.type(), n.canonicalName(),
+                n.aliases().toArray(new String[0]), n.tags().toArray(new String[0]),
+                n.importance(), n.createdTick(), n.timestampMs(),
+                n.lastSeenTick(), n.lastRetrievedTick(), n.mentionCount(),
+                vector, vectorModel, n.schemaVersion());
+        nodes.put(nodeId, updated);
+        return updated;
+    }
+
     /** Removes a node and all its incident edges. No-op if absent. Returns the removed node or null. */
     public MemoryNode removeNode(String nodeId) {
         MemoryNode removed = nodes.remove(nodeId);

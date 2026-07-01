@@ -33,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -327,6 +328,8 @@ public final class MemoryIngestionService {
                     PlayerEngine.LOGGER.info(
                             "Mood memory: EVENT node minted ({} -> {}) for {}.",
                             prevLabelName, newLabelName, scope);
+                    // (W8c) On-ingest embed for the new EVENT node (off-tick, console-only on failure).
+                    enqueueEmbedBackfill(controller, server, ownerBilling, scope);
                     maybeDispatchReflection(controller, server, ownerBilling, scope, applyStore);
                 } catch (RuntimeException applyEx) {
                     PlayerEngine.LOGGER.warn("Mood memory: EVENT apply failed ({})",
@@ -398,6 +401,12 @@ public final class MemoryIngestionService {
                             return; // world unloaded between dispatch and apply
                         }
                         store.mergeCandidates(plan); // applies plan, marks dirty, republishes (token bump)
+
+                        // (W8c) On-ingest embed: enqueue an off-tick embed job for nodes this merge
+                        // created/updated (now vectorless or stale-model). Batched, on MEMORY_EXECUTOR.
+                        // On-ingest embed failure is CONSOLE-ONLY (no live turn to attach feedback to —
+                        // plan A.8 async-no-turn carve-out).
+                        enqueueEmbedBackfill(controller, server, ownerBilling, scope);
 
                         // Bounded INFO (disk/console only — never model-facing): record the merge size +
                         // resulting graph dimensions. Only counts and the scope token are logged; no
@@ -556,6 +565,166 @@ public final class MemoryIngestionService {
             PlayerEngine.LOGGER.warn("Memory reflection: system-block refresh failed ({})",
                     e.getClass().getSimpleName());
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // W8c dense embed lifecycle (on-ingest + backfill + re-embed) — off-tick only
+    // -------------------------------------------------------------------------
+
+    /** Max node texts embedded per {@code /v1/embeddings} pass (endpoint hard cap). */
+    private static final int EMBED_BATCH_MAX =
+            com.player2.playerengine.memory.dense.EmbeddingBatcher.MAX_BATCH;
+
+    /** Scopes with a backfill pass currently in flight (avoid overlapping backfills for one companion). */
+    private static final java.util.Set<MemoryScope> EMBED_IN_FLIGHT =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Enqueues an off-tick embed pass (W8c) for one companion: embeds up to {@link #EMBED_BATCH_MAX}
+     * vectorless / stale-model nodes per pass, applies the vectors back on the server thread, and
+     * re-schedules itself until the graph is fully embedded (backfill complete). Also serves the one-time
+     * world-load backfill and the model/dim re-embed (both flow through
+     * {@link MemoryStore#denseBackfillCandidates}). Runs on {@link MemoryLlmClient#MEMORY_EXECUTOR}; NEVER
+     * the tick. On-ingest / backfill embed failures are CONSOLE-ONLY (no live turn — plan A.8 carve-out).
+     *
+     * <p>Fail-safe in {@code dedicatedClientProxy} mode: a background job has no outbound path, so embed
+     * degrades to a bounded token and this simply leaves nodes vectorless (retrieval falls back to
+     * lexical/MinHash/graph). No player/model surface.
+     */
+    static void enqueueEmbedBackfill(PlayerEngineController controller,
+                                     MinecraftServer server,
+                                     Player2PayerResolution.ApiBillingContext ownerBilling,
+                                     MemoryScope scope) {
+        if (controller == null || server == null || scope == null
+                || ownerBilling == null || ownerBilling.billingKey() == null) {
+            return;
+        }
+        if (!com.player2.playerengine.memory.dense.EmbeddingProvider.isAvailable()) {
+            return;
+        }
+        if (!EMBED_IN_FLIGHT.add(scope)) {
+            return; // a pass is already running for this scope
+        }
+        MemoryLlmClient.MEMORY_EXECUTOR.submit(() -> {
+            try {
+                runEmbedPass(controller, server, ownerBilling, scope);
+            } catch (RuntimeException e) {
+                PlayerEngine.LOGGER.warn("Memory embed: pass failed ({})", e.getClass().getSimpleName());
+            } finally {
+                EMBED_IN_FLIGHT.remove(scope);
+            }
+        });
+    }
+
+    /**
+     * One off-tick embed pass: collect a bounded batch of node texts on the server thread, embed them,
+     * apply the vectors back on the server thread, and re-enqueue if more remain. Console-only on failure.
+     */
+    private static void runEmbedPass(PlayerEngineController controller,
+                                     MinecraftServer server,
+                                     Player2PayerResolution.ApiBillingContext ownerBilling,
+                                     MemoryScope scope) {
+        // (1) Collect candidate ids + their embeddable text on the SERVER THREAD (graph reads are
+        //     server-thread; run() blocks this executor thread until the collection completes).
+        java.util.concurrent.CompletableFuture<List<String[]>> collected =
+                new java.util.concurrent.CompletableFuture<>();
+        server.execute(() -> {
+            try {
+                MemoryStore store = lookupStore(server, scope);
+                if (store == null) {
+                    collected.complete(List.of());
+                    return;
+                }
+                List<String> ids = store.denseBackfillCandidates(EMBED_BATCH_MAX);
+                if (ids.isEmpty()) {
+                    store.setDenseBackfillComplete(true); // nothing left → mark complete (avoids re-scan)
+                    collected.complete(List.of());
+                    return;
+                }
+                List<String[]> batch = new ArrayList<>(ids.size());
+                for (String id : ids) {
+                    String text = store.denseEmbeddableText(id);
+                    if (text != null && !text.isBlank()) {
+                        batch.add(new String[]{id, text});
+                    }
+                }
+                collected.complete(batch);
+            } catch (RuntimeException e) {
+                collected.complete(List.of());
+            }
+        });
+
+        List<String[]> batch;
+        try {
+            // Bounded wait: never block the shared single-thread MEMORY_EXECUTOR indefinitely. On a
+            // draining/stopping server, server.execute(...) may never run the collection task, leaving
+            // this future uncompleted — a timeout frees the executor for other memory tasks instead of
+            // starving it for the session.
+            batch = collected.get(5, TimeUnit.SECONDS); // wait for the server-thread collection
+        } catch (Exception e) {
+            // interrupted / timeout / server-thread failure → drop this pass silently (console-only path)
+            return;
+        }
+        if (batch.isEmpty()) {
+            return; // nothing to embed (or backfill complete)
+        }
+
+        // (2) Embed off-tick (this executor thread). Console-only on failure (no live turn).
+        List<String> texts = new ArrayList<>(batch.size());
+        for (String[] pair : batch) texts.add(pair[1]);
+        com.player2.playerengine.memory.dense.EmbeddingResult result =
+                com.player2.playerengine.memory.dense.EmbeddingBatcher.embedAll(texts, controller, ownerBilling);
+        if (!result.ok()) {
+            // Bounded token already logged to console by the provider; leave nodes vectorless this pass.
+            PlayerEngine.LOGGER.info("Memory embed: batch degraded ({}) for {}.",
+                    result.degradedToken(), scope);
+            return;
+        }
+        float[][] vecs = result.vectors();
+
+        // (3) Apply vectors back on the SERVER THREAD, then re-enqueue if a full batch was consumed
+        //     (there may be more vectorless nodes).
+        final boolean maybeMore = batch.size() >= EMBED_BATCH_MAX;
+        server.execute(() -> {
+            try {
+                MemoryStore store = lookupStore(server, scope);
+                if (store == null) return;
+                int applied = 0;
+                for (int i = 0; i < batch.size() && i < vecs.length; i++) {
+                    if (vecs[i] != null) {
+                        store.applyNodeVector(batch.get(i)[0], vecs[i]);
+                        applied++;
+                    }
+                }
+                PlayerEngine.LOGGER.info("Memory embed: applied {} vector(s) for {}.", applied, scope);
+                if (!maybeMore) {
+                    store.setDenseBackfillComplete(true);
+                }
+            } catch (RuntimeException e) {
+                PlayerEngine.LOGGER.warn("Memory embed: apply failed ({})", e.getClass().getSimpleName());
+            }
+        });
+
+        // Re-enqueue another pass if this one filled a whole batch (more may remain). The in-flight latch
+        // for this scope is released by the caller's finally, so re-adding is safe.
+        if (maybeMore) {
+            enqueueEmbedBackfill(controller, server, ownerBilling, scope);
+        }
+    }
+
+    /**
+     * One-time backfill / re-embed entry point (W8c) for the world-load path: kicks an embed pass that
+     * fills vectorless nodes and re-embeds nodes whose {@code vectorModel} no longer matches the frozen
+     * model. Idempotent + resumable (a node already carrying the frozen-token vector is skipped). Safe to
+     * call unconditionally — self-gates on patron/master-flag via the same gate as ingestion is not
+     * re-run here, so callers should only invoke it for scopes already known live (the integration pass
+     * wires this to world/companion load). No-op when the store is fully embedded.
+     */
+    public static void backfillDenseVectors(PlayerEngineController controller,
+                                            MinecraftServer server,
+                                            Player2PayerResolution.ApiBillingContext ownerBilling,
+                                            MemoryScope scope) {
+        enqueueEmbedBackfill(controller, server, ownerBilling, scope);
     }
 
     // -------------------------------------------------------------------------

@@ -77,6 +77,18 @@ public final class MemoryStore {
     /** Unknown top-level members of the loaded root, retained for forward-compat round-trip. */
     private JsonObject rootExtras;
 
+    /**
+     * W8e dense-vector sidecar (int8-quantized mirror of node vectors). Loaded from the {@code .bin} on
+     * construction (or empty when absent / version-mismatched), persisted alongside {@code graph.json}
+     * on the same tick-end flush cadence, and mutated only off-tick (embed compute) or on the flush.
+     * The graph JSON remains the source of truth; this is a fast-load optimization.
+     */
+    private volatile com.player2.playerengine.memory.dense.DenseIndexState denseIndex =
+            com.player2.playerengine.memory.dense.DenseIndexState.empty();
+
+    /** True once the {@code .bin} needs rewriting (a vector batch was applied since the last flush). */
+    private volatile boolean denseDirty = false;
+
     /** True once a mutation has occurred since the last flush. */
     private boolean dirty = false;
 
@@ -130,8 +142,28 @@ public final class MemoryStore {
                 : Player2NpcPersistencePaths.memoryGraphFileEntityFallback(worldRoot, scope.entityUuid(), scope.companionId());
         MemoryStore store = new MemoryStore(scope, file);
         store.load();
+        store.loadDenseIndex();
         store.publishSnapshot();
         return store;
+    }
+
+    /**
+     * Loads the {@code dense-index.bin} sidecar (W8e). On an absent / corrupt / version-token-mismatched
+     * file (a frozen-model/dim change), the index is discarded and left empty (the backfill/re-embed path
+     * refills it off-tick). Prunes any stale vectors for nodes no longer in the graph. Never throws.
+     */
+    private void loadDenseIndex() {
+        com.player2.playerengine.memory.dense.DenseIndexState loaded =
+                com.player2.playerengine.memory.dense.DenseIndexState.load(denseIndexPath());
+        if (loaded == null) {
+            // Absent / corrupt / model-identity mismatch → start empty; a re-embed/backfill refills it.
+            this.denseIndex = com.player2.playerengine.memory.dense.DenseIndexState.empty();
+            // A prior .bin in a different model space (if any) is superseded on the next save.
+            this.denseDirty = false;
+        } else {
+            loaded.pruneTo(graph);
+            this.denseIndex = loaded;
+        }
     }
 
     private void load() {
@@ -412,6 +444,107 @@ public final class MemoryStore {
     }
 
     // -------------------------------------------------------------------------
+    // Dense index (W8e) — sibling .bin next to graph.json
+    // -------------------------------------------------------------------------
+
+    /**
+     * The resolved {@code graph.json} path (package-private accessor). W8e derives the sibling
+     * {@code dense-index.bin} path from this ({@link #denseIndexPath()}) rather than a fresh
+     * {@code LevelResource} / world-path call (the known 1.20.1↔1.21.1 world-path divergence risk).
+     */
+    Path graphFile() {
+        return graphFile;
+    }
+
+    /**
+     * The {@code dense-index.bin} path, a sibling of {@code graph.json} in the same per-companion
+     * directory. Derived from {@link #graphFile()} — NEVER a fresh world-path call (parity-safe,
+     * pure common-module).
+     */
+    public Path denseIndexPath() {
+        return graphFile.resolveSibling(
+                com.player2.playerengine.memory.dense.DenseIndexState.FILE_NAME);
+    }
+
+    /** The live dense index (read-only view; retrieval reads it, ingest/backfill mutates it via helpers). */
+    public com.player2.playerengine.memory.dense.DenseIndexState denseIndex() {
+        return denseIndex;
+    }
+
+    /** True once the whole graph has been embedded into the current frozen model (backfill complete). */
+    public boolean denseBackfillComplete() {
+        return denseIndex.backfillComplete();
+    }
+
+    /**
+     * Enumerates the ids of nodes needing a (re-)embed for the CURRENT frozen model: any node whose
+     * {@code vectorModel} is not the frozen token OR that carries no vector. Called off-tick by the
+     * ingest/backfill driver (which has the controller/billing context to embed). Server-thread read of
+     * the live graph; returns a bounded batch of at most {@code max} ids.
+     *
+     * @param max the maximum ids to return (≤ {@code EmbeddingBatcher.MAX_BATCH} per pass)
+     */
+    public List<String> denseBackfillCandidates(int max) {
+        String frozen = com.player2.playerengine.memory.dense.EmbeddingModel.vectorModelToken();
+        List<String> out = new ArrayList<>();
+        for (MemoryNode n : graph.nodes()) {
+            if (max > 0 && out.size() >= max) break;
+            if (!n.hasVector() || !frozen.equals(n.vectorModel())) {
+                out.add(n.id());
+            }
+        }
+        return out;
+    }
+
+    /** The embeddable text for a node id (canonical name + type + a bounded content line), or null. */
+    public String denseEmbeddableText(String nodeId) {
+        MemoryNode n = graph.node(nodeId);
+        return n == null ? null : denseEmbeddableText(n);
+    }
+
+    /** The embeddable text for a node: canonical name + type + a bounded content line. */
+    public static String denseEmbeddableText(MemoryNode n) {
+        if (n == null) return "";
+        StringBuilder sb = new StringBuilder();
+        if (n.canonicalName() != null && !n.canonicalName().isBlank()) sb.append(n.canonicalName());
+        if (n.type() != null && !n.type().isBlank()) sb.append(" [").append(n.type()).append(']');
+        if (n.content() != null && !n.content().isBlank()) sb.append(": ").append(n.content());
+        return sb.toString().trim();
+    }
+
+    /**
+     * Applies a computed vector for a node id (off-tick embed result → graph + {@code .bin} mirror),
+     * stamping the frozen {@code vectorModel} on the node. Marks the store dirty (graph.json re-persist)
+     * and the dense index dirty (.bin re-write). Server thread (called inside {@code server.execute}).
+     * No-op when the node no longer exists or the vector dim is wrong.
+     */
+    public void applyNodeVector(String nodeId, float[] vector) {
+        if (nodeId == null || vector == null
+                || vector.length != com.player2.playerengine.memory.dense.EmbeddingModel.FROZEN_DIMS) {
+            return;
+        }
+        String frozen = com.player2.playerengine.memory.dense.EmbeddingModel.vectorModelToken();
+        // FORCE-REPLACE the vector (mergeNode's union keeps the existing vector, so it cannot re-embed
+        // into a new model space). setNodeVector preserves every other field and the node's edges.
+        if (graph.setNodeVector(nodeId, vector, frozen) == null) {
+            return; // node vanished between candidate scan and apply
+        }
+        denseIndex.put(nodeId, vector);
+        denseDirty = true;
+        markDirtyAndPublish();
+    }
+
+    /**
+     * Marks the whole-graph backfill complete/incomplete for the current frozen model (a
+     * {@code backfillComplete} marker avoids re-scanning a fully-embedded store every pass; it is cleared
+     * by a re-embed). Marks the dense index dirty so the marker persists on the next flush.
+     */
+    public void setDenseBackfillComplete(boolean done) {
+        denseIndex.setBackfillComplete(done);
+        denseDirty = true;
+    }
+
+    // -------------------------------------------------------------------------
     // Flush / clear lifecycle
     // -------------------------------------------------------------------------
 
@@ -423,16 +556,45 @@ public final class MemoryStore {
      * @param nowTick the current server game time (compaction recency basis)
      */
     public void flushIfDirty(long nowTick) {
-        if (!dirty) return;
-        dirty = false; // clear before writing; a concurrent mutation re-sets it for the next pass
+        if (dirty) {
+            dirty = false; // clear before writing; a concurrent mutation re-sets it for the next pass
+            try {
+                MemoryCompactor.compact(graph, nowTick);
+                denseIndex.pruneTo(graph); // drop vectors for nodes compaction removed
+                publishSnapshot();
+                persist();
+            } catch (Exception e) {
+                dirty = true; // retry next flush
+                PlayerEngine.LOGGER.warn("Memory: flush failed for {} (reason: {}); will retry.",
+                        scope, safeReason(e));
+            }
+        }
+        // W8e: persist the dense .bin off-tick (its write carries the off-tick guard). Snapshot on the
+        // server thread, then hand the copy to MEMORY_EXECUTOR so no .bin write runs on the game tick.
+        flushDenseIndexOffTick();
+    }
+
+    /**
+     * If the dense index changed since the last flush, snapshot it (server thread) and dispatch the
+     * atomic {@code .bin} write to {@code MEMORY_EXECUTOR} (never the game tick). Best-effort; a failed
+     * write leaves the mirror stale and it is simply rebuilt in-memory on next load.
+     */
+    private void flushDenseIndexOffTick() {
+        if (!denseDirty) return;
+        denseDirty = false;
+        final com.player2.playerengine.memory.dense.DenseIndexState snap = denseIndex.copy();
+        final Path path = denseIndexPath();
         try {
-            MemoryCompactor.compact(graph, nowTick);
-            publishSnapshot();
-            persist();
-        } catch (Exception e) {
-            dirty = true; // retry next flush
-            PlayerEngine.LOGGER.warn("Memory: flush failed for {} (reason: {}); will retry.",
-                    scope, safeReason(e));
+            com.player2.playerengine.memory.budget.MemoryLlmClient.MEMORY_EXECUTOR.submit(() -> {
+                try {
+                    snap.save(path); // off-tick: the write's assertOffTick guard passes here
+                } catch (RuntimeException e) {
+                    PlayerEngine.LOGGER.warn("Memory: dense-index.bin write failed ({}).",
+                            e.getClass().getSimpleName());
+                }
+            });
+        } catch (RuntimeException e) {
+            denseDirty = true; // could not schedule → retry next flush
         }
     }
 
@@ -449,6 +611,12 @@ public final class MemoryStore {
             PlayerEngine.LOGGER.warn("Memory: final flush failed for {} (reason: {}).",
                     scope, safeReason(e));
         }
+        // W8e: persist any pending dense .bin before we reset. Dispatch off-tick (MEMORY_EXECUTOR) rather
+        // than a synchronous save here — save() carries an assertOffTick() guard that would trip on this
+        // draining server thread, and the mirror is a pure optimization (a stale/absent .bin degrades to
+        // the in-memory rebuild + node.vector() scan on next load, never an incorrect result). Snapshot
+        // BEFORE resetInMemory() so the dispatched write sees the final vectors.
+        flushDenseIndexOffTick();
         resetInMemory();
         snapshot = new Snapshot(new MemoryGraph(), computeVersionToken(), "");
         dirty = false;

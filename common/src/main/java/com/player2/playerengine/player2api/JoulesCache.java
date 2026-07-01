@@ -65,6 +65,22 @@ public final class JoulesCache {
         return new JoulesSnapshot(joulesDisplay, patronTier != null ? patronTier : "", "probe");
     }
 
+    /**
+     * A conservative, ZERO-HEADROOM, NON-PATRON snapshot (does not touch the live cache).
+     *
+     * <p>Phase D W9 substitutes this at {@code MemoryGate.preflight} when the owner's Joules cache is
+     * empty (a fresh owner with no prior {@code /v1/joules} read) so the downstream
+     * {@link #checkJoulesThreshold} sees a real, non-null snapshot rather than the {@code null} it
+     * {@linkplain #checkJoulesThreshold fails OPEN on}. It reports {@code 0} display joules (so any
+     * positive hard/soft threshold is tripped → fail CLOSED, never fail open) and {@code patronTier}
+     * {@code ""} (so {@link JoulesSnapshot#isPatron()} is {@code false}). It exists ONLY to keep the
+     * Joules check from failing open; it never GRANTS headroom (the memory window cap is the real
+     * spend lever — see plan §B.4/N7).
+     */
+    public static JoulesSnapshot emptyNonPatron() {
+        return new JoulesSnapshot(0L, "", "");
+    }
+
     private static final ConcurrentHashMap<String, JoulesSnapshot> CACHE = new ConcurrentHashMap<>();
 
     /** Return the cached snapshot for the billing key, if present. */

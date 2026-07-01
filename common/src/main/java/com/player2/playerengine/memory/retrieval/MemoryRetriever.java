@@ -1,11 +1,15 @@
 package com.player2.playerengine.memory.retrieval;
 
+import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.memory.MemoryGraph;
 import com.player2.playerengine.memory.MemoryNode;
 import com.player2.playerengine.memory.MemoryScope;
 import com.player2.playerengine.memory.MemoryStore;
+import com.player2.playerengine.memory.dense.EmbeddingProvider;
+import com.player2.playerengine.memory.dense.EmbeddingResult;
 import com.player2.playerengine.memory.retrieval.EgoGraphTraversal.EgoNode;
 import com.player2.playerengine.memory.retrieval.MemoryRetrievalConfidence.BoundaryVerdict;
+import com.player2.playerengine.player2api.Player2PayerResolution;
 import com.player2.playerengine.retrieval.LexicalIndex;
 import com.player2.playerengine.retrieval.MinHashIndex;
 import com.player2.playerengine.retrieval.RetrievalHit;
@@ -24,9 +28,12 @@ import java.util.Set;
  * The zero-LLM memory-retrieval hot path (Phase D, W5). Occupies retriever slot
  * {@link RetrieverRegistry#SLOT_GRAPH} (= 2).
  *
- * <p>Per turn, deterministically and with <b>no Player2 call</b>:
+ * <p>Per turn, deterministically. Retrieval is on-device; the ONLY Player2 call is the optional W8d
+ * single turn-embedding (issued once, off-tick, when a {@link DenseContext} is wired — it degrades to
+ * null/no-dense on any failure, leaving the read path byte-identical to the pre-W8 build):
  * <ol>
- *   <li><b>Fast-exit</b> {@link BoundaryVerdict#STORE_ABSENT} if memory is not patron-enabled or the
+ *   <li><b>Fast-exit</b> {@link BoundaryVerdict#STORE_ABSENT} if memory is disabled (the caller's gate
+ *       flag {@code memoryEnabled} is false) or the
  *       published snapshot is empty — the caller then injects nothing (request byte-identical to a
  *       pre-W5 build).</li>
  *   <li><b>Deadline guard</b> ({@link #BUDGET_NANOS}, ~2 ms) — every stage degrades to a partial
@@ -94,8 +101,38 @@ public final class MemoryRetriever implements Retriever {
     /** The store this retriever reads (its published snapshot is used per call). */
     private final MemoryStore store;
 
+    /**
+     * Optional dense-retrieval context (W8d). When present, the full {@link #retrieve} path embeds the
+     * turn ONCE (off-tick — {@link EmbeddingProvider#embed} hard-guards the server thread) and threads
+     * the shared vector into both fusion sites; when null (the default, and every {@link Retriever}
+     * adapter path), dense is OFF and both sites are byte-identical to the pre-W8 path.
+     */
+    private final DenseContext denseContext;
+
     public MemoryRetriever(MemoryStore store) {
+        this(store, null);
+    }
+
+    /** Constructs a retriever with an optional dense-retrieval context (W8d); null = dense off. */
+    public MemoryRetriever(MemoryStore store, DenseContext denseContext) {
         this.store = store;
+        this.denseContext = denseContext;
+    }
+
+    /**
+     * The route/billing context needed to embed the turn on the read path (W8d, site 1). Supplied by the
+     * conversation-assembly caller (which already resolves the OWNER billing context for the patron gate)
+     * so the retriever can embed without re-resolving. Null anywhere → dense off (byte-identical read path).
+     *
+     * @param controller the companion controller (route context)
+     * @param billing    the OWNER's resolved billing context (never the prompter's)
+     */
+    public record DenseContext(PlayerEngineController controller,
+                               Player2PayerResolution.ApiBillingContext billing) {
+        /** True iff both the controller and a resolvable billing context are present. */
+        public boolean usable() {
+            return controller != null && billing != null && billing.billingKey() != null;
+        }
     }
 
     /**
@@ -106,16 +143,17 @@ public final class MemoryRetriever implements Retriever {
      * @param companionId      the companion id (scope; informational — store is already scoped)
      * @param currentGameTime  the server game time (recency basis)
      * @param thresholds       resolved config bounds (null → {@link Thresholds#defaults()})
-     * @param patronEnabled    W7's gate boolean — false short-circuits to STORE_ABSENT (zero cost)
+     * @param memoryEnabled    the caller's resolved memory-gate boolean (W9: patrons AND non-patrons,
+     *                         budget-governed) — false short-circuits to STORE_ABSENT (zero cost)
      */
     public MemoryRetrievalResult retrieve(String currentTurnText,
                                           java.util.UUID ownerUuid,
                                           String companionId,
                                           long currentGameTime,
                                           Thresholds thresholds,
-                                          boolean patronEnabled) {
+                                          boolean memoryEnabled) {
         return retrieve(currentTurnText, ownerUuid, companionId, null, null,
-                currentGameTime, thresholds, patronEnabled);
+                currentGameTime, thresholds, memoryEnabled);
     }
 
     /**
@@ -136,12 +174,12 @@ public final class MemoryRetriever implements Retriever {
                                           String ownerName,
                                           long currentGameTime,
                                           Thresholds thresholds,
-                                          boolean patronEnabled) {
+                                          boolean memoryEnabled) {
         final long deadline = System.nanoTime() + BUDGET_NANOS;
         Thresholds t = thresholds != null ? thresholds : Thresholds.defaults();
 
-        // (1) Fast-exit: disabled / non-patron / no store / empty snapshot → emit nothing.
-        if (!patronEnabled || store == null) {
+        // (1) Fast-exit: memory disabled (gate) / no store / empty snapshot → emit nothing.
+        if (!memoryEnabled || store == null) {
             return MemoryRetrievalResult.storeAbsent();
         }
         MemoryStore.Snapshot snap = store.snapshot();
@@ -153,8 +191,14 @@ public final class MemoryRetriever implements Retriever {
             return MemoryRetrievalResult.storeAbsent();
         }
 
-        // (3) Entity-link: rebuild the lexical+minhash index in-memory from the snapshot, then fuse.
-        List<String> seedIds = entityLinkSeeds(graph, currentTurnText, deadline);
+        // (2b) Embed the turn ONCE (W8d) — shared by BOTH fusion sites. Off-tick: EmbeddingProvider.embed
+        // hard-guards the server thread. Null when dense is off / unavailable / the embed degraded, in
+        // which case both fusion sites fall back to the pre-W8 behavior (byte-identical read path).
+        float[] turnVector = embedTurnOnce(currentTurnText);
+
+        // (3) Entity-link: rebuild the lexical+minhash index in-memory from the snapshot, then fuse
+        //     (with the dense seed list when the turn vector is present).
+        List<String> seedIds = entityLinkSeeds(graph, currentTurnText, deadline, turnVector);
         int seedMatches = seedIds.size();
         // Specific-seed signal: seeds BEYOND the always-present self/owner anchors, plus any matched
         // EVENT/episodic node. If this is 0, the turn only named the companion/owner and referenced
@@ -166,8 +210,9 @@ public final class MemoryRetriever implements Retriever {
                 graph, seedIds, currentGameTime, t.maxHops, t.maxEgoNodes,
                 t.decayBase, t.gameTimeUnit, deadline);
 
-        // (5) Episodic re-rank (three-list N-way RRF).
-        List<RetrievalHit> ranked = EpisodicReranker.rerank(ego, currentGameTime, t.topK);
+        // (5) Episodic re-rank (three-list N-way RRF). The SAME shared turn vector drives the relevance
+        //     list's cosine swap (W8d, site 2); null → graph-walk relevance (byte-identical).
+        List<RetrievalHit> ranked = EpisodicReranker.rerank(ego, currentGameTime, t.topK, turnVector);
 
         // (6) Confidence + (7) boundary verdict.
         double normTop = normalizedTopScore(ranked);
@@ -211,11 +256,13 @@ public final class MemoryRetriever implements Retriever {
         if (snap == null || snap.graph() == null || snap.graph().nodeCount() == 0) return List.of();
         long deadline = System.nanoTime() + BUDGET_NANOS;
         Thresholds t = Thresholds.defaults();
-        List<String> seeds = entityLinkSeeds(snap.graph(), goal, deadline);
+        // Adapter path: no dense (no billing context wired here). turnVector null → both fusion sites
+        // fall back to graph-walk / 2-way behavior, byte-identical to pre-W8.
+        List<String> seeds = entityLinkSeeds(snap.graph(), goal, deadline, null);
         List<EgoNode> ego = EgoGraphTraversal.traverse(
                 snap.graph(), seeds, latestTick(), t.maxHops, t.maxEgoNodes,
                 t.decayBase, t.gameTimeUnit, deadline);
-        return EpisodicReranker.rerank(ego, latestTick(), k > 0 ? k : t.topK);
+        return EpisodicReranker.rerank(ego, latestTick(), k > 0 ? k : t.topK, null);
     }
 
     @Override
@@ -241,7 +288,7 @@ public final class MemoryRetriever implements Retriever {
      * (≤500 docs) and is sub-ms in
      * practice — the deadline check before it is the cheap correctness floor.
      */
-    List<String> entityLinkSeeds(MemoryGraph graph, String turnText, long deadline) {
+    List<String> entityLinkSeeds(MemoryGraph graph, String turnText, long deadline, float[] turnVector) {
         if (graph == null || turnText == null || turnText.isBlank() || graph.nodeCount() == 0) {
             return List.of();
         }
@@ -259,14 +306,79 @@ public final class MemoryRetriever implements Retriever {
         List<RetrievalHit> bm25 = lexical.query(turnText, SEED_CANDIDATES);
         List<RetrievalHit> fuzzy = minHash.query(turnText, SEED_CANDIDATES);
 
-        // W1 RRF: list A → slot 0 (lexical), list B → slot 1 (minHash).
-        List<RetrievalHit> fused = RrfFusion.fuse(bm25, fuzzy, SEED_CANDIDATES, EpisodicReranker.RRF_K);
+        // W8d, site 1: dense seed list (empty when turnVector is null → fusion is byte-identical to the
+        // pre-W8 2-way fuse). Brute-force cosine over hasVector() nodes only (≤ MAX_NODES).
+        List<RetrievalHit> dense = denseCosineHits(graph, turnVector, SEED_CANDIDATES);
+
+        // N-way RRF: list 0 → lexical (slot 0), list 1 → minHash (slot 1), list 2 → dense. When `dense`
+        // is empty the fused seed set is IDENTICAL to today's 2-way fuse (true no-op when dense is off).
+        List<RetrievalHit> fused = RrfFusion.fuse(
+                List.of(bm25, fuzzy, dense), SEED_CANDIDATES, EpisodicReranker.RRF_K);
 
         Set<String> seeds = new LinkedHashSet<>();
         for (RetrievalHit hit : fused) {
             if (hit.id() != null) seeds.add(hit.id());
         }
         return new ArrayList<>(seeds);
+    }
+
+    /**
+     * Embeds the turn text ONCE for the full retrieve path (W8d). Returns null (dense off) when there is
+     * no dense context, embeddings are unavailable, or the embed degraded — every such case makes both
+     * fusion sites byte-identical to the pre-W8 read path. Off-tick: {@link EmbeddingProvider#embed}
+     * hard-guards the server thread (this method is only reached from the off-tick conversation-assembly
+     * path). Never throws — any failure degrades to null.
+     */
+    private float[] embedTurnOnce(String turnText) {
+        try {
+            if (denseContext == null || !denseContext.usable()
+                    || turnText == null || turnText.isBlank()
+                    || !EmbeddingProvider.isAvailable()) {
+                return null;
+            }
+            EmbeddingResult q = EmbeddingProvider.embed(
+                    List.of(turnText), denseContext.controller(), denseContext.billing());
+            if (q.ok() && q.vectors().length > 0) {
+                return q.vectors()[0]; // SHARED with the reranker — embed once per turn
+            }
+            // Degraded: bounded token already logged to console by the provider; dense stays off.
+            return null;
+        } catch (RuntimeException e) {
+            // Read-path embed must never break retrieval — degrade to lexical/MinHash/graph.
+            return null;
+        }
+    }
+
+    /**
+     * Brute-force cosine of {@code turnVector} against every {@code hasVector()} node in the snapshot
+     * (no ANN — ≤ {@link com.player2.playerengine.memory.MemoryCaps#MAX_NODES} nodes), returning up to
+     * {@code topK} node ids ranked by descending cosine as a dense seed list. Empty when
+     * {@code turnVector} is null (dense off) → the read path is byte-identical.
+     */
+    private List<RetrievalHit> denseCosineHits(MemoryGraph graph, float[] turnVector, int topK) {
+        if (graph == null || turnVector == null) {
+            return List.of();
+        }
+        // Use the store's loaded (int8-quantized) .bin mirror so retrieval consumes the persisted index
+        // rather than re-reading node.vector() from scratch. The cosineRankedIds helper already handles
+        // the frozen-model gating + fallback to node.vector() for nodes not yet mirrored in the .bin, so
+        // an empty/absent mirror still scans the snapshot's node vectors — a persisted mirror is an
+        // optimization, not a correctness dependency.
+        com.player2.playerengine.memory.dense.DenseIndexState index =
+                (store != null) ? store.denseIndex()
+                        : com.player2.playerengine.memory.dense.DenseIndexState.empty();
+        List<String> rankedIds = index.cosineRankedIds(graph, turnVector, topK);
+        if (rankedIds.isEmpty()) {
+            return List.of();
+        }
+        List<RetrievalHit> hits = new ArrayList<>(rankedIds.size());
+        int rank = 1;
+        for (String id : rankedIds) {
+            // Carried score is informational; RrfFusion attributes by list position (rank).
+            hits.add(new RetrievalHit(id, 1.0 / (EpisodicReranker.RRF_K + rank), new int[0]));
+            rank++;
+        }
+        return hits;
     }
 
     /**

@@ -507,7 +507,10 @@ public class AgentConversationData {
      * gate, and only on an {@code allowed} (patron + master-flag-on) decision performs the zero-LLM
      * graph retrieval over the companion's published snapshot. Non-patron / disabled / no store / empty
      * graph → {@link Optional#empty()} (request byte-identical to today). Never throws — any failure
-     * degrades to no memory block. No Player2 call happens here (retrieval is deterministic on-device).
+     * degrades to no memory block. Graph retrieval itself is deterministic on-device; the ONE Player2
+     * call this may make is the W8d single turn-embedding ({@code POST /v1/embeddings}, off-tick inside
+     * {@link com.player2.playerengine.memory.retrieval.MemoryRetriever}), which degrades to null (no
+     * dense) on any failure — the retrieval result is unchanged when the embed is unavailable.
      */
     private Optional<String> resolveMemoryBlock(Event.UserMessage lastUserMsgForRag) {
         try {
@@ -564,8 +567,14 @@ public class AgentConversationData {
                             cfg.getMemoryDecayBaseClamped(),
                             cfg.getMemoryGameTimeUnitClamped(),
                             cfg.getMemoryRetrievalTopKClamped());
+            // W8d: wire the dense-retrieval context so the full retrieve path embeds the turn ONCE
+            // (off-tick) and threads the shared vector into both fusion sites. The OWNER billing context
+            // (never the prompter's) is already resolved above for the patron gate; reuse it. When dense
+            // is off / unavailable / the embed degrades, both fusion sites are byte-identical to pre-W8.
             com.player2.playerengine.memory.retrieval.MemoryRetriever retriever =
-                    new com.player2.playerengine.memory.retrieval.MemoryRetriever(store);
+                    new com.player2.playerengine.memory.retrieval.MemoryRetriever(store,
+                            new com.player2.playerengine.memory.retrieval.MemoryRetriever.DenseContext(
+                                    mod, ownerBilling));
             // Pass the self/owner anchor names so the knowledge-boundary discriminator
             // (specificSeedMatches) can fire — without these, the 6-arg overload nulls both
             // anchors and the hallucination-boundary verdict override is inert.
