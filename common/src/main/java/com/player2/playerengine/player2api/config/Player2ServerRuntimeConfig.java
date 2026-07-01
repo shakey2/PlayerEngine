@@ -92,20 +92,6 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     private int memoryCallsPerWindow = 50;
     /** Memory-pipeline window length in minutes. Clamped [1, 1440]. */
     private int memoryWindowMinutes = 60;
-    /**
-     * W9: per-tier memory-pipeline call cap. With the patron wall gone (memory available to
-     * non-patrons, {@code masterplan/phase-d-w8-embeddings-build-plan.md} §B.4), the call-count window
-     * cap is the sole non-patron spend lever, and patrons get a HIGHER cap as a PERK (not a gate).
-     * These are the tier-specific caps; the exact numbers are an owner product-tuning decision (the
-     * plan wires the mechanism and recommends conservative non-patron defaults). Both clamped [0,
-     * 1000]. The legacy {@code memoryCallsPerWindow} above remains the tier-agnostic default the
-     * built {@code MemoryBudgetThresholds} path currently reads; the two fields below let a future
-     * tier-aware selection use a lower non-patron / higher patron ceiling without a re-architecture.
-     */
-    private int memoryCallsPerWindowNonPatron = 30;
-    /** W9: patron memory-pipeline call cap (perk — higher than non-patron). Clamped [0, 1000]. */
-    private int memoryCallsPerWindowPatron = 100;
-
     // --- Phase D: GraphRAG roleplay memory (W3/W4/W5/W6 tuning keys — integration pass) ---
     // Key NAMES + defaults below are a cross-branch parity contract (must be byte-identical on 1.21.1).
 
@@ -539,28 +525,6 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     /** Clamped to [0, 1000]. */
     public int getMemoryCallsPerWindowClamped() {
         int n = memoryCallsPerWindow;
-        if (n < 0) return 0;
-        if (n > 1000) return 1000;
-        return n;
-    }
-
-    public int getMemoryCallsPerWindowNonPatron() { return memoryCallsPerWindowNonPatron; }
-    public void setMemoryCallsPerWindowNonPatron(int v) { this.memoryCallsPerWindowNonPatron = v; }
-
-    /** Clamped to [0, 1000]. */
-    public int getMemoryCallsPerWindowNonPatronClamped() {
-        int n = memoryCallsPerWindowNonPatron;
-        if (n < 0) return 0;
-        if (n > 1000) return 1000;
-        return n;
-    }
-
-    public int getMemoryCallsPerWindowPatron() { return memoryCallsPerWindowPatron; }
-    public void setMemoryCallsPerWindowPatron(int v) { this.memoryCallsPerWindowPatron = v; }
-
-    /** Clamped to [0, 1000]. */
-    public int getMemoryCallsPerWindowPatronClamped() {
-        int n = memoryCallsPerWindowPatron;
         if (n < 0) return 0;
         if (n > 1000) return 1000;
         return n;

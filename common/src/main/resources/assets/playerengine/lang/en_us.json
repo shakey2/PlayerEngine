@@ -104,7 +104,6 @@
   "message.playerengine.budget.soft_limit_switch": "[PlayerEngine] AI budget soft limit reached. Switching to fallback profile: %s.",
   "message.playerengine.budget.insufficient_joules": "Insufficient Joules. Please top up your account at https://player2.game",
 
-  "message.playerengine.memory.embedding.auth_required": "Memory recall is limited right now — sign in to the Player2 app to restore full memory.",
   "message.playerengine.budget.reset_success": "Budget windows, Joules cache, and profile cache cleared.",
 
   "message.playerengine.budget.error.no_server": "No server.",
