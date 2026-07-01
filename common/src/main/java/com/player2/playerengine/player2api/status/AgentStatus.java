@@ -27,6 +27,7 @@ public class AgentStatus extends ObjectStatus {
                   String.format("%.2f/20", (float) mod.getBaritone().getEntityContext().hungerManager().getFoodLevel()))
             .add("saturation",
                   String.format("%.2f/20", mod.getBaritone().getEntityContext().hungerManager().getSaturationLevel()))
+            .add("isStarving", String.valueOf(mod.getFoodChain().isStarving()))
             .add("inventory", StatusUtils.getInventoryString(mod))
             .add("taskStatus", StatusUtils.getTaskStatusString(mod))
             .add("oxygenLevel", StatusUtils.getOxygenString(mod))

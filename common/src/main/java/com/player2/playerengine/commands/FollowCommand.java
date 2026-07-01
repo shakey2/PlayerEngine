@@ -49,6 +49,19 @@ public class FollowCommand extends Command {
                      + "follow until they confirm they are back");
                return;
             }
+            // If the follow was preempted by a survival-critical auto-eat / food-gathering task, this is
+            // a benign pause, not a failure. Tell the model the truthful reason so it can re-issue follow
+            // rather than reading a silent clean-finish. (No auto-resume: relies on the model re-issuing.)
+            if (mod.getStepExecutorAdapter() instanceof TaskStepExecutorAdapter adapter
+                  && adapter.getLastCompletedExecution()
+                        .map(e -> e.getState() == StepState.FAILED
+                              && e.getLastLogEntry().contains(StopReason.CANCELLED_SUPERSEDED_BY_SURVIVAL.name()))
+                        .orElse(false)) {
+               this.finishWithNote(
+                     "following paused because I had to stop and eat to survive — say follow again if "
+                     + "you want me to keep following");
+               return;
+            }
             this.finish();
          }
       );

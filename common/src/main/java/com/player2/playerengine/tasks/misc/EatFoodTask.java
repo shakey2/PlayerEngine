@@ -23,7 +23,7 @@ import net.minecraft.world.item.ItemStack;
  *  5. INTERRUPT — if stopped mid-use, call entity.stopUsingItem(); vanilla never reached
  *              completeUsingItem, so the item is NOT consumed and hunger is NOT refilled.
  */
-public class EatFoodTask extends Task {
+public class EatFoodTask extends Task implements com.player2.playerengine.tasks.base.SurvivalInterruptTask {
 
     // States
     private enum State { EQUIP, BEGIN_USE, WAIT, COMPLETE }

@@ -34,9 +34,11 @@ public class FoodChain extends SingleTaskChain {
    // WS8: starving-with-no-food notice fields.
    // Distinct from the auto-eat threshold — this threshold means the bot is genuinely starving.
    private static final int STARVING_FOOD_LEVEL = 6;
-   // 2-minute cooldown: this is a sustained idle state notice, not a per-tick degradation.
-   private static final long STARVING_NOTICE_INTERVAL_MS = 120_000L;
-   private long lastStarvingNoticeMs = 0L;
+   // Episode edge: true while the companion is currently in a starving-with-no-food episode. Used to
+   // edge-trigger the player report (rising) and a single past-tense episodic memory to the model
+   // (falling) — no present-tense notice is ever appended to permanent conversation history, and the
+   // model's live current-state knowledge comes from the transient AgentStatus.isStarving() flag.
+   private boolean wasStarving = false;
 
    public FoodChain(TaskRunner runner) {
       super(runner);
@@ -127,23 +129,25 @@ public class FoodChain extends SingleTaskChain {
                   this.stopEat(this.controller);
                }
 
-               // WS8: starving-with-no-food notice (egress-safe, cooldowned).
-               // Gate: hunger enabled, no food in inventory, and genuinely starving (food <= threshold).
-               // STARVING_FOOD_LEVEL is distinct from alwaysEatWhenBelowHunger — this fires only when
-               // the bot is critically low with nothing to eat.
-               boolean isStarving = this.controller.getBaritone().getEntityContext()
-                                        .hungerManager().getFoodLevel() <= STARVING_FOOD_LEVEL;
-               if (this.controller.getModSettings().isHungerEnabled() && !hasFood && isStarving) {
-                  long now = System.currentTimeMillis();
-                  if (now - this.lastStarvingNoticeMs >= STARVING_NOTICE_INTERVAL_MS) {
-                     this.lastStarvingNoticeMs = now;
-                     // Both strings are short, bounded, code-author-controlled literals —
-                     // no logs, no stack traces, no unbounded external data (DESIGN.md §3).
-                     AiConversationFeedback.enqueueInfo(this.controller,
-                         "You are starving: your own food level is critically low and you have no food in your inventory, so you cannot eat.");
-                     this.controller.reportAgenticProgress(Component.translatable("message.playerengine.food.starving"), true);
-                  }
+               // WS8 (revised): starving-with-no-food is now an EDGE-TRIGGERED episode, never a
+               // present-tense notice appended to permanent conversation history. The model reads the
+               // current state from the live, per-companion AgentStatus.isStarving() flag (rebuilt fresh
+               // every turn, never persisted, self-correcting the instant food recovers), so nothing
+               // present-tense can go stale or spam. Here we only detect episode edges. `hasFood` was
+               // just set for THIS companion at L112 in the same single-threaded pass — correct to read.
+               boolean isStarving = this.controller.getModSettings().isHungerEnabled() && !hasFood
+                     && this.controller.getBaritone().getEntityContext().hungerManager().getFoodLevel() <= STARVING_FOOD_LEVEL;
+               if (isStarving && !this.wasStarving) {
+                  // RISING edge: notify the player ONCE per episode (player-facing, keyed). No enqueueInfo
+                  // — the model learns the current state from the live status flag, not history.
+                  this.controller.reportAgenticProgress(Component.translatable("message.playerengine.food.starving"), true);
+               } else if (!isStarving && this.wasStarving) {
+                  // FALLING edge: one past-tense episodic memory to the MODEL only (raw English,
+                  // model-facing). Edge-triggered, so it structurally cannot spam and cannot go stale.
+                  AiConversationFeedback.enqueueInfo(this.controller,
+                      "Earlier you were starving with no food, but you have since recovered.");
                }
+               this.wasStarving = isStarving;
 
                // When the EatFoodTask is running, return a positive priority to stay active.
                // Eating is prioritized over collecting food — eat what we have first, then collect.
@@ -260,6 +264,23 @@ public class FoodChain extends SingleTaskChain {
 
    public boolean hasFood() {
       return hasFood;
+   }
+
+   /**
+    * Live, self-contained, PER-COMPANION starving check for the transient AgentStatus flag. Recomputes
+    * THIS companion's own inventory food via {@link #calculateFood} rather than reading the shared
+    * {@code private static hasFood} (which is last-writer-wins across all companions and only valid for
+    * the current companion during its own getPriority pass) — so a companion that has food can never
+    * report starving just because a sibling has none. Rebuilt every model turn into the throwaway status
+    * wrapper, so it self-corrects the instant food recovers and can never go stale.
+    */
+   public boolean isStarving() {
+      if (this.controller == null || !this.controller.getModSettings().isHungerEnabled()) {
+         return false;
+      }
+      int ownFoodScore = this.calculateFood(this.controller).getA();
+      int food = this.controller.getBaritone().getEntityContext().hungerManager().getFoodLevel();
+      return ownFoodScore <= 0 && food <= STARVING_FOOD_LEVEL;
    }
 
    public void shouldStop(boolean shouldStopInput) {
