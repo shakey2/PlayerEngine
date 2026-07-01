@@ -69,12 +69,15 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     // --- Phase D: GraphRAG roleplay memory (W7 — master gate + memory-pipeline windowed cap) ---
 
     /**
-     * Master off switch for the Phase D GraphRAG long-term memory pipeline. Default {@code false} —
-     * memory is disabled until explicitly enabled AND the companion owner is a confirmed patron
-     * (both must be true; the patron check is in {@code MemoryGate}). The later integration pass adds
-     * the W3/W4/W5/W6 tuning keys; W7 owns only this flag + the two window keys below.
+     * Master on/off switch for the Phase D GraphRAG long-term memory pipeline. Default {@code true}
+     * as of W9 — memory is the PRIMARY, free path and is available to NON-PATRON owners (see
+     * {@code masterplan/phase-d-w8-embeddings-build-plan.md} §B.2). This is now a plain feature
+     * on/off, NOT a patron gate: the patron wall is preserved only behind the manual-only
+     * {@code MemoryPatronFallback.MEMORY_PATRON_FALLBACK} toggle in {@code MemoryGate}. A server owner
+     * may still set this {@code false} to disable the whole memory engine. The later integration pass
+     * adds the W3/W4/W5/W6 tuning keys; W7 owns only this flag + the two window keys below.
      */
-    private boolean enableGraphRagMemory = false;
+    private boolean enableGraphRagMemory = true;
 
     /**
      * Master switch for companion mood roleplay (the model declares a mood change + the current mood is
@@ -89,6 +92,19 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     private int memoryCallsPerWindow = 50;
     /** Memory-pipeline window length in minutes. Clamped [1, 1440]. */
     private int memoryWindowMinutes = 60;
+    /**
+     * W9: per-tier memory-pipeline call cap. With the patron wall gone (memory available to
+     * non-patrons, {@code masterplan/phase-d-w8-embeddings-build-plan.md} §B.4), the call-count window
+     * cap is the sole non-patron spend lever, and patrons get a HIGHER cap as a PERK (not a gate).
+     * These are the tier-specific caps; the exact numbers are an owner product-tuning decision (the
+     * plan wires the mechanism and recommends conservative non-patron defaults). Both clamped [0,
+     * 1000]. The legacy {@code memoryCallsPerWindow} above remains the tier-agnostic default the
+     * built {@code MemoryBudgetThresholds} path currently reads; the two fields below let a future
+     * tier-aware selection use a lower non-patron / higher patron ceiling without a re-architecture.
+     */
+    private int memoryCallsPerWindowNonPatron = 30;
+    /** W9: patron memory-pipeline call cap (perk — higher than non-patron). Clamped [0, 1000]. */
+    private int memoryCallsPerWindowPatron = 100;
 
     // --- Phase D: GraphRAG roleplay memory (W3/W4/W5/W6 tuning keys — integration pass) ---
     // Key NAMES + defaults below are a cross-branch parity contract (must be byte-identical on 1.21.1).
@@ -523,6 +539,28 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     /** Clamped to [0, 1000]. */
     public int getMemoryCallsPerWindowClamped() {
         int n = memoryCallsPerWindow;
+        if (n < 0) return 0;
+        if (n > 1000) return 1000;
+        return n;
+    }
+
+    public int getMemoryCallsPerWindowNonPatron() { return memoryCallsPerWindowNonPatron; }
+    public void setMemoryCallsPerWindowNonPatron(int v) { this.memoryCallsPerWindowNonPatron = v; }
+
+    /** Clamped to [0, 1000]. */
+    public int getMemoryCallsPerWindowNonPatronClamped() {
+        int n = memoryCallsPerWindowNonPatron;
+        if (n < 0) return 0;
+        if (n > 1000) return 1000;
+        return n;
+    }
+
+    public int getMemoryCallsPerWindowPatron() { return memoryCallsPerWindowPatron; }
+    public void setMemoryCallsPerWindowPatron(int v) { this.memoryCallsPerWindowPatron = v; }
+
+    /** Clamped to [0, 1000]. */
+    public int getMemoryCallsPerWindowPatronClamped() {
+        int n = memoryCallsPerWindowPatron;
         if (n < 0) return 0;
         if (n > 1000) return 1000;
         return n;
