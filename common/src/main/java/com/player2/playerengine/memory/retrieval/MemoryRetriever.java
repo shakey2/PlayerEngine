@@ -6,7 +6,7 @@ import com.player2.playerengine.memory.MemoryNode;
 import com.player2.playerengine.memory.MemoryScope;
 import com.player2.playerengine.memory.MemoryStore;
 import com.player2.playerengine.memory.dense.EmbeddingProvider;
-import com.player2.playerengine.memory.dense.EmbeddingResult;
+import com.player2.playerengine.memory.dense.TurnEmbeddingCache;
 import com.player2.playerengine.memory.retrieval.EgoGraphTraversal.EgoNode;
 import com.player2.playerengine.memory.retrieval.MemoryRetrievalConfidence.BoundaryVerdict;
 import com.player2.playerengine.player2api.Player2PayerResolution;
@@ -323,11 +323,21 @@ public final class MemoryRetriever implements Retriever {
     }
 
     /**
-     * Embeds the turn text ONCE for the full retrieve path (W8d). Returns null (dense off) when there is
-     * no dense context, embeddings are unavailable, or the embed degraded — every such case makes both
-     * fusion sites byte-identical to the pre-W8 read path. Off-tick: {@link EmbeddingProvider#embed}
-     * hard-guards the server thread (this method is only reached from the off-tick conversation-assembly
-     * path). Never throws — any failure degrades to null.
+     * Resolves the shared turn-query vector for the full retrieve path (W8d), <b>off-tick-safe</b>.
+     *
+     * <p>Bug-1 fix (2026-07-01): the {@code retrieve} path runs <b>on the MC server tick thread</b> (it is
+     * called synchronously from {@code AgentConversationData.resolveMemoryBlock} during prompt assembly,
+     * before the async LLM dispatch). {@link EmbeddingProvider#embed} hard-guards the tick
+     * ({@code assertOffTick} throws on {@code "Server thread"}) — correctly, since a synchronous embed on
+     * the tick would stall the server on the network. Calling {@code embed} directly here therefore threw
+     * {@link IllegalStateException} <b>every turn</b>, was swallowed below, and dense never fired.
+     *
+     * <p>Instead this now consults the off-tick {@link TurnEmbeddingCache}: a non-blocking cache read that
+     * returns the vector on a warm hit (dense contributes this turn) and, on a miss, schedules the embed
+     * OFF-TICK on {@link com.player2.playerengine.memory.budget.MemoryLlmClient#MEMORY_EXECUTOR} and
+     * returns null (dense OFF this turn → both fusion sites byte-identical to the pre-W8 read path). A
+     * re-asked / rephrased query then hits warm on a later turn. The tick is <b>never</b> blocked and no
+     * data race is introduced (the cache is concurrent). Never throws — any failure degrades to null.
      */
     private float[] embedTurnOnce(String turnText) {
         try {
@@ -336,12 +346,14 @@ public final class MemoryRetriever implements Retriever {
                     || !EmbeddingProvider.isAvailable()) {
                 return null;
             }
-            EmbeddingResult q = EmbeddingProvider.embed(
-                    List.of(turnText), denseContext.controller(), denseContext.billing());
-            if (q.ok() && q.vectors().length > 0) {
-                return q.vectors()[0]; // SHARED with the reranker — embed once per turn
+            // Non-blocking read (tick-safe). Warm hit → dense fires this turn.
+            float[] cached = TurnEmbeddingCache.lookup(turnText);
+            if (cached != null) {
+                return cached;
             }
-            // Degraded: bounded token already logged to console by the provider; dense stays off.
+            // Miss → compute off-tick for a future turn; degrade to lexical/MinHash/graph THIS turn.
+            TurnEmbeddingCache.scheduleIfAbsent(
+                    turnText, denseContext.controller(), denseContext.billing());
             return null;
         } catch (RuntimeException e) {
             // Read-path embed must never break retrieval — degrade to lexical/MinHash/graph.
