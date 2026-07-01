@@ -35,7 +35,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
 
-public class CollectFoodTask extends Task {
+public class CollectFoodTask extends Task implements com.player2.playerengine.tasks.base.SurvivalInterruptTask {
    public static final CollectFoodTask.CookableFoodTarget[] COOKABLE_FOODS = new CollectFoodTask.CookableFoodTarget[]{
       new CollectFoodTask.CookableFoodTarget("beef", Cow.class),
       new CollectFoodTask.CookableFoodTarget("porkchop", Pig.class),

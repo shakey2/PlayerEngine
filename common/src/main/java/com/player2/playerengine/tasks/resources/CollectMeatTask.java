@@ -23,7 +23,7 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
-public class CollectMeatTask extends Task {
+public class CollectMeatTask extends Task implements com.player2.playerengine.tasks.base.SurvivalInterruptTask {
    public static final CollectFoodTask.CookableFoodTarget[] COOKABLE_MEATS = new CollectFoodTask.CookableFoodTarget[]{
       new CollectFoodTask.CookableFoodTarget("beef", Cow.class),
       new CollectFoodTask.CookableFoodTarget("porkchop", Pig.class),

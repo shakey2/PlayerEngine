@@ -20,6 +20,13 @@ public enum StopReason {
     CANCELLED_DISCONNECT,
     /** A new tracked step replaced the previous non-terminal execution. */
     CANCELLED_SUPERSEDED,
+    /**
+     * A survival-critical task (auto-eat / food gathering) preempted a running tracked task (e.g.
+     * follow). Benign/expected — not a FATAL unexpected stop. Its name contains {@code CANCELLED_}, so
+     * the raw state-machine chat dump at {@code TaskStepExecutorAdapter} is auto-suppressed, and the
+     * command layer routes the model a truthful "paused to eat, re-issue to continue" note.
+     */
+    CANCELLED_SUPERSEDED_BY_SURVIVAL,
     /** The companion was despawned/dismissed/removed while a task was running; the run cannot resume. */
     CANCELLED_RESPAWN,
     /**

@@ -5,6 +5,7 @@ import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.executor.StopReason;
 import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.player2api.AiConversationFeedback;
+import com.player2.playerengine.tasks.base.SurvivalInterruptTask;
 import com.player2.playerengine.tasks.base.Task;
 import java.util.Optional;
 import org.apache.logging.log4j.LogManager;
@@ -251,6 +252,13 @@ public class FollowPlayerTask extends Task {
       if (this.targetGone && this.controller != null
             && this.controller.getStepExecutorAdapter() instanceof TaskStepExecutorAdapter adapter) {
          adapter.armPendingChainCancel(StopReason.FOLLOWED_TARGET_GONE);
+      } else if (interruptTask instanceof SurvivalInterruptTask && this.controller != null
+            && this.controller.getStepExecutorAdapter() instanceof TaskStepExecutorAdapter adapter) {
+         // A survival-critical task (auto-eat / food gathering) preempted this follow. Benign, not
+         // FATAL: arm a graceful CANCELLED_SUPERSEDED_BY_SURVIVAL so the follow step's onFinish reads
+         // it and transitions FAILED with that reason instead of FATAL:task_stopped_without_finish.
+         // Its name contains "CANCELLED_", so the raw chat dump is suppressed by the adapter's gate.
+         adapter.armPendingChainCancel(StopReason.CANCELLED_SUPERSEDED_BY_SURVIVAL);
       }
    }
 
