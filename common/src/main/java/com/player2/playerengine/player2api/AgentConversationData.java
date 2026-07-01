@@ -551,10 +551,18 @@ public class AgentConversationData {
                     ? com.player2.playerengine.memory.MemoryScope.of(ownerUuid, companionId)
                     : com.player2.playerengine.memory.MemoryScope.ofEntityFallback(self.getUUID(), companionId);
 
+            // H1: backfill-on-load — fire once when this store is freshly loaded (peek == null before load).
+            // OWNER billing — matches ingestion caller convention.
+            boolean wasAbsent = com.player2.playerengine.memory.MemoryStoreRegistry.peek(scope) == null;
             com.player2.playerengine.memory.MemoryStore store =
                     com.player2.playerengine.memory.MemoryStoreRegistry.getOrLoad(server, scope);
             if (store == null) {
                 return Optional.empty();
+            }
+            if (wasAbsent) {
+                // EMBED_IN_FLIGHT guards against concurrent double-schedule for shared scopes.
+                com.player2.playerengine.memory.ingest.MemoryIngestionService.backfillDenseVectors(
+                        mod, server, ownerBilling, scope);
             }
 
             long gameTime = server.overworld() != null ? server.overworld().getGameTime() : 0L;
