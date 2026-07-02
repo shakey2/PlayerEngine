@@ -186,6 +186,8 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
      * {@code null} (= unset). Nullable on purpose — do not change to a primitive boolean.
      */
     private Boolean serverBotPermadeath = null;
+    /** Server-sided override for bot keepInventory. Default FOLLOW_GAMERULE = obey the world gamerule. */
+    private KeepInventoryOverride botKeepInventoryOverride = KeepInventoryOverride.FOLLOW_GAMERULE;
 
     public Player2PayerMode getPayerMode() {
         return payerMode == null ? Player2PayerMode.PROMPTER_PAYS : payerMode;
@@ -434,6 +436,14 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     /** Accepts {@code null} (unset) or an explicit {@code true}/{@code false} (Model A). */
     public void setServerBotPermadeath(Boolean serverBotPermadeath) {
         this.serverBotPermadeath = serverBotPermadeath;
+    }
+
+    public KeepInventoryOverride getBotKeepInventoryOverride() {
+        return botKeepInventoryOverride == null ? KeepInventoryOverride.FOLLOW_GAMERULE : botKeepInventoryOverride;
+    }
+
+    public void setBotKeepInventoryOverride(KeepInventoryOverride botKeepInventoryOverride) {
+        this.botKeepInventoryOverride = botKeepInventoryOverride == null ? KeepInventoryOverride.FOLLOW_GAMERULE : botKeepInventoryOverride;
     }
 
     // --- Phase B5 getters/setters ---
