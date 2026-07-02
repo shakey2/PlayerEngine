@@ -20,7 +20,6 @@ import com.player2.playerengine.automaton.api.utils.input.Input;
 import com.player2.playerengine.automaton.pathing.movement.MovementHelper;
 import java.util.Arrays;
 import java.util.function.Predicate;
-import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -137,9 +136,9 @@ public class PlaceBlockNearbyTask extends Task {
    }
 
    private BlockPos getCurrentlyLookingBlockPlace(PlayerEngineController mod) {
-      if (Minecraft.getInstance().hitResult instanceof BlockHitResult bhit) {
+      IEntityContext ctx = mod.getBaritone().getEntityContext();
+      if (ctx.objectMouseOver() instanceof BlockHitResult bhit) {
          BlockPos bpos = bhit.getBlockPos();
-         IEntityContext ctx = mod.getBaritone().getEntityContext();
          if (MovementHelper.canPlaceAgainst(ctx, bpos)) {
             BlockPos placePos = bhit.getBlockPos().offset(bhit.getDirection().getNormal());
             if (WorldHelper.isInsidePlayer(this.controller, placePos)) {
@@ -162,7 +161,7 @@ public class PlaceBlockNearbyTask extends Task {
    private boolean place(PlayerEngineController mod, BlockPos targetPlace) {
       if (!mod.getExtraBaritoneSettings().isInteractionPaused() && this.blockEquipped()) {
          mod.getInputControls().hold(Input.SNEAK);
-         HitResult mouseOver = Minecraft.getInstance().hitResult;
+         HitResult mouseOver = mod.getBaritone().getEntityContext().objectMouseOver();
          if (mouseOver != null && mouseOver.getType() == Type.BLOCK) {
             InteractionHand hand = InteractionHand.MAIN_HAND;
             if (((IInteractionManagerProvider)mod.getEntity())
