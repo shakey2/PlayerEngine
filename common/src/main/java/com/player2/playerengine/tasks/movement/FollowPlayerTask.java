@@ -191,11 +191,17 @@ public class FollowPlayerTask extends Task {
             LOGGER.info("[FollowDiag] DEFENDER-BREAKOFF: distToTarget={} maxChase={} (returning to leash)",
                   String.format("%.1f", distToTarget), defenderMaxChase);
             this.lastDefenderBrokeOff = true;
+            // Report the break-off exactly ONCE per episode (both audiences). Previously this call sat
+            // OUTSIDE this state-change guard, so while the companion stayed beyond the chase leash it
+            // re-fired every MIN_REPORT_INTERVAL_MS (~1.5s), spamming the player chat AND the model
+            // conversation (each repeat triggered a fresh LLM round). The guard already gates the
+            // [FollowDiag] log line above; the report belongs with it. Cleared in the branch below when
+            // the companion returns within followDistance so a genuine future break-off reports again.
+            this.reportDegradation(mod,
+                  "message.playerengine.follow.defender_broke_off",
+                  "follow(DEFENDER): I reached my max-chase limit from you while fighting, so I broke off "
+                        + "the chase and am returning to stay near you.");
          }
-         this.reportDegradation(mod,
-               "message.playerengine.follow.defender_broke_off",
-               "follow(DEFENDER): I reached my max-chase limit from you while fighting, so I broke off "
-                     + "the chase and am returning to stay near you.");
       } else if (this.lastDefenderBrokeOff && distToTarget <= this.followDistance) {
          // Back at the leash — clear the guard so the next genuine break-off reports again.
          this.lastDefenderBrokeOff = false;
