@@ -73,15 +73,16 @@ public class EntityTracker extends Tracker {
    }
 
    private void registerPlayerCollision(LivingEntity player, Entity entity) {
-      if (!this.entitiesCollidingWithPlayerAccumulator.containsKey(player)) {
-         this.entitiesCollidingWithPlayerAccumulator.put(player, new ArrayList<>());
+      synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+         this.entitiesCollidingWithPlayerAccumulator.computeIfAbsent(player, k -> new ArrayList<>()).add(entity);
       }
-
-      this.entitiesCollidingWithPlayerAccumulator.get(player).add(entity);
    }
 
    public boolean isCollidingWithPlayer(LivingEntity player, Entity entity) {
-      return this.entitiesCollidingWithPlayer.containsKey(player) && this.entitiesCollidingWithPlayer.get(player).contains(entity);
+      synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+         HashSet<Entity> collisions = this.entitiesCollidingWithPlayer.get(player);
+         return collisions != null && collisions.contains(entity);
+      }
    }
 
    public boolean isCollidingWithPlayer(Entity entity) {
