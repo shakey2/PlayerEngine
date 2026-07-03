@@ -17,6 +17,7 @@
 
 package com.player2.playerengine.automaton.command.defaults;
 
+import com.player2.playerengine.PlayerEngine;
 import com.player2.playerengine.automaton.api.IBaritone;
 import com.player2.playerengine.automaton.api.command.Command;
 import com.player2.playerengine.automaton.api.command.argument.IArgConsumer;
@@ -27,6 +28,7 @@ import java.util.List;
 import java.util.stream.Stream;
 import net.minecraft.client.Minecraft;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.network.chat.Component;
 
 public class RenderCommand extends Command {
    public RenderCommand() {
@@ -36,13 +38,23 @@ public class RenderCommand extends Command {
    @Override
    public void execute(CommandSourceStack source, String label, IArgConsumer args, IBaritone baritone) throws CommandException {
       args.requireMax(0);
-      Minecraft mc = Minecraft.getInstance();
-      mc.execute(() -> {
-         BetterBlockPos origin = baritone.getEntityContext().feetPos();
-         int renderDistance = ((Integer)mc.options.renderDistance().get() + 1) * 16;
-         mc.levelRenderer.setBlocksDirty(origin.x - renderDistance, 0, origin.z - renderDistance, origin.x + renderDistance, 255, origin.z + renderDistance);
-         this.logDirect(source, "Done");
-      });
+
+      try {
+         Minecraft mc = Minecraft.getInstance();
+         mc.execute(() -> {
+            BetterBlockPos origin = baritone.getEntityContext().feetPos();
+            int renderDistance = ((Integer)mc.options.renderDistance().get() + 1) * 16;
+            mc.levelRenderer.setBlocksDirty(origin.x - renderDistance, 0, origin.z - renderDistance, origin.x + renderDistance, 255, origin.z + renderDistance);
+            this.logDirect(source, "Done");
+         });
+      } catch (LinkageError t) {
+         // net.minecraft.client.Minecraft (class_310) is absent on a dedicated server, so the
+         // invokestatic above throws NoClassDefFoundError (a LinkageError). Narrow to LinkageError so
+         // genuine bugs in the client render path (NPE, etc.) are NOT mislabeled as a dedicated server.
+         // Tell the invoker (console/RCON/command block/op) so the no-op is visible, not silent.
+         this.logDirect(source, Component.translatable("message.playerengine.commands.render_client_only"));
+         PlayerEngine.LOGGER.error("Failed to render, is this a dedicated server?", t);
+      }
    }
 
    @Override

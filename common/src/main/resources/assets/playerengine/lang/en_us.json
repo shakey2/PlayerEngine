@@ -142,6 +142,7 @@
   "message.playerengine.commands.unknown_command": "Unknown command.",
   "message.playerengine.commands.version_no_npc": "[PlayerEngine] Automatone (spawn an Automaton NPC for full version/help).",
   "message.playerengine.commands.no_automaton_npc": "No Automaton NPC in any loaded dimension — Baritone commands need an in-world executor. Use /playerengine player2 ... for server billing/proxy settings.",
+  "message.playerengine.commands.render_client_only": "Rendering is a client-only feature — the render command has no effect on a dedicated server.",
   "message.playerengine.commands.console_help_header": "=== PlayerEngine (no in-world Automaton) ===",
   "message.playerengine.commands.console_help_admin": "Server admin: /playerengine player2 reload | payer prompter|owner | dedicated <true|false> | owner_offline_continue <true|false> | call_by_name <true|false>",
   "message.playerengine.commands.console_help_budget": "Budget: /playerengine player2 budget soft|hard|window|joules_soft|joules_hard|joules_refresh|fallback_profile|fallback_behavior|reset|status",
