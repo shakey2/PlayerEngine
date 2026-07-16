@@ -28,7 +28,7 @@ public final class CallByNameChatFilter {
         if (stripped == null) {
             return null;
         }
-        return new Event.UserMessage(stripped, msg.userName());
+        return msg.withMessage(stripped);
     }
 
     @Nullable

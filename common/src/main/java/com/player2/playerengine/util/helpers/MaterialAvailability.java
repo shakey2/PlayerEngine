@@ -4,6 +4,8 @@ import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.agentic.elliegps.EllieGPSCountingService;
 import com.player2.playerengine.agentic.elliegps.EllieGPSCountingServiceStub;
 import com.player2.playerengine.agentic.elliegps.EllieGPSWaypointCountingService;
+import com.player2.playerengine.agentic.elliegps.WaypointCountResult;
+import com.player2.playerengine.agentic.elliegps.WaypointSearchDegradationReporter;
 import com.player2.playerengine.util.Debug;
 import com.player2.playerengine.util.ItemTarget;
 import java.util.ArrayList;
@@ -34,8 +36,8 @@ import net.minecraft.world.phys.Vec3;
  *   <li><b>Source-routing axis</b> ({@link Breakdown#localSourceCapacity()} /
  *       {@link #localSourceCanCoverRemainder}) &mdash; answers <i>"mine the local source vs wander for
  *       a NEW one?"</i>, and only matters once the sufficiency axis says "still short". Counts the
- *       estimated yield of reachable nearby mineable blocks (resolved via the generic
- *       {@link Block#byItem(Item)}) plus the EllieGPS waypoint term (keyword-matched, snapshot-bearing,
+ *       estimated yield of reachable nearby mineable blocks (resolved through
+ *       {@link AutomaticMiningSourcePolicy}) plus the EllieGPS waypoint term (keyword-matched, snapshot-bearing,
  *       same-dimension, non-stale waypoints within radius; 0 when EllieGPS is disabled or no world is
  *       loaded).</li>
  * </ul>
@@ -119,7 +121,10 @@ public final class MaterialAvailability {
          ServerLevel world = mod.getWorld();
          String dimensionId = world != null
                ? world.dimension().location().toString() : null;
-         waypointTerm = real.estimateNearbyWaypointItems(target, origin, localSourceBlockRadius, dimensionId);
+         WaypointCountResult waypointResult = real.estimateNearbyWaypointItemsChecked(
+               target, origin, localSourceBlockRadius, dimensionId);
+         waypointTerm = waypointResult.count();
+         WaypointSearchDegradationReporter.reportOnce(mod, waypointResult.status());
          // Debug Breakdown line (runtime test #11's observable): emitted only when the real
          // service is installed, so it cannot spam per-tick. count() is called only on
          // source-routing decisions (localSourceCanCoverRemainder / reachableLocalSourceCoversNetDemand).
@@ -224,10 +229,11 @@ public final class MaterialAvailability {
 
    /**
     * SOURCE-ROUTING term only &mdash; estimated yield of reachable nearby mineable blocks. For each
-    * matched {@link Item} the source {@link Block} is resolved with the generic vanilla
-    * {@link Block#byItem(Item)} (plan decision 13: {@code BlockItem -> getBlock()}, else
-    * {@link Blocks#AIR}); {@code AIR} resolutions (loot-table drops such as {@code diamond}) are skipped
-    * and contribute 0 (visible degradation, covered later by a future loot-table resolver). Tracked
+    * matched {@link Item}, {@link AutomaticMiningSourcePolicy} applies the physical vanilla
+    * {@link Block#byItem(Item)} mapping while removing blocks that are forbidden as automatic
+    * acquisition sources (notably an already-placed {@link Blocks#CHEST}). {@link Blocks#AIR}
+    * resolutions (loot-table drops such as {@code diamond}) are skipped and contribute 0 (visible
+    * degradation, covered later by a future loot-table resolver). Tracked
     * locations come from {@link com.player2.playerengine.commands.BlockScanner#getKnownLocations},
     * post-filtered by {@code localSourceBlockRadius} and {@link WorldHelper#canReach} (the fast path:
     * blacklist + ocean-avoidance, NO {@code CalculationContext}; {@code canBreak} is reserved for the
@@ -245,9 +251,8 @@ public final class MaterialAvailability {
    private static int countMineableYield(PlayerEngineController mod, ItemTarget target, Vec3 origin,
                                          double localSourceBlockRadius) {
       List<Block> blocks = new ArrayList<>();
-      for (Item item : target.getMatches()) {
-         Block block = Block.byItem(item);
-         if (block != Blocks.AIR && !blocks.contains(block)) {
+      for (Block block : AutomaticMiningSourcePolicy.blocksFor(target.getMatches())) {
+         if (!blocks.contains(block)) {
             blocks.add(block);
          }
       }

@@ -5,6 +5,7 @@ import com.player2.playerengine.modintelligence.capability.CapabilityMap;
 import com.player2.playerengine.modintelligence.ingest.ModIntelligencePaths;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -14,6 +15,14 @@ public final class CapabilityEnrichmentQueue {
     private CapabilityEnrichmentQueue() {}
 
     public static List<CapabilityMap> loadQueued() {
+        try {
+            return loadQueuedChecked();
+        } catch (IOException ignored) {
+            return new ArrayList<>();
+        }
+    }
+
+    public static List<CapabilityMap> loadQueuedChecked() throws IOException {
         List<CapabilityMap> out = new ArrayList<>();
         if (!ModIntelligencePaths.enrichmentQueueFile().exists()) {
             return out;
@@ -29,13 +38,18 @@ public final class CapabilityEnrichmentQueue {
                     out.add(map);
                 }
             }
-        } catch (Exception ignored) {
+        } catch (RuntimeException e) {
+            throw new IOException("Invalid enrichment queue data", e);
         }
         return out;
     }
 
     public static int countQueuedLines() {
         return loadQueued().size();
+    }
+
+    public static int countQueuedLinesChecked() throws IOException {
+        return loadQueuedChecked().size();
     }
 
     /** Cumulative enrichment attempt failures logged to {@code enrichment_failures.jsonl}. */
@@ -59,9 +73,7 @@ public final class CapabilityEnrichmentQueue {
 
     public static void saveQueued(List<CapabilityMap> maps) throws java.io.IOException {
         if (maps == null || maps.isEmpty()) {
-            if (ModIntelligencePaths.enrichmentQueueFile().exists()) {
-                ModIntelligencePaths.enrichmentQueueFile().delete();
-            }
+            Files.deleteIfExists(ModIntelligencePaths.enrichmentQueueFile().toPath());
             return;
         }
         com.player2.playerengine.modintelligence.ingest.CapabilityStoreWriter.writeJsonl(

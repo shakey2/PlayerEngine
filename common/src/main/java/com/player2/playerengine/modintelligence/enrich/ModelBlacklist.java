@@ -23,6 +23,7 @@ public final class ModelBlacklist {
             new ModelBlacklistSnapshot(Set.of(), true, null, false);
 
     private static volatile ModelBlacklistSnapshot batchSnapshot = EMPTY_VALID;
+    private static long batchGeneration = Long.MIN_VALUE;
     private static volatile boolean loggedMissingModelOnce;
 
     private ModelBlacklist() {}
@@ -89,11 +90,21 @@ public final class ModelBlacklist {
                 !models.isEmpty());
     }
 
-    public static void setBatchSnapshot(ModelBlacklistSnapshot snapshot) {
+    public static synchronized void setBatchSnapshot(long generation, ModelBlacklistSnapshot snapshot) {
+        batchGeneration = generation;
         batchSnapshot = snapshot == null ? EMPTY_VALID : snapshot;
+        loggedMissingModelOnce = false;
     }
 
-    public static void clearBatchSnapshot() {
+    public static synchronized void clearBatchSnapshot(long generation) {
+        if (batchGeneration != generation) {
+            return;
+        }
+        clearBatchSnapshot();
+    }
+
+    public static synchronized void clearBatchSnapshot() {
+        batchGeneration = Long.MIN_VALUE;
         batchSnapshot = EMPTY_VALID;
         loggedMissingModelOnce = false;
     }

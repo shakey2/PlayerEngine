@@ -35,8 +35,9 @@ public class LivingEntityHungerManager {
    private int prevFoodLevel = 20;
 
    // WS1 gate fields — pushed from AutomatoneEntity.tick() via setters before each update().
-   // Defaulting to true preserves existing behaviour until the settings push is wired.
-   private boolean hungerEnabled = true;
+   // Defaulting to false keeps standalone/initialization ticks safe; the controller pushes the
+   // configured value before normal companion ticks.
+   private boolean hungerEnabled = false;
    private boolean deathByHungerMatchesDifficulty = true;
 
    public void setHungerEnabled(boolean hungerEnabled) {

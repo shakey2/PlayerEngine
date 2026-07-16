@@ -295,6 +295,7 @@ public final class MemoryRetriever implements Retriever {
         if (System.nanoTime() >= deadline) {
             return List.of(); // tick budget already spent before entity-link → seed nothing
         }
+        String queryText = normalizeQueryText(turnText);
         List<ToolDocument> docs = new ArrayList<>(graph.nodeCount());
         for (MemoryNode n : graph.nodes()) {
             docs.add(toDocument(n));
@@ -303,8 +304,8 @@ public final class MemoryRetriever implements Retriever {
         LexicalIndex lexical = LexicalIndex.build(docs);
         MinHashIndex minHash = MinHashIndex.build(docs);
 
-        List<RetrievalHit> bm25 = lexical.query(turnText, SEED_CANDIDATES);
-        List<RetrievalHit> fuzzy = minHash.query(turnText, SEED_CANDIDATES);
+        List<RetrievalHit> bm25 = lexical.query(queryText, SEED_CANDIDATES);
+        List<RetrievalHit> fuzzy = minHash.query(queryText, SEED_CANDIDATES);
 
         // W8d, site 1: dense seed list (empty when turnVector is null → fusion is byte-identical to the
         // pre-W8 2-way fuse). Brute-force cosine over hasVector() nodes only (≤ MAX_NODES).
@@ -391,6 +392,20 @@ public final class MemoryRetriever implements Retriever {
             rank++;
         }
         return hits;
+    }
+
+    static String normalizeQueryText(String turnText) {
+        if (turnText == null || turnText.isBlank()) {
+            return "";
+        }
+        String normalized = turnText;
+        normalized = normalized.replaceAll("(?i)\\bfavourite\\b", "favorite");
+        normalized = normalized.replaceAll("(?i)\\bfavourites\\b", "favorites");
+        normalized = normalized.replaceAll("(?i)\\bcolour\\b", "color");
+        normalized = normalized.replaceAll("(?i)\\bcolours\\b", "colors");
+        normalized = normalized.replaceAll("(?i)\\bvideogames\\b", "video games");
+        normalized = normalized.replaceAll("(?i)\\bvideogame\\b", "video game");
+        return normalized;
     }
 
     /**

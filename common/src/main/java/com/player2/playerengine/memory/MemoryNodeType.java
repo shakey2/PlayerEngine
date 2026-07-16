@@ -20,6 +20,10 @@ public enum MemoryNodeType {
     EVENT,
     FACTION,
     ITEM,
+    /** Durable atomic biographical/world fact, distinct from temporary conversation history. */
+    FACT,
+    /** Durable owner/player preference such as favorite color, food, game, or dislikes. */
+    PREFERENCE,
     /** Self-authored reflection node (W6); the relation {@code reflected_about} points at it. */
     REFLECTION;
 

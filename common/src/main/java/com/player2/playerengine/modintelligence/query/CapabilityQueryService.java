@@ -11,7 +11,9 @@ import com.player2.playerengine.retrieval.RetrievalHit;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -23,10 +25,16 @@ public final class CapabilityQueryService {
     }
 
     public List<CapabilityHit> query(CapabilityQuery query, int topK) {
+        Map<String, CapabilityMap> byDocumentId = new HashMap<>();
+        synchronized (store) {
+            for (CapabilityMap map : store.getActiveMaps().values()) {
+                byDocumentId.put(map.documentId(), map);
+            }
+        }
         List<RetrievalHit> raw = CapabilityIndex.getActive().search(query.getText(), topK * 3);
         List<CapabilityHit> hits = new ArrayList<>();
         for (RetrievalHit rh : raw) {
-            CapabilityMap map = findMapByDocumentId(rh.toolId());
+            CapabilityMap map = byDocumentId.get(rh.toolId());
             if (map == null) {
                 continue;
             }
@@ -42,20 +50,13 @@ public final class CapabilityQueryService {
     }
 
     public Optional<CapabilityMap> get(CapabilitySubjectKind kind, String subjectId) {
-        return Optional.ofNullable(store.get(kind.name() + "|" + subjectId));
+        synchronized (store) {
+            return Optional.ofNullable(store.get(kind.name() + "|" + subjectId));
+        }
     }
 
     public ModIntelligenceStatus status() {
         return com.player2.playerengine.modintelligence.ModIntelligenceService.statusFromStore(store);
-    }
-
-    private CapabilityMap findMapByDocumentId(String docId) {
-        for (CapabilityMap map : store.getActiveMaps().values()) {
-            if (map.documentId().equals(docId)) {
-                return map;
-            }
-        }
-        return null;
     }
 
     private static boolean passesFilters(CapabilityMap map, CapabilityQuery query) {

@@ -227,6 +227,8 @@ public final class Player2NpcPersistencePaths {
 
     /** Filename for a companion's persisted current {@code CompanionMood}. */
     public static final String MOOD_FILE_NAME = "mood.json";
+    /** Filename for a companion's player-authored additional prompt. */
+    public static final String ADDITIONAL_PROMPT_FILE_NAME = "additional_prompt.txt";
 
     /**
      * Owner-resolved per-companion mood file:
@@ -244,6 +246,21 @@ public final class Player2NpcPersistencePaths {
 
     public static Path moodFile(MinecraftServer server, UUID ownerUuid, String characterId) {
         return moodFile(server.getWorldPath(LevelResource.ROOT), ownerUuid, characterId);
+    }
+
+    /**
+     * Owner-resolved per-companion additional prompt file:
+     * {@code <worldRoot>/player2npc/persistentdata/owners/<ownerUuid>/<characterId>/additional_prompt.txt}.
+     */
+    public static Path additionalPromptFile(Path worldRoot, UUID ownerUuid, String characterId) {
+        return ownersRoot(worldRoot)
+                .resolve(ownerUuid.toString())
+                .resolve(characterId)
+                .resolve(ADDITIONAL_PROMPT_FILE_NAME);
+    }
+
+    public static Path additionalPromptFile(MinecraftServer server, UUID ownerUuid, String characterId) {
+        return additionalPromptFile(server.getWorldPath(LevelResource.ROOT), ownerUuid, characterId);
     }
 
     // -------------------------------------------------------------------------

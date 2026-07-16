@@ -184,7 +184,7 @@ public final class ToolAcquisitionTask extends Task {
             Vec3 origin = this.controller.getPlayer().position();
             String dimensionId = dimensionId();
             List<BlockPos> coords = MarkedChestToolLocator.candidateCoordinates(
-                    pick, origin, params.radius(), dimensionId);
+                    this.controller, pick, origin, params.radius(), dimensionId);
             for (BlockPos pos : coords) {
                 if (!triedContainers.contains(pos)) {
                     markedCandidates.add(pos);

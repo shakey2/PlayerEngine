@@ -7,6 +7,9 @@ import com.player2.playerengine.agentic.steps.MineBlockStepFactory;
 import com.player2.playerengine.agentic.steps.ResolveStorageChestStepFactory;
 import com.player2.playerengine.agentic.steps.SmeltStepFactory;
 import com.player2.playerengine.agentic.steps.SmithStepFactory;
+import com.player2.playerengine.agentic.steps.SetupFarmStepFactory;
+import com.player2.playerengine.agentic.steps.HarvestFarmStepFactory;
+import com.player2.playerengine.agentic.steps.PlantFarmStepFactory;
 import com.player2.playerengine.tasks.base.Task;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -24,6 +27,9 @@ public final class AgenticStepFactoryRegistry {
         register(AgenticSchemas.STEP_SMELT_ITEMS, new SmeltStepFactory());
         register(AgenticSchemas.STEP_SMITH_ITEMS, new SmithStepFactory());
         register(AgenticSchemas.STEP_MINE_BLOCK, new MineBlockStepFactory());
+        register(AgenticSchemas.STEP_SETUP_FARM, new SetupFarmStepFactory());
+        register(AgenticSchemas.STEP_HARVEST_FARM, new HarvestFarmStepFactory());
+        register(AgenticSchemas.STEP_PLANT_FARM, new PlantFarmStepFactory());
     }
 
     public void register(String kind, AgenticStepFactory factory) {

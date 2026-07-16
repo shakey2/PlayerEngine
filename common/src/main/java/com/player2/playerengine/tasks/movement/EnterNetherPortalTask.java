@@ -67,7 +67,6 @@ public class EnterNetherPortalTask extends Task {
             mod.getBaritone().getExploreProcess().onLostControl();
             mod.getBaritone().getCustomGoalProcess().onLostControl();
             mod.getBaritone().getMineProcess().onLostControl();
-            mod.getBaritone().getFarmProcess().onLostControl();
             mod.getBaritone().getGetToBlockProcess();
             mod.getBaritone().getBuilderProcess();
             mod.getBaritone().getFollowProcess();

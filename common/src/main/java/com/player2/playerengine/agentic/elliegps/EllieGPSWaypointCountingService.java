@@ -2,7 +2,6 @@ package com.player2.playerengine.agentic.elliegps;
 
 import com.player2.playerengine.PlayerEngine;
 import com.player2.playerengine.containeraccess.ItemCount;
-import com.player2.playerengine.retrieval.RetrievalHit;
 import com.player2.playerengine.util.ItemTarget;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
@@ -11,10 +10,11 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
- * Real EllieGPS counting service backed by the {@link EllieGPSWaypointIndex} and
- * {@link EllieGPSStore} (Part C5, WS2).
+ * Real EllieGPS counting service backed by structured {@link WaypointSearchService} results and
+ * {@link EllieGPSStore} inventory snapshots (Part C5, WS2).
  *
  * <p><b>Decision 11 semantics (pinned):</b>
  * <ul>
@@ -37,8 +37,9 @@ import java.util.List;
  * {@code setWaypointSource}. Never reversed mid-run; the {@code ellieGpsEnabled} toggle is
  * enforced per-call inside {@code MaterialAvailability.count()}.
  *
- * <p><b>Query path never blocks, never throws, never touches disk or network.</b> All reads
- * are against {@code volatile} immutable in-memory state.
+ * <p><b>The query path never throws or performs network/model work.</b> Relevance lookup may make
+ * one synchronous attempt to repair the derived index before using its deterministic in-memory
+ * fallback; exact item counts always come from authoritative snapshot data.
  */
 public final class EllieGPSWaypointCountingService implements EllieGPSCountingService {
 
@@ -77,8 +78,8 @@ public final class EllieGPSWaypointCountingService implements EllieGPSCountingSe
      * <ul>
      *   <li>{@code dimensionId} is null or blank (conservative default);</li>
      *   <li>No world is loaded (store is null);</li>
-     *   <li>The index is not loaded or the keyword query yields no candidates (an absent or
-     *       failed index degrades to 0 — never a full-store fallback scan);</li>
+     *   <li>The bounded structured search yields no inventory candidates or exceeds its hard
+     *       authoritative-record cap;</li>
      *   <li>No waypoint in the store matches the dimension, is non-stale, has a snapshot, and
      *       is within {@code radiusBlocks} of {@code origin};</li>
      *   <li>Any exception is caught.</li>
@@ -93,44 +94,61 @@ public final class EllieGPSWaypointCountingService implements EllieGPSCountingSe
      */
     public int estimateNearbyWaypointItems(
             ItemTarget target, Vec3 origin, double radiusBlocks, String dimensionId) {
+        return estimateNearbyWaypointItemsChecked(target, origin, radiusBlocks, dimensionId).count();
+    }
+
+    /**
+     * Checked variant of the dimension-aware count. The count remains conservative and
+     * non-negative, while {@link WaypointCountResult#status()} lets internal consumers surface
+     * bounded-search degradation instead of silently treating it as an ordinary zero.
+     */
+    public WaypointCountResult estimateNearbyWaypointItemsChecked(
+            ItemTarget target, Vec3 origin, double radiusBlocks, String dimensionId) {
+        WaypointSearchStatus status = WaypointSearchStatus.INDEXED;
         try {
-            if (dimensionId == null || dimensionId.isBlank()) {
-                return 0;
+            if (dimensionId == null || dimensionId.isBlank() || origin == null) {
+                return new WaypointCountResult(
+                        0, WaypointSearchStatus.FAILED_SEARCH_ERROR);
             }
 
             EllieGPSStore store = EllieGPSStore.get();
             if (store == null) {
-                return 0;
+                return new WaypointCountResult(
+                        0, WaypointSearchStatus.FAILED_STORE_UNAVAILABLE);
             }
 
             // Build the set of target registry IDs for exact-identity matching.
             List<String> targetRegistryIds = buildRegistryIds(target);
             if (targetRegistryIds.isEmpty()) {
-                return 0;
+                return new WaypointCountResult(0, status);
             }
 
-            // Use the index for keyword-based candidate retrieval. The index query returns
-            // waypoint ids; we then apply all required filters (Decision 11).
-            // No index, no index hits, or an index failure all mean an EMPTY candidate set,
-            // which is term 0 — never a full-store fallback scan (Decision 11 pins the chain
-            // as index-query-first; an absent index degrades to 0, it does not widen).
-            EllieGPSWaypointIndex index = EllieGPSWaypointIndex.getCurrent();
-            List<String> candidateIds = getCandidateIds(index, target, targetRegistryIds);
-            if (candidateIds.isEmpty()) {
-                return 0;
+            // Request the complete bounded inventory candidate corpus. Exact item and radius
+            // checks remain below, after structured type/dimension/stale filtering.
+            String query = buildSearchQuery(targetRegistryIds);
+            if (query.isEmpty()) {
+                return new WaypointCountResult(0, status);
             }
 
-            // Build a lookup set from the published snapshot for lock-free iteration.
-            List<WaypointRecord> published = store.publishedRecords();
+            WaypointSearchResult search = WaypointSearchService.find(
+                    query,
+                    dimensionId,
+                    Set.of(WaypointTypes.INVENTORY),
+                    false,
+                    WaypointSearchOrder.RELEVANCE,
+                    null,
+                    WaypointSearchService.MAX_AUTHORITATIVE_RECORDS);
+            status = search.status();
+            if (status == WaypointSearchStatus.FAILED_SCAN_LIMIT
+                    || status == WaypointSearchStatus.FAILED_STORE_UNAVAILABLE
+                    || status == WaypointSearchStatus.FAILED_SEARCH_ERROR) {
+                return new WaypointCountResult(0, status);
+            }
 
             double radiusSq = radiusBlocks * radiusBlocks;
-            int total = 0;
+            long total = 0;
 
-            for (WaypointRecord record : published) {
-                // Filter: must be in candidate set (keyword-matched)
-                if (!candidateIds.contains(record.id)) {
-                    continue;
-                }
+            for (WaypointRecord record : search.records()) {
                 // Filter: inventory type
                 if (!WaypointTypes.INVENTORY.equals(record.type)) {
                     continue;
@@ -155,17 +173,19 @@ public final class EllieGPSWaypointCountingService implements EllieGPSCountingSe
                 // Sum exact-identity matches from the snapshot
                 if (inv.snapshot.items != null) {
                     for (ItemCount ic : inv.snapshot.items) {
-                        if (ic != null && targetRegistryIds.contains(ic.registryId())) {
-                            total += ic.count();
+                        if (ic != null && ic.count() > 0
+                                && targetRegistryIds.contains(ic.registryId())) {
+                            total = Math.min(Integer.MAX_VALUE, total + ic.count());
                         }
                     }
                 }
             }
 
-            return total;
+            return new WaypointCountResult((int) total, status);
         } catch (Exception e) {
             PlayerEngine.LOGGER.warn("EllieGPS counting: estimateNearbyWaypointItems failed: {}", e.getMessage());
-            return 0;
+            return new WaypointCountResult(
+                    0, WaypointSearchStatus.FAILED_SEARCH_ERROR);
         }
     }
 
@@ -196,37 +216,14 @@ public final class EllieGPSWaypointCountingService implements EllieGPSCountingSe
         return ids;
     }
 
-    /**
-     * Maps the target's items to deterministic categorizer keywords
-     * ({@link WaypointItemCategorizer}, per Decision 11: "map the ItemTarget's items to
-     * categorizer keywords, query the in-memory index") and queries the index for candidate
-     * waypoint ids.
-     *
-     * <p>If the index is null (not yet loaded), the keyword mapping is empty, or the query
-     * returns no hits, returns an empty list — the caller returns 0 (no candidates means
-     * term 0; the keyword pre-filter is never bypassed).
-     */
-    private static List<String> getCandidateIds(
-            EllieGPSWaypointIndex index, ItemTarget target, List<String> registryIds) {
-        if (index == null) return List.of();
-        // Map registry ids to categorizer keywords (categories + item-name tokens), the same
-        // deterministic vocabulary the waypoint records were indexed under (Decision 6/11).
+    /** Maps target registry IDs to the deterministic vocabulary used by waypoint documents. */
+    private static String buildSearchQuery(List<String> registryIds) {
         List<ItemCount> asCounts = new ArrayList<>(registryIds.size());
         for (String rid : registryIds) {
             asCounts.add(new ItemCount(rid, 1));
         }
         List<String> keywords = WaypointItemCategorizer.categorize(asCounts);
-        String query = String.join(" ", keywords).trim();
-        if (query.isEmpty()) return List.of();
-
-        List<RetrievalHit> hits = index.query(query, 10);
-        if (hits.isEmpty()) return List.of();
-
-        List<String> ids = new ArrayList<>(hits.size());
-        for (RetrievalHit hit : hits) {
-            ids.add(hit.toolId());
-        }
-        return ids;
+        return String.join(" ", keywords).trim();
     }
 
     /**

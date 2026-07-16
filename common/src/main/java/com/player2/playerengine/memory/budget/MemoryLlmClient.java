@@ -97,14 +97,11 @@ public final class MemoryLlmClient {
         }
 
         JsonObject requestBody = new JsonObject();
-        JsonArray messages = new JsonArray();
-        // ENFORCED egress cap (DESIGN.md §3): apply the per-message log-egress cap to EVERY history
-        // element unconditionally — this is the single memory-pipeline enforcement point; callers are
-        // never trusted to have capped. (Mirror ModIntelligenceEnrichmentClient.java:87-89.)
-        for (JsonObject msg : history.getListJSON()) {
-            messages.add(LogEgressGuard.cappedMessage(msg));
-        }
+        // ENFORCED egress cap (DESIGN.md §3): apply the whole-request cap at the memory-pipeline edge;
+        // callers are never trusted to have capped. (Mirror ModIntelligenceEnrichmentClient.java.)
+        JsonArray messages = LogEgressGuard.cappedMessages(history.getListJSON(), "MemoryLlmClient.complete");
         requestBody.add("messages", messages);
+        LogEgressGuard.applyChatCompletionRequestCaps(requestBody, "MemoryLlmClient.complete");
         JsonObject responseFormat = new JsonObject();
         responseFormat.addProperty("type", "json_object");
         requestBody.add("response_format", responseFormat);

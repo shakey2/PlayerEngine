@@ -33,12 +33,11 @@ public class FoodChain extends SingleTaskChain {
 
    // WS8: starving-with-no-food notice fields.
    // Distinct from the auto-eat threshold — this threshold means the bot is genuinely starving.
-   private static final int STARVING_FOOD_LEVEL = 6;
-   // Episode edge: true while the companion is currently in a starving-with-no-food episode. Used to
-   // edge-trigger the player report (rising) and a single past-tense episodic memory to the model
-   // (falling) — no present-tense notice is ever appended to permanent conversation history, and the
-   // model's live current-state knowledge comes from the transient AgentStatus.isStarving() flag.
-   private boolean wasStarving = false;
+   private static final int STARVING_FOOD_LEVEL = FoodRecoveryInfoPolicy.STARVING_FOOD_LEVEL;
+   // The episode stays active while supplied food is being eaten. Recovery is reported only after
+   // hunger rises above the starvation threshold and automatic eating has quiesced.
+   private boolean starvationEpisodeActive = false;
+   private boolean recoveryInfoPending = false;
 
    public FoodChain(TaskRunner runner) {
       super(runner);
@@ -137,17 +136,26 @@ public class FoodChain extends SingleTaskChain {
                // just set for THIS companion at L112 in the same single-threaded pass — correct to read.
                boolean isStarving = this.controller.getModSettings().isHungerEnabled() && !hasFood
                      && this.controller.getBaritone().getEntityContext().hungerManager().getFoodLevel() <= STARVING_FOOD_LEVEL;
-               if (isStarving && !this.wasStarving) {
+               FoodRecoveryInfoPolicy.State recovery = FoodRecoveryInfoPolicy.advance(
+                     this.starvationEpisodeActive,
+                     this.recoveryInfoPending,
+                     isStarving,
+                     this.controller.getBaritone().getEntityContext().hungerManager().getFoodLevel(),
+                     this.isTryingToEat,
+                     this.requestFillup);
+               this.starvationEpisodeActive = recovery.episodeActive();
+               this.recoveryInfoPending = recovery.recoveryInfoPending();
+               if (recovery.notifyPlayer()) {
                   // RISING edge: notify the player ONCE per episode (player-facing, keyed). No enqueueInfo
                   // — the model learns the current state from the live status flag, not history.
                   this.controller.reportAgenticProgress(Component.translatable("message.playerengine.food.starving"), true);
-               } else if (!isStarving && this.wasStarving) {
-                  // FALLING edge: one past-tense episodic memory to the MODEL only (raw English,
-                  // model-facing). Edge-triggered, so it structurally cannot spam and cannot go stale.
-                  AiConversationFeedback.enqueueInfo(this.controller,
+               }
+               if (recovery.deferModelInfo()) {
+                  // One past-tense episodic note for the MODEL only (raw English, model-facing).
+                  // Passive delivery cannot trigger a reaction turn or interrupt the resumed task.
+                  AiConversationFeedback.deferInfo(this.controller,
                       "Earlier you were starving with no food, but you have since recovered.");
                }
-               this.wasStarving = isStarving;
 
                // When the EatFoodTask is running, return a positive priority to stay active.
                // Eating is prioritized over collecting food — eat what we have first, then collect.

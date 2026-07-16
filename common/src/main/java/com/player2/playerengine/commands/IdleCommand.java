@@ -12,6 +12,6 @@ public class IdleCommand extends Command {
 
    @Override
    protected void call(PlayerEngineController mod, ArgParser parser) {
-      mod.runUserTask(new IdleTask(), () -> this.finish());
+      mod.runIdleUserTask(new IdleTask(), () -> this.finish());
    }
 }

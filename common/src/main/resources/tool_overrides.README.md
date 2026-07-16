@@ -8,7 +8,7 @@ It is copied automatically next to the global overlay file at
 
 ## What this system does
 
-The retrieval index ships with a seed set of ~15 commands, each with hand-authored keywords.
+The retrieval index ships with a seed set of commands, each with hand-authored keywords.
 When the NPC can't find the right command for a phrase (e.g. "cut trees" when the keyword
 "cut" isn't in the dictionary), you can add the missing keyword via an overlay file.
 
@@ -95,7 +95,6 @@ to apply the changes without restarting Minecraft.
 | `equip` | Equip armor or weapons |
 | `give` | Give items to a player |
 | `fish` | Go fishing |
-| `farm` | Automate crop farming |
 | `explore` | Wander and discover terrain |
 | `pickup_drops` | Collect item drops from the ground |
 | `place_sign` | Place a sign with text |

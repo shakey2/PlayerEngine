@@ -81,13 +81,11 @@ public final class ModIntelligenceEnrichmentClient {
         }
 
         JsonObject requestBody = new JsonObject();
-        JsonArray messages = new JsonArray();
-        // Egress gate (DESIGN.md §3): this is a SECOND /v1/chat/completions builder outside Player2APIService,
-        // so it must apply the same log-egress cap or it would be an uncapped bypass.
-        for (JsonObject msg : history.getListJSON()) {
-            messages.add(LogEgressGuard.cappedMessage(msg));
-        }
+        // Egress gate (DESIGN.md §3): this is a SECOND /v1/chat/completions builder outside
+        // Player2APIService, so it must apply the same whole-request cap or it would be a bypass.
+        JsonArray messages = LogEgressGuard.cappedMessages(history.getListJSON(), "ModIntelligenceEnrichmentClient.complete");
         requestBody.add("messages", messages);
+        LogEgressGuard.applyChatCompletionRequestCaps(requestBody, "ModIntelligenceEnrichmentClient.complete");
         JsonObject responseFormat = new JsonObject();
         responseFormat.addProperty("type", "json_object");
         requestBody.add("response_format", responseFormat);

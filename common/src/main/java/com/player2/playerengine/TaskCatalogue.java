@@ -61,6 +61,7 @@ import com.player2.playerengine.util.MiningRequirement;
 import com.player2.playerengine.util.RecipeTarget;
 import com.player2.playerengine.util.SmeltTarget;
 import com.player2.playerengine.util.WoodType;
+import com.player2.playerengine.util.helpers.AutomaticMiningSourcePolicy;
 import com.player2.playerengine.util.helpers.ItemHelper;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -131,7 +132,7 @@ public class TaskCatalogue {
 
       matches = supportedMatches.toArray(new Item[0]);
       TaskCatalogue.CataloguedResource result = new TaskCatalogue.CataloguedResource(matches, getTask);
-      Block[] blocks = ItemHelper.itemsToBlocks(matches);
+      Block[] blocks = AutomaticMiningSourcePolicy.blocksFor(matches);
       if (blocks.length != 0) {
          result.mineIfPresent();
       }
@@ -1094,8 +1095,9 @@ public class TaskCatalogue {
 
       public ResourceTask getResource(int count) {
          ResourceTask result = this.getResource.apply(count);
-         if (this.mineIfPresent) {
-            result = result.mineIfPresent(ItemHelper.itemsToBlocks(this.targets));
+         Block[] automaticSources = AutomaticMiningSourcePolicy.blocksFor(this.targets);
+         if (this.mineIfPresent && automaticSources.length != 0) {
+            result = result.mineIfPresent(automaticSources);
          }
 
          if (this.forceDimension) {

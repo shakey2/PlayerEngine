@@ -1,16 +1,20 @@
 package com.player2.playerengine.tasks.agentic;
 
-import com.player2.playerengine.agentic.elliegps.EllieGPSStore;
-import com.player2.playerengine.agentic.elliegps.EllieGPSWaypointIndex;
+import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.agentic.elliegps.InventoryWaypointData;
 import com.player2.playerengine.agentic.elliegps.WaypointItemCategorizer;
 import com.player2.playerengine.agentic.elliegps.WaypointRecord;
+import com.player2.playerengine.agentic.elliegps.WaypointSearchOrder;
+import com.player2.playerengine.agentic.elliegps.WaypointSearchDegradationReporter;
+import com.player2.playerengine.agentic.elliegps.WaypointSearchResult;
+import com.player2.playerengine.agentic.elliegps.WaypointSearchService;
+import com.player2.playerengine.agentic.elliegps.WaypointSearchStatus;
 import com.player2.playerengine.agentic.elliegps.WaypointTypes;
 import com.player2.playerengine.containeraccess.ItemCount;
-import com.player2.playerengine.retrieval.RetrievalHit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
@@ -24,7 +28,7 @@ import net.minecraft.world.phys.Vec3;
  * <p>This is the same static accessor chain the counting service
  * ({@link com.player2.playerengine.agentic.elliegps.EllieGPSWaypointCountingService}) uses, but it
  * returns the navigate-to <em>coordinates</em> of marked inventory waypoints that actually list the
- * target pickaxe registry id, ordered nearest-first. It does NOT call or extend
+ * target tool registry id, ordered nearest-first. It does NOT call or extend
  * {@code LocateWaypointsCommand} (which only returns chat text).
  *
  * <p><b>Design invariants (HARD):</b>
@@ -35,7 +39,7 @@ import net.minecraft.world.phys.Vec3;
  *       {@code record.secondaryPos} / {@link WaypointRecord#secondaryBlockPos()} (that is only a
  *       double chest's second half, not the navigate target).</li>
  *   <li>Same filter as the counting service: inventory-type, non-stale, snapshot-bearing, matching
- *       dimension, within radius, and the snapshot must list the pickaxe registry id.</li>
+ *       dimension, within radius, and the snapshot must list the tool registry id.</li>
  *   <li>Common-module only; byte-identical across branches.</li>
  * </ul>
  */
@@ -44,9 +48,10 @@ final class MarkedChestToolLocator {
     private MarkedChestToolLocator() {}
 
     /**
-     * Resolves the candidate marked-chest coordinates that contain {@code pickaxe}, nearest-first.
+     * Resolves candidate marked-chest coordinates that contain {@code tool}, nearest-first.
      *
-     * @param pickaxe      the target pickaxe item
+     * @param controller   controller used for one-shot player/model degradation feedback
+     * @param tool         the target tool item
      * @param origin       the bot position the search is anchored at
      * @param radiusBlocks the search radius
      * @param dimensionId  the bot's current dimension id ({@code level.dimension().location().toString()});
@@ -54,49 +59,53 @@ final class MarkedChestToolLocator {
      * @return navigate-to {@link BlockPos} list ordered nearest-first; never {@code null}, possibly empty
      */
     static List<BlockPos> candidateCoordinates(
-            Item pickaxe, Vec3 origin, double radiusBlocks, String dimensionId) {
+            PlayerEngineController controller,
+            Item tool,
+            Vec3 origin,
+            double radiusBlocks,
+            String dimensionId) {
         try {
-            if (pickaxe == null || dimensionId == null || dimensionId.isBlank()) {
+            if (tool == null || origin == null
+                    || dimensionId == null || dimensionId.isBlank()) {
+                WaypointSearchDegradationReporter.reportOnce(
+                        controller, WaypointSearchStatus.FAILED_SEARCH_ERROR);
                 return List.of();
             }
-            ResourceLocation key = BuiltInRegistries.ITEM.getKey(pickaxe);
+            ResourceLocation key = BuiltInRegistries.ITEM.getKey(tool);
             if (key == null) {
+                WaypointSearchDegradationReporter.reportOnce(
+                        controller, WaypointSearchStatus.FAILED_SEARCH_ERROR);
                 return List.of();
             }
             String registryId = key.toString();
 
-            EllieGPSStore store = EllieGPSStore.get();
-            if (store == null) {
-                return List.of();
-            }
-            EllieGPSWaypointIndex index = EllieGPSWaypointIndex.getCurrent();
-            if (index == null) {
-                return List.of();
-            }
-
-            // Map the pickaxe registry id to the same categorizer vocabulary the records were indexed
-            // under, then query the index for candidate waypoint ids (keyword pre-filter — never a
-            // full-store fallback scan).
+            // Map the registry id to the indexed vocabulary, then request the complete bounded
+            // inventory corpus before applying exact item and radius checks.
             List<String> keywords = WaypointItemCategorizer.categorize(List.of(new ItemCount(registryId, 1)));
             String query = String.join(" ", keywords).trim();
             if (query.isEmpty()) {
+                WaypointSearchDegradationReporter.reportOnce(
+                        controller, WaypointSearchStatus.FAILED_SEARCH_ERROR);
                 return List.of();
             }
-            List<RetrievalHit> hits = index.query(query, 10);
-            if (hits.isEmpty()) {
+            WaypointSearchResult search = WaypointSearchService.find(
+                    query,
+                    dimensionId,
+                    Set.of(WaypointTypes.INVENTORY),
+                    false,
+                    WaypointSearchOrder.RELEVANCE,
+                    null,
+                    WaypointSearchService.MAX_AUTHORITATIVE_RECORDS);
+            WaypointSearchDegradationReporter.reportOnce(controller, search.status());
+            if (search.status() == WaypointSearchStatus.FAILED_SCAN_LIMIT
+                    || search.status() == WaypointSearchStatus.FAILED_STORE_UNAVAILABLE
+                    || search.status() == WaypointSearchStatus.FAILED_SEARCH_ERROR) {
                 return List.of();
-            }
-            List<String> candidateIds = new ArrayList<>(hits.size());
-            for (RetrievalHit hit : hits) {
-                candidateIds.add(hit.toolId());
             }
 
             double radiusSq = radiusBlocks * radiusBlocks;
             List<BlockPos> matches = new ArrayList<>();
-            for (WaypointRecord record : store.publishedRecords()) {
-                if (!candidateIds.contains(record.id)) {
-                    continue;
-                }
+            for (WaypointRecord record : search.records()) {
                 if (!WaypointTypes.INVENTORY.equals(record.type)) {
                     continue;
                 }
@@ -117,22 +126,27 @@ final class MarkedChestToolLocator {
                 if (!withinRadius(pos, origin, radiusSq)) {
                     continue;
                 }
-                boolean listsPickaxe = false;
+                boolean listsTool = false;
                 for (ItemCount ic : inv.snapshot.items) {
                     if (ic != null && registryId.equals(ic.registryId()) && ic.count() > 0) {
-                        listsPickaxe = true;
+                        listsTool = true;
                         break;
                     }
                 }
-                if (listsPickaxe) {
+                if (listsTool) {
                     matches.add(pos);
                 }
             }
 
-            matches.sort(Comparator.comparingDouble(p -> distSq(p, origin)));
+            matches.sort(Comparator
+                    .comparingDouble((BlockPos p) -> distSq(p, origin))
+                    .thenComparingInt(BlockPos::getX)
+                    .thenComparingInt(BlockPos::getY)
+                    .thenComparingInt(BlockPos::getZ));
             return matches;
         } catch (Exception e) {
-            // Best-effort detection: any failure degrades to "no marked candidates".
+            WaypointSearchDegradationReporter.reportOnce(
+                    controller, WaypointSearchStatus.FAILED_SEARCH_ERROR);
             return List.of();
         }
     }

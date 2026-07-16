@@ -37,7 +37,6 @@ import com.player2.playerengine.automaton.process.BackfillProcess;
 import com.player2.playerengine.automaton.process.BuilderProcess;
 import com.player2.playerengine.automaton.process.CustomGoalProcess;
 import com.player2.playerengine.automaton.process.ExploreProcess;
-import com.player2.playerengine.automaton.process.FarmProcess;
 import com.player2.playerengine.automaton.process.FishingProcess;
 import com.player2.playerengine.automaton.process.FollowProcess;
 import com.player2.playerengine.automaton.process.GetToBlockProcess;
@@ -63,7 +62,6 @@ public class Baritone implements IBaritone {
    private final BuilderProcess builderProcess;
    private final ExploreProcess exploreProcess;
    private final BackfillProcess backfillProcess;
-   private final FarmProcess farmProcess;
    private final FishingProcess fishingProcess;
    private final IBaritoneProcess execControlProcess;
    private final PathingControlManager pathingControlManager;
@@ -89,7 +87,6 @@ public class Baritone implements IBaritone {
       this.pathingControlManager.registerProcess(this.builderProcess = new BuilderProcess(this));
       this.pathingControlManager.registerProcess(this.exploreProcess = new ExploreProcess(this));
       this.pathingControlManager.registerProcess(this.backfillProcess = new BackfillProcess(this));
-      this.pathingControlManager.registerProcess(this.farmProcess = new FarmProcess(this));
       this.pathingControlManager.registerProcess(this.fishingProcess = new FishingProcess(this));
       this.commandManager = new BaritoneCommandManager(this);
       this.execControlProcess = DefaultCommands.controlCommands.registerProcess(this);
@@ -146,10 +143,6 @@ public class Baritone implements IBaritone {
 
    public MineProcess getMineProcess() {
       return this.mineProcess;
-   }
-
-   public FarmProcess getFarmProcess() {
-      return this.farmProcess;
    }
 
    public PathingBehavior getPathingBehavior() {

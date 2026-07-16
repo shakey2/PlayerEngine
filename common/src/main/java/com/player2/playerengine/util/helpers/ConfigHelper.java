@@ -12,10 +12,12 @@ import com.player2.playerengine.util.serialization.IListConfigFile;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Scanner;
@@ -50,6 +52,13 @@ public class ConfigHelper {
       for (Runnable config : loadedConfigs.values()) {
          config.run();
       }
+   }
+
+   public static void registerReload(String path, Runnable onReload) {
+      if (path == null || onReload == null) {
+         return;
+      }
+      loadedConfigs.put(path, onReload);
    }
 
    public static <T> T getConfig(String path, Supplier<T> getDefault, Class<T> classToLoad) {
@@ -99,19 +108,47 @@ public class ConfigHelper {
    }
 
    public static <T> void saveConfig(String path, T config) {
-      File configFile = getConfigFile(path);
-      createParentDirectories(configFile);
+      saveConfigChecked(path, config);
+   }
 
-      try (FileWriter writer = new FileWriter(configFile)) {
-         GSON.toJson(config, writer);
+   public static <T> boolean saveConfigChecked(String path, T config) {
+      File configFile = getConfigFile(path);
+      Path target = configFile.toPath();
+      Path temp = null;
+      try {
+         Path parent = target.getParent();
+         Files.createDirectories(parent);
+         temp = Files.createTempFile(parent, configFile.getName() + ".", ".tmp");
+         Files.writeString(temp, GSON.toJson(config), StandardCharsets.UTF_8);
+         try {
+            Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+         } catch (AtomicMoveNotSupportedException e) {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+         }
+         return true;
       } catch (IOException e) {
          handleIOException(e);
+         return false;
+      } finally {
+         if (temp != null) {
+            try {
+               Files.deleteIfExists(temp);
+            } catch (IOException ignored) {
+            }
+         }
       }
+   }
+
+   public static <T> T copyConfig(T config, Class<T> configType) {
+      if (config == null || configType == null) {
+         return null;
+      }
+      return GSON.fromJson(GSON.toJson(config), configType);
    }
 
    public static <T> void loadConfig(String path, Supplier<T> getDefault, Class<T> classToLoad, Consumer<T> onReload) {
       T config = getConfig(path, getDefault, classToLoad);
-      loadedConfigs.put(path, () -> onReload.accept(config));
+      registerReload(path, () -> onReload.accept(getConfig(path, getDefault, classToLoad)));
       onReload.accept(config);
    }
 
@@ -181,7 +218,7 @@ public class ConfigHelper {
 
    public static <T extends IListConfigFile> void loadListConfig(String path, Supplier<T> getDefault, Consumer<T> onReload) {
       T result = getListConfig(path, getDefault);
-      loadedConfigs.put(path, () -> onReload.accept(result));
+      registerReload(path, () -> onReload.accept(getListConfig(path, getDefault)));
       onReload.accept(result);
    }
 

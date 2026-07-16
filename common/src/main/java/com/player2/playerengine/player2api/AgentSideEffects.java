@@ -26,6 +26,10 @@ import java.util.UUID;
 
 public class AgentSideEffects {
     private static final Logger LOGGER = LogManager.getLogger();
+    private static final String MIXED_IDLE_MODEL_ERROR =
+            "idle must be sent by itself and cannot be combined with another command";
+    private static final String IGNORED_IDLE_MODEL_NOTE =
+            "idle was ignored because a real user task is still active; use stop to cancel that task";
 
     public sealed interface CommandExecutionStopReason
             permits CommandExecutionStopReason.Cancelled,
@@ -41,6 +45,19 @@ public class AgentSideEffects {
 
         record Error(String commandName, String errMsg) implements CommandExecutionStopReason {
         }
+    }
+
+    enum IdleHandling {
+        NOT_IDLE,
+        IGNORE_ACTIVE_TASK,
+        INSTALL_LOOK_AT_OWNER,
+        LEAVE_WITHOUT_USER_TASK
+    }
+
+    enum IdleCommandShape {
+        NO_IDLE,
+        SOLE_IDLE,
+        MIXED_IDLE
     }
 
     public static void onEntityMessage(MinecraftServer server, Event.CharacterMessage characterMessage) {
@@ -121,19 +138,29 @@ public class AgentSideEffects {
         } else {
             mod.isStopping = false;
         }
-        if (commandWithPrefix.contains("idle")) {
-            if (mod.hasActiveNonIdleUserTask()) {
+        IdleCommandShape idleShape = classifyIdleCommandLine(
+                commandWithPrefix, cmdExecutor.getCommandPrefix());
+        if (idleShape == IdleCommandShape.MIXED_IDLE) {
+            rejectMixedIdleCommand(mod, onStop);
+            return;
+        }
+        String commandId = idleShape == IdleCommandShape.SOLE_IDLE
+                ? "idle" : firstCommandId(commandWithPrefix, cmdExecutor);
+        IdleHandling idleHandling = classifyIdleHandling(
+                commandId,
+                mod.hasActiveNonIdleUserTask(),
+                mod.getModSettings().isEnableLookAtOwnerIdle());
+        if (idleHandling != IdleHandling.NOT_IDLE) {
+            if (idleHandling == IdleHandling.IGNORE_ACTIVE_TASK) {
                 LOGGER.info("Ignoring idle while a non-idle user task is active (step={})",
                         mod.getActiveTrackedStep().map(e -> e.getStepKind()).orElse("unknown"));
-                return;
+                reportIgnoredIdleToPlayer(mod);
+            } else if (idleHandling == IdleHandling.INSTALL_LOOK_AT_OWNER) {
+                mod.runIdleUserTask(new LookAtOwnerTask());
+            } else if (idleHandling == IdleHandling.LEAVE_WITHOUT_USER_TASK) {
+                mod.clearPolicyIdleUserTask();
             }
-            // ISSUE 1 (temporary, user request): only set LookAtOwner when explicitly enabled. When gated
-            // off, @idle leaves the bot with NO user task (idles) — StatusUtils already reports LookAtOwner
-            // as "no task", so idle-as-no-task is consistent. Still early-return so @idle never falls
-            // through into command execution.
-            if (mod.getModSettings().isEnableLookAtOwnerIdle()) {
-                mod.runUserTask(new LookAtOwnerTask());
-            }
+            completeHandledIdle(idleHandling, commandWithPrefix, onStop);
             return;
         }
 
@@ -176,7 +203,7 @@ public class AgentSideEffects {
                         // (queue events, AliasLearning) is unaffected.
                         if (mod.getModSettings().isEnableLookAtOwnerIdle()) {
                             LOGGER.info("Running look at owner task after finish cmd={}", commandWithPrefix);
-                            mod.runUserTask(new LookAtOwnerTask());
+                            mod.runIdleUserTask(new LookAtOwnerTask());
                         }
                     }
                 };
@@ -232,7 +259,7 @@ public class AgentSideEffects {
                                     // statement in the error callback, so the error flow is unaffected.
                                     if (mod.getModSettings().isEnableLookAtOwnerIdle()) {
                                         LOGGER.info("Running look at owner aftr error in cmd={}", commandWithPrefix);
-                                        mod.runUserTask(new LookAtOwnerTask());
+                                        mod.runIdleUserTask(new LookAtOwnerTask());
                                     }
                                 });
 
@@ -289,6 +316,97 @@ public class AgentSideEffects {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** Classifies idle across the full semicolon command line using CommandExecutor's split rules. */
+    static IdleCommandShape classifyIdleCommandLine(String commandWithPrefix, String commandPrefix) {
+        if (commandWithPrefix == null || commandWithPrefix.isBlank()) {
+            return IdleCommandShape.NO_IDLE;
+        }
+        String prefix = commandPrefix == null ? "" : commandPrefix;
+        String line = commandWithPrefix;
+        if (!prefix.isEmpty() && line.startsWith(prefix)) {
+            line = line.substring(prefix.length());
+        }
+        int commandCount = 0;
+        boolean containsIdle = false;
+        for (String rawPart : line.split(";", -1)) {
+            String part = rawPart.trim();
+            if (part.isEmpty()) {
+                continue;
+            }
+            if (!prefix.isEmpty() && part.startsWith(prefix)) {
+                part = part.substring(prefix.length()).trim();
+            }
+            if (part.isEmpty()) {
+                continue;
+            }
+            int space = part.indexOf(' ');
+            String rawName = space < 0 ? part : part.substring(0, space);
+            String commandId = CommandExecutor.resolveName(rawName.toLowerCase(Locale.ROOT));
+            commandCount++;
+            containsIdle |= "idle".equals(commandId);
+        }
+        if (!containsIdle) {
+            return IdleCommandShape.NO_IDLE;
+        }
+        return commandCount == 1
+                ? IdleCommandShape.SOLE_IDLE : IdleCommandShape.MIXED_IDLE;
+    }
+
+    /** Package-visible pure branch policy exercised by {@link AgentSideEffectsSelfTest}. */
+    static IdleHandling classifyIdleHandling(
+            String commandId,
+            boolean hasActiveNonIdleTask,
+            boolean enableLookAtOwnerIdle) {
+        if (!"idle".equals(commandId)) {
+            return IdleHandling.NOT_IDLE;
+        }
+        if (hasActiveNonIdleTask) {
+            return IdleHandling.IGNORE_ACTIVE_TASK;
+        }
+        return enableLookAtOwnerIdle
+                ? IdleHandling.INSTALL_LOOK_AT_OWNER
+                : IdleHandling.LEAVE_WITHOUT_USER_TASK;
+    }
+
+    /** Resolves one locally-handled idle command exactly once, including ignored-idle degradation. */
+    static void completeHandledIdle(
+            IdleHandling handling,
+            String commandWithPrefix,
+            Consumer<CommandExecutionStopReason> onStop) {
+        if (handling == null || handling == IdleHandling.NOT_IDLE) {
+            throw new IllegalArgumentException("idle completion requires a handled idle branch");
+        }
+        String note = handling == IdleHandling.IGNORE_ACTIVE_TASK
+                ? IGNORED_IDLE_MODEL_NOTE : null;
+        java.util.Objects.requireNonNull(onStop, "onStop")
+                .accept(new CommandExecutionStopReason.Finished(commandWithPrefix, note));
+    }
+
+    private static void reportIgnoredIdleToPlayer(PlayerEngineController mod) {
+        MinecraftServer server = mod.getWorld() == null ? null : mod.getWorld().getServer();
+        if (server != null && mod.getOwner() instanceof ServerPlayer owner) {
+            broadcastChatToPlayer(server,
+                    Component.translatable("message.playerengine.agent.idle_ignored_active_task"), owner);
+        }
+    }
+
+    private static void rejectMixedIdleCommand(
+            PlayerEngineController mod,
+            Consumer<CommandExecutionStopReason> onStop) {
+        MinecraftServer server = mod.getWorld() == null ? null : mod.getWorld().getServer();
+        if (server != null && mod.getOwner() instanceof ServerPlayer owner) {
+            broadcastChatToPlayer(server,
+                    Component.translatable("message.playerengine.agent.mixed_idle_commands"), owner);
+        }
+        completeRejectedMixedIdle(onStop);
+    }
+
+    /** Package-visible exact terminal exercised without a live server by the self-test. */
+    static void completeRejectedMixedIdle(Consumer<CommandExecutionStopReason> onStop) {
+        java.util.Objects.requireNonNull(onStop, "onStop").accept(
+                new CommandExecutionStopReason.Error("idle", MIXED_IDLE_MODEL_ERROR));
     }
 
     /**

@@ -4,6 +4,8 @@ import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.agentic.elliegps.EllieGPSStore;
 import com.player2.playerengine.agentic.elliegps.InventoryWaypointData;
 import com.player2.playerengine.agentic.elliegps.WaypointIngestionService;
+import com.player2.playerengine.agentic.elliegps.WaypointMutationResult;
+import com.player2.playerengine.agentic.elliegps.WaypointMutationStatus;
 import com.player2.playerengine.agentic.elliegps.WaypointOriginClassifier;
 import com.player2.playerengine.agentic.elliegps.WaypointOriginEvidence;
 import com.player2.playerengine.agentic.elliegps.WaypointRecord;
@@ -178,54 +180,85 @@ public class CreateWaypointCommand extends Command {
                 WaypointRecord record = WaypointIngestionService.ingest(
                         mod, snapshot, WaypointRecord.ORIGIN_EXPLICIT_CREATE, existingRecord);
 
-                // Re-canonicalization guard: if the matched record's canonical id differs from
-                // the live scan's (e.g. a double chest was split or re-paired since the record
-                // was written), delete the old record first or it would survive as an orphan.
-                if (existingRecord != null && !record.id.equals(existingRecord.id)) {
-                    liveStore.delete(existingRecord.id);
+                WaypointMutationResult mutation = existingRecord != null
+                        ? liveStore.replace(existingRecord.id, record)
+                        : liveStore.upsert(record);
+                switch (mutation.status()) {
+                    case COMMITTED, COMMITTED_INDEX_DEGRADED, NO_CHANGE,
+                            NO_CHANGE_INDEX_DEGRADED -> {
+                    }
+                    case FAILED_JSON_COMMIT, REJECTED_TYPE_CONFLICT, REJECTED_TARGET_CONFLICT,
+                            NOT_FOUND, NOT_FOUND_INDEX_DEGRADED, FAILED_STORE_UNAVAILABLE -> {
+                        finishMutationFailure(mod, mutation.status());
+                        return;
+                    }
                 }
 
-                // Upsert (the store persists and reindexes internally)
-                liveStore.upsert(record);
+                WaypointRecord authoritative = mutation.current() != null
+                        ? mutation.current() : record;
+                boolean changed = mutation.status() == WaypointMutationStatus.COMMITTED
+                        || mutation.status() == WaypointMutationStatus.COMMITTED_INDEX_DEGRADED;
+                boolean indexDegraded = mutation.status() == WaypointMutationStatus.COMMITTED_INDEX_DEGRADED
+                        || mutation.status() == WaypointMutationStatus.NO_CHANGE_INDEX_DEGRADED;
+                boolean polishScheduled = WaypointIngestionService.schedulePolishAfterCommit(
+                        mod, authoritative);
 
-                // Build feedback quantities
-                InventoryWaypointData invData = record.inventoryData();
+                InventoryWaypointData invData = authoritative.inventoryData();
                 boolean snapshotOmitted = (invData == null || invData.snapshot == null);
                 int itemTypes = 0;
                 if (!snapshotOmitted && invData.snapshot.items != null) {
                     itemTypes = invData.snapshot.items.size();
                 }
-                int kwCount = (record.keywords != null) ? record.keywords.size() : 0;
+                int kwCount = (authoritative.keywords != null) ? authoritative.keywords.size() : 0;
                 String posStr = ContainerResolver.formatPos(snapshot.canonicalPos());
 
                 // Model feedback — English String, separate from player path (AI truthfulness)
-                String modelMsg = WaypointReportFormatter.waypointRegistered(
-                        posStr, itemTypes, kwCount, snapshotOmitted);
+                String modelMsg = changed
+                        ? WaypointReportFormatter.waypointRegistered(
+                                posStr, itemTypes, kwCount, snapshotOmitted)
+                        : WaypointReportFormatter.waypointUnchanged(posStr);
                 if (structureOverride) {
                     // Decision 4: the Tier 3 override must be noted in feedback (both audiences)
                     modelMsg += " " + WaypointReportFormatter.structureOverrideNote();
                 }
-                if (mod.getModSettings().getEllieGpsUseModelDescription()) {
+                if (polishScheduled) {
                     modelMsg += " " + WaypointReportFormatter.descriptionPolishScheduledNote();
                 }
-                AiConversationFeedback.enqueueInfo(mod, modelMsg);
+                if (indexDegraded) {
+                    modelMsg += " " + WaypointReportFormatter.indexDegradedModel(changed);
+                }
+                AiConversationFeedback.enqueueInfo(
+                        mod, WaypointReportFormatter.boundModel(modelMsg));
 
                 // Player milestone — Component.translatable for i18n; two keys cover the
                 // snapshotOmitted branch. Passed as Component so the client resolves the translation.
-                MutableComponent playerMsg = WaypointReportFormatter.waypointRegisteredComponent(
-                        posStr, itemTypes, kwCount, snapshotOmitted);
+                MutableComponent playerMsg = Component.empty();
+                playerMsg.append(changed
+                        ? WaypointReportFormatter.waypointRegisteredComponent(
+                                posStr, itemTypes, kwCount, snapshotOmitted)
+                        : WaypointReportFormatter.waypointUnchangedComponent(posStr));
                 if (structureOverride) {
                     playerMsg.append(" ").append(WaypointReportFormatter.structureOverrideNoteComponent());
                 }
                 mod.reportAgenticProgress(playerMsg, true);
-                Debug.logMessage("waypoint-create ok id=" + record.id
+                if (indexDegraded) {
+                    mod.reportAgenticProgress(
+                            WaypointReportFormatter.indexDegradedComponent(changed), true);
+                }
+                Debug.logMessage("waypoint-create ok id=" + authoritative.id
                         + " snapshotOmitted=" + snapshotOmitted
                         + " kw=" + kwCount
                         + " bot=" + mod.getEntity().getName().getString());
 
-                if (snapshotOmitted) {
-                    this.finishWithNote(
-                            "snapshot omitted (used slots > threshold); record is keyword-only");
+                if (snapshotOmitted || indexDegraded) {
+                    String note = snapshotOmitted
+                            ? "snapshot omitted (used slots > threshold); record is keyword-only"
+                            : "";
+                    if (indexDegraded) {
+                        note += (note.isEmpty() ? "" : "; ")
+                                + WaypointReportFormatter.indexDegradedModel(changed);
+                    }
+                    this.finishWithNote(WaypointReportFormatter.boundModel(note));
                 } else {
                     this.finish();
                 }
@@ -239,16 +272,48 @@ public class CreateWaypointCommand extends Command {
         });
     }
 
+    private void finishMutationFailure(PlayerEngineController mod, WaypointMutationStatus status) {
+        switch (status) {
+            case FAILED_JSON_COMMIT -> {
+                mod.reportAgenticProgress(WaypointReportFormatter.jsonCommitFailedComponent(), true);
+                this.finishWithError(WaypointReportFormatter.jsonCommitFailedModel());
+            }
+            case REJECTED_TYPE_CONFLICT, REJECTED_TARGET_CONFLICT -> {
+                mod.reportAgenticProgress(WaypointReportFormatter.waypointConflictComponent(), true);
+                this.finishWithError(WaypointReportFormatter.waypointConflictModel(status));
+            }
+            case NOT_FOUND, NOT_FOUND_INDEX_DEGRADED -> {
+                mod.reportAgenticProgress(WaypointReportFormatter.mutationNotFoundComponent(), true);
+                if (status == WaypointMutationStatus.NOT_FOUND_INDEX_DEGRADED) {
+                    mod.reportAgenticProgress(
+                            WaypointReportFormatter.indexDegradedComponent(false), true);
+                }
+                this.finishWithError(WaypointReportFormatter.boundModel(
+                        WaypointReportFormatter.mutationNotFoundModel()
+                                + (status == WaypointMutationStatus.NOT_FOUND_INDEX_DEGRADED
+                                ? " " + WaypointReportFormatter.indexDegradedModel(false) : "")));
+            }
+            case FAILED_STORE_UNAVAILABLE -> {
+                mod.reportAgenticProgress(
+                        Component.translatable("message.playerengine.elliegps.store_unavailable"), true);
+                this.finishWithError("elliegps_store_unavailable: no active EllieGPS store");
+            }
+            case COMMITTED, COMMITTED_INDEX_DEGRADED, NO_CHANGE, NO_CHANGE_INDEX_DEGRADED ->
+                    throw new IllegalArgumentException("not a failure status: " + status);
+        }
+    }
+
     /** Dual-audience failure (player chat + model finishWithError). */
     private void failEarly(PlayerEngineController mod, StorageAccessCode code, String detail) {
+        String bounded = WaypointReportFormatter.boundReason(detail);
         Debug.logWarning("waypoint-create fail code=" + code.token()
-                + " detail=" + detail
+                + " detail=" + bounded
                 + " bot=" + mod.getEntity().getName().getString());
         // Player path: translatable prefix; detail stays English (shared with model — not localized)
         mod.reportAgenticProgress(
-                Component.translatable("message.playerengine.elliegps.create_fail", detail),
+                Component.translatable("message.playerengine.elliegps.create_fail", bounded),
                 true);
         // Model path: English token:detail for AI truthfulness
-        this.finishWithError(code.token() + ": " + detail);
+        this.finishWithError(WaypointReportFormatter.boundModel(code.token() + ": " + bounded));
     }
 }

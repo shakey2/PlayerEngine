@@ -1,6 +1,7 @@
 package com.player2.playerengine.tasks.misc;
 
 import com.player2.playerengine.tasks.base.Task;
+import com.player2.playerengine.trackers.storage.SurvivalConsumptionReceiptClassifier;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.Item;
@@ -31,6 +32,9 @@ public class EatFoodTask extends Task implements com.player2.playerengine.tasks.
     private final Item foodItem;
     private State state = State.EQUIP;
     private boolean hasAte = false;
+    private boolean consumptionRecorded = false;
+    private boolean foodCountBaselineCaptured = false;
+    private int foodCountBeforeUse = 0;
 
     // Watchdog: derived from the item's actual use duration + a small margin.
     // A flat cap (e.g. 40 ticks) would silently abort slow/modded foods before they complete.
@@ -45,6 +49,9 @@ public class EatFoodTask extends Task implements com.player2.playerengine.tasks.
     protected void onStart() {
         this.state = State.EQUIP;
         this.hasAte = false;
+        this.consumptionRecorded = false;
+        this.foodCountBaselineCaptured = false;
+        this.foodCountBeforeUse = 0;
         this.watchdogTicks = 0;
         this.watchdogMax = 0;
     }
@@ -82,6 +89,8 @@ public class EatFoodTask extends Task implements com.player2.playerengine.tasks.
                 this.watchdogMax = useDuration + 10;
                 this.watchdogTicks = 0;
 
+                this.foodCountBeforeUse = countFoodItem();
+                this.foodCountBaselineCaptured = true;
                 entity.startUsingItem(InteractionHand.MAIN_HAND);
                 this.state = State.WAIT;
                 setDebugState("startUsingItem called, waiting for animation to complete");
@@ -117,6 +126,16 @@ public class EatFoodTask extends Task implements com.player2.playerengine.tasks.
                 // Vanilla already consumed 1 item (LivingEntity.eat -> food.shrink(1)).
                 // The task's ONLY job here is to update the bot's hunger manager.
                 // Do NOT call removeItem/shrink — that would double-consume.
+                // Make the confirmed vanilla consumption visible to suspended inventory-sensitive
+                // tasks. The guard keeps repeated COMPLETE ticks from double-crediting the ledger.
+                if (SurvivalConsumptionReceiptClassifier.shouldRecord(
+                        this.consumptionRecorded,
+                        this.foodCountBaselineCaptured,
+                        this.foodCountBeforeUse,
+                        countFoodItem())) {
+                    this.controller.getSurvivalConsumptionLedger().recordConsumption(this.foodItem);
+                    this.consumptionRecorded = true;
+                }
                 this.controller.getBaritone().getEntityContext().hungerManager().eat(foodItem);
                 this.hasAte = true;
                 setDebugState("Hunger refilled after animation");
@@ -135,6 +154,10 @@ public class EatFoodTask extends Task implements com.player2.playerengine.tasks.
         if (this.state == State.WAIT && entity != null && entity.isUsingItem()) {
             entity.stopUsingItem();
         }
+    }
+
+    private int countFoodItem() {
+        return this.controller.getItemStorage().getItemCountInventoryOnly(this.foodItem);
     }
 
     @Override

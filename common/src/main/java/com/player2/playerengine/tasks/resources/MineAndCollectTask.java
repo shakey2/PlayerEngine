@@ -13,6 +13,7 @@ import com.player2.playerengine.tasks.movement.TimeoutWanderTask;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.util.ItemTarget;
 import com.player2.playerengine.util.MiningRequirement;
+import com.player2.playerengine.util.helpers.AutomaticMiningSourcePolicy;
 import com.player2.playerengine.util.helpers.MaterialAvailability;
 import com.player2.playerengine.util.helpers.StorageHelper;
 import com.player2.playerengine.util.helpers.WorldHelper;
@@ -20,10 +21,8 @@ import com.player2.playerengine.util.progresscheck.MovementProgressChecker;
 import com.player2.playerengine.util.slots.CursorSlot;
 import com.player2.playerengine.util.slots.PlayerSlot;
 import com.player2.playerengine.util.time.TimerGame;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
@@ -34,6 +33,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.Vec3;
 
 public class MineAndCollectTask extends ResourceTask {
@@ -72,23 +72,19 @@ public class MineAndCollectTask extends ResourceTask {
    }
 
    public static Block[] itemTargetToBlockList(ItemTarget[] targets) {
-      List<Block> result = new ArrayList<>(targets.length);
-
-      for (ItemTarget target : targets) {
-         for (Item item : target.getMatches()) {
-            Block block = Block.byItem(item);
-            if (block != null && !WorldHelper.isAir(block)) {
-               result.add(block);
-            }
-         }
-      }
-
-      return result.toArray(Block[]::new);
+      return AutomaticMiningSourcePolicy.blocksFor(targets);
    }
 
    @Override
    protected void onResourceStart(PlayerEngineController mod) {
       mod.getBehaviour().push();
+      // A MineAndCollectTask is an item-acquisition flow, even when a caller supplied explicit block
+      // candidates. Never let chest acquisition dismantle an existing standard chest; ground chest
+      // items remain eligible through the independent dropped-item path. The task-scoped behaviour
+      // state is popped in onResourceStop, and direct MineBlockTask commands do not use this guard.
+      if (AutomaticMiningSourcePolicy.containsProtectedAcquisitionItem(this.itemTargets)) {
+         mod.getBehaviour().avoidBlockBreaking(pos -> mod.getWorld().getBlockState(pos).is(Blocks.CHEST));
+      }
       mod.getBehaviour().addProtectedItems(Items.WOODEN_PICKAXE, Items.STONE_PICKAXE, Items.IRON_PICKAXE, Items.DIAMOND_PICKAXE, Items.NETHERITE_PICKAXE);
       this.subtask.resetSearch();
       this.subtask.resetBreakCancelGuard();

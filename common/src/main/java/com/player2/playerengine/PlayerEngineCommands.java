@@ -3,9 +3,12 @@ package com.player2.playerengine;
 import com.player2.playerengine.commands.*;
 import com.player2.playerengine.commands.random.*;
 import com.player2.playerengine.commands.base.CommandException;
+import com.player2.playerengine.agentic.elliegps.FarmWaypointService;
+import com.player2.playerengine.tasks.farming.FarmWorldObservationProvider;
 
 public class PlayerEngineCommands {
    public static void init(PlayerEngineController controller) throws CommandException {
+      FarmWaypointService.installProductionObservationProvider(FarmWorldObservationProvider.INSTANCE);
       controller.getCommandExecutor()
             .registerNewCommand(
                   new GetCommand(),
@@ -38,7 +41,6 @@ public class PlayerEngineCommands {
                   new ScanCommand(),
                   new AttackPlayerOrMobCommand(),
                   new SetAIBridgeEnabledCommand(),
-                  new FarmCommand(),
                   new EatFoodCommand(),
                   new PickupDropsCommand(),
                   new AgenticCommand(),
@@ -57,6 +59,9 @@ public class PlayerEngineCommands {
                   new DeleteWaypointCommand(),
                   new AuditWaypointCommand(),
                   new CompareWaypointCommand(),
+                  new SetupFarmCommand(),
+                  new HarvestFarmCommand(),
+                  new PlantFarmCommand(),
                   new LocateWaypointsCommand());
    }
 }

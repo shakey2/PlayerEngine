@@ -16,6 +16,7 @@ public final class ModIntelligenceStatus {
     private final int lastBatchValidated;
     private final int lastBatchFailures;
     private final int lastBatchRemaining;
+    private final String lastOperationCode;
     private final String activePackFingerprint;
     private final String lastError;
 
@@ -24,7 +25,7 @@ public final class ModIntelligenceStatus {
                                  int unknownEntries, int failedEntries, int tombstonedEntries,
                                  int queuedEnrichments, int enrichedEntries, int enrichmentFailures,
                                  int lastBatchValidated, int lastBatchFailures, int lastBatchRemaining,
-                                 String activePackFingerprint, String lastError) {
+                                 String lastOperationCode, String activePackFingerprint, String lastError) {
         this.enabled = enabled;
         this.inspecting = inspecting;
         this.enriching = enriching;
@@ -40,6 +41,7 @@ public final class ModIntelligenceStatus {
         this.lastBatchValidated = lastBatchValidated;
         this.lastBatchFailures = lastBatchFailures;
         this.lastBatchRemaining = lastBatchRemaining;
+        this.lastOperationCode = lastOperationCode;
         this.activePackFingerprint = activePackFingerprint;
         this.lastError = lastError;
     }
@@ -59,6 +61,7 @@ public final class ModIntelligenceStatus {
     public int getLastBatchValidated() { return lastBatchValidated; }
     public int getLastBatchFailures() { return lastBatchFailures; }
     public int getLastBatchRemaining() { return lastBatchRemaining; }
+    public String getLastOperationCode() { return lastOperationCode; }
     public String getActivePackFingerprint() { return activePackFingerprint; }
     public String getLastError() { return lastError; }
 }

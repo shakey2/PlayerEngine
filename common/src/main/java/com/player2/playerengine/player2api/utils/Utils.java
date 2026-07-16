@@ -105,6 +105,14 @@ public class Utils {
             LOGGER.warn("parseCleanedJson: recovered JSON object via balanced-brace extraction from a padded model reply");
             return extractedObj;
          }
+         String unwrapped = unwrapRedundantOuterBraces(extracted);
+         if (unwrapped != null) {
+            JsonObject unwrappedObj = tryLenientParseObject(unwrapped);
+            if (unwrappedObj != null) {
+               LOGGER.warn("parseCleanedJson: recovered JSON object by unwrapping redundant outer braces");
+               return unwrappedObj;
+            }
+         }
       }
 
       // 3) Give up: log the raw content (truncated) so the malformed payload is diagnosable, and throw
@@ -186,6 +194,28 @@ public class Utils {
          }
       }
       return null;
+   }
+
+   /**
+    * Some models occasionally emit {@code {{ "reason": ..., "command": ..., "message": ... }}}
+    * instead of a single JSON object. The balanced extractor correctly returns the outer span, but
+    * Gson rejects it because the extra braces are not an object member. Peel only one syntactically
+    * redundant brace pair at a time, and only when the inner span is itself balanced.
+    */
+   private static String unwrapRedundantOuterBraces(String content) {
+      if (content == null) {
+         return null;
+      }
+      String current = content.trim();
+      while (current.startsWith("{{") && current.endsWith("}}")) {
+         String inner = current.substring(1, current.length() - 1).trim();
+         String balancedInner = extractFirstJsonObject(inner);
+         if (balancedInner == null || balancedInner.length() != inner.length()) {
+            return null;
+         }
+         current = inner;
+      }
+      return current.equals(content.trim()) ? null : current;
    }
 
    /** Truncate raw content for safe logging (single visible block, capped length). */

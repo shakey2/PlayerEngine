@@ -190,15 +190,48 @@ public final class WaypointAutoRegistrar {
         WaypointRecord record = WaypointIngestionService.ingest(
                 mod, outcome.snapshot(), originToken, existing);
 
-        // Re-canonicalization guard: if the matched record's canonical id differs from the
-        // live scan's (double chest split/re-paired since it was written), delete the old
-        // record first so it cannot survive as an orphan.
-        if (existing != null && !record.id.equals(existing.id)) {
-            store.delete(existing.id);
+        WaypointMutationResult mutation = existing != null
+                ? store.replace(existing.id, record)
+                : store.upsert(record);
+        switch (mutation.status()) {
+            case COMMITTED, NO_CHANGE -> {
+                // Authoritative data and derived index are healthy.
+            }
+            case COMMITTED_INDEX_DEGRADED, NO_CHANGE_INDEX_DEGRADED -> {
+                String reason = mutation.status() == WaypointMutationStatus.COMMITTED_INDEX_DEGRADED
+                        ? "index_update_failed_after_commit"
+                        : "index_repair_failed_no_change";
+                context.runState().setWaypointDegraded(DegradationLevel.PARTIAL, reason);
+                mod.reportAgenticProgress(
+                        WaypointReportFormatter.indexDegradedComponent(
+                                mutation.status() == WaypointMutationStatus.COMMITTED_INDEX_DEGRADED),
+                        true);
+            }
+            case FAILED_JSON_COMMIT -> {
+                skip(context, mod, "json_commit_failed", DegradationLevel.PARTIAL);
+                return;
+            }
+            case NOT_FOUND, NOT_FOUND_INDEX_DEGRADED -> {
+                skip(context, mod,
+                        mutation.status() == WaypointMutationStatus.NOT_FOUND_INDEX_DEGRADED
+                                ? "captured_waypoint_missing_index_degraded"
+                                : "captured_waypoint_missing",
+                        DegradationLevel.PARTIAL);
+                return;
+            }
+            case REJECTED_TYPE_CONFLICT, REJECTED_TARGET_CONFLICT -> {
+                skip(context, mod, mutation.status().name().toLowerCase(java.util.Locale.ROOT),
+                        DegradationLevel.PARTIAL);
+                return;
+            }
+            case FAILED_STORE_UNAVAILABLE -> {
+                skip(context, mod, "store_unavailable", DegradationLevel.SKIPPED);
+                return;
+            }
         }
 
-        // Upsert (the store persists and reindexes internally)
-        store.upsert(record);
+        WaypointRecord authoritative = mutation.current() != null ? mutation.current() : record;
+        WaypointIngestionService.schedulePolishAfterCommit(mod, authoritative);
 
         // Player milestone line (never throttled — milestone=true)
         String posStr = ContainerResolver.formatPos(pos);
@@ -206,7 +239,7 @@ public final class WaypointAutoRegistrar {
 
         PlayerEngine.LOGGER.info(
                 "WaypointAutoRegistrar: auto-registered waypoint id={} at {} origin={}.",
-                record.id, posStr, originToken);
+                authoritative.id, posStr, originToken);
     }
 
     // -------------------------------------------------------------------------

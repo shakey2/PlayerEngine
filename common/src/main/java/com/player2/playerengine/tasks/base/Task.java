@@ -13,6 +13,9 @@ public abstract class Task {
    private boolean first = true;
    private boolean stopped = false;
    private boolean active = false;
+   /** Installed in a chain but not yet given its first tick. */
+   private boolean assigned = false;
+   private boolean transientlySuspended = false;
 
    public void tick(TaskChain parentChain) {
       this.controller = parentChain.controller;
@@ -20,6 +23,7 @@ public abstract class Task {
       if (this.first) {
          Debug.logInternal("Task START: " + this);
          this.active = true;
+         this.assigned = false;
          this.onStart();
          this.first = false;
          this.stopped = false;
@@ -53,6 +57,8 @@ public abstract class Task {
       this.first = true;
       this.active = false;
       this.stopped = false;
+      this.assigned = true;
+      this.transientlySuspended = false;
    }
 
    public void stop() {
@@ -60,19 +66,27 @@ public abstract class Task {
    }
 
    public void stop(Task interruptTask) {
-      if (this.active) {
+      if ((this.active || this.assigned) && !this.stopped) {
          Debug.logInternal("Task STOP: " + this + ", interrupted by " + interruptTask);
-         if (!this.first) {
+         if ((this.transientlySuspended || this.assigned)
+               && this instanceof TransientlyResumableTask resumable) {
+            resumable.onTransientResumeAbandoned();
+         } else if (!this.first) {
             this.onStop(interruptTask);
          }
 
          if (this.sub != null && !this.sub.stopped()) {
             this.sub.stop(interruptTask);
          }
+         if (this instanceof TransientlyResumableTask resumable) {
+            resumable.afterChildrenStopped();
+         }
 
          this.first = true;
          this.active = false;
+         this.assigned = false;
          this.stopped = true;
+         this.transientlySuspended = false;
       }
    }
 
@@ -82,16 +96,75 @@ public abstract class Task {
    }
 
    public void interrupt(Task interruptTask) {
+      this.interrupt(interruptTask, TaskSuspensionCause.HIGHER_PRIORITY_CHAIN);
+   }
+
+   /**
+    * Interrupts execution for a scheduler-owned transient pause. Resumable tasks receive their
+    * checkpoint hook instead of the terminal {@link #onStop(Task)} hook; all legacy tasks retain the
+    * historical interrupt behavior.
+    */
+   public void interrupt(Task interruptTask, TaskSuspensionCause cause) {
       if (this.active) {
+         boolean checkpointDeclined = false;
+         boolean resumableCandidate = false;
          if (!this.first) {
-            this.onStop(interruptTask);
+            boolean prepared = false;
+            resumableCandidate = !this.isFinished()
+                  && this instanceof TransientlyResumableTask;
+            if (resumableCandidate) {
+               TransientlyResumableTask resumable = (TransientlyResumableTask)this;
+               prepared = resumable.prepareForTransientResume(
+                     java.util.Objects.requireNonNull(cause, "cause"));
+            }
+            this.transientlySuspended = prepared && !this.isFinished();
+            if (!this.transientlySuspended && !resumableCandidate) {
+               this.onStop(interruptTask);
+            }
+            checkpointDeclined = resumableCandidate && !this.transientlySuspended;
          }
 
          if (this.sub != null && !this.sub.stopped()) {
-            this.sub.interrupt(interruptTask);
+            this.sub.interrupt(interruptTask, cause);
+         }
+         if (this.transientlySuspended || checkpointDeclined) {
+            // The root checkpoint owns reconstruction from live state. Never retain an in-flight
+            // child which may compare equal to a fresh child while carrying stale attempt state.
+            if (this.sub != null && !this.sub.stopped()) {
+               // interrupt() has already delivered the child's cleanup hook. stop() now only seals
+               // its framework lifecycle so the detached child cannot remain logically active.
+               this.sub.stop(interruptTask);
+            }
+            this.sub = null;
+         }
+         if (checkpointDeclined) {
+            // Typed tasks that decline a checkpoint are terminalized only after child LIFO cleanup.
+            this.onStop(interruptTask);
+         }
+         if (this instanceof TransientlyResumableTask resumable) {
+            resumable.afterChildrenStopped();
          }
 
          this.first = true;
+         if (checkpointDeclined) {
+            // A task that explicitly implements the checkpoint contract but declines this pause is
+            // fail-clean, not restartable. The chain reaps it when it next wins priority.
+            this.active = false;
+            this.assigned = false;
+            this.stopped = true;
+         }
+      }
+   }
+
+   /** True only between a successful transient checkpoint and reset/resume or terminal discard. */
+   public boolean isTransientlySuspended() {
+      return this.transientlySuspended;
+   }
+
+   /** Discards a task which was detached for a transient overlay without losing its terminal hook. */
+   public void abandonTransientResume() {
+      if (this.transientlySuspended) {
+         this.stop(null);
       }
    }
 
@@ -109,6 +182,11 @@ public abstract class Task {
 
    public boolean isActive() {
       return this.active;
+   }
+
+   /** True after chain installation and before the task's first tick. */
+   public boolean isAssigned() {
+      return this.assigned;
    }
 
    public boolean stopped() {

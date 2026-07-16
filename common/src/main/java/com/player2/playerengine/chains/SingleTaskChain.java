@@ -19,11 +19,13 @@ public abstract class SingleTaskChain extends TaskChain {
    @Override
    protected void onTick() {
       if (this.isActive()) {
-         if (this.interrupted) {
-            this.interrupted = false;
-            if (this.mainTask != null) {
-               this.mainTask.reset();
-            }
+          if (this.interrupted) {
+             this.interrupted = false;
+             if (this.mainTask != null
+                   && !this.mainTask.stopped()
+                   && !this.mainTask.isFinished()) {
+                this.mainTask.reset();
+             }
          }
 
          if (this.mainTask != null) {
@@ -52,12 +54,40 @@ public abstract class SingleTaskChain extends TaskChain {
    }
 
    public void setTask(Task task) {
+      this.installTask(task, false);
+   }
+
+   /** Installs a fresh task even when its equality contract matches the current task. */
+   protected void replaceTask(Task task) {
+      this.installTask(task, true);
+   }
+
+   /**
+    * Installs a short overlay after the current task has explicitly checkpointed itself through
+    * {@link Task#interrupt(Task, com.player2.playerengine.tasks.base.TaskSuspensionCause)}. The old
+    * task is retained by the caller and must not receive the terminal stop hook used by a genuine
+    * replacement.
+    */
+   protected void replaceTaskAfterTransientSuspend(Task task) {
+      if (this.mainTask == null
+            || (!this.mainTask.isTransientlySuspended() && !this.mainTask.isAssigned())) {
+         throw new IllegalStateException("transient overlay requires a prepared suspended task");
+      }
+      this.mainTask = task;
+      if (task != null) {
+         task.controller = this.controller;
+         task.reset();
+      }
+   }
+
+   private void installTask(Task task, boolean forceReplace) {
       if (this.mainTask != null && this.mainTask.controller == null) {
          this.mainTask.controller = this.controller;
       }
 
       boolean replace =
-            this.mainTask == null
+            forceReplace
+                  || this.mainTask == null
                   || this.mainTask.isFinished()
                   || this.mainTask.stopped()
                   || !this.mainTask.equals(task);
@@ -88,7 +118,8 @@ public abstract class SingleTaskChain extends TaskChain {
       }
 
       this.interrupted = true;
-      if (this.mainTask != null && this.mainTask.isActive()) {
+      if (this.mainTask != null && this.mainTask.isActive()
+            && !this.mainTask.isFinished()) {
          this.mainTask.interrupt(null);
       }
    }

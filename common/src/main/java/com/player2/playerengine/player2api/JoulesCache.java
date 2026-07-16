@@ -38,10 +38,14 @@ public final class JoulesCache {
         final AtomicBoolean hardMessagedThisSnapshot = new AtomicBoolean(false);
 
         JoulesSnapshot(long joulesRaw, String patronTier, String userId) {
+            this(joulesRaw, patronTier, userId, System.currentTimeMillis());
+        }
+
+        private JoulesSnapshot(long joulesRaw, String patronTier, String userId, long refreshedAtMs) {
             this.joulesRaw = joulesRaw;
             this.patronTier = patronTier != null ? patronTier : "";
             this.userId = userId != null ? userId : "";
-            this.refreshedAtMs = System.currentTimeMillis();
+            this.refreshedAtMs = refreshedAtMs;
         }
 
         /**
@@ -54,7 +58,12 @@ public final class JoulesCache {
         }
 
         public boolean isPatron() {
-            return !patronTier.isEmpty();
+            return !patronTier.isBlank();
+        }
+
+        boolean isFresh(long maxAgeMs) {
+            long ageMs = System.currentTimeMillis() - refreshedAtMs;
+            return maxAgeMs >= 0L && ageMs >= 0L && ageMs <= maxAgeMs;
         }
     }
 
@@ -63,6 +72,18 @@ public final class JoulesCache {
      */
     public static JoulesSnapshot snapshotForProbe(long joulesDisplay, String patronTier) {
         return new JoulesSnapshot(joulesDisplay, patronTier != null ? patronTier : "", "probe");
+    }
+
+    static JoulesSnapshot snapshotForProbe(long joulesDisplay, String patronTier, long refreshedAtMs) {
+        return new JoulesSnapshot(joulesDisplay, patronTier != null ? patronTier : "", "probe", refreshedAtMs);
+    }
+
+    static boolean isFreshPatronSnapshot(JoulesSnapshot snapshot, BudgetThresholds config) {
+        if (snapshot == null || config == null || !snapshot.isPatron()) {
+            return false;
+        }
+        long maxAgeMs = Math.max(1L, config.getJoulesRefreshIntervalSeconds()) * 1_000L;
+        return snapshot.isFresh(maxAgeMs);
     }
 
     /**
@@ -102,8 +123,14 @@ public final class JoulesCache {
                     apiService.billingOrFallback());
 
             long joulesRaw = response.containsKey("joules") ? response.get("joules").getAsLong() : 0L;
-            String patronTier = response.containsKey("patron_tier") ? response.get("patron_tier").getAsString() : "";
-            String userId = response.containsKey("user_id") ? response.get("user_id").getAsString() : "";
+            JsonElement patronTierElement = response.get("patron_tier");
+            String patronTier = patronTierElement != null && patronTierElement.isJsonPrimitive()
+                    && patronTierElement.getAsJsonPrimitive().isString()
+                    ? patronTierElement.getAsString() : "";
+            JsonElement userIdElement = response.get("user_id");
+            String userId = userIdElement != null && userIdElement.isJsonPrimitive()
+                    && userIdElement.getAsJsonPrimitive().isString()
+                    ? userIdElement.getAsString() : "";
 
             JoulesSnapshot snap = new JoulesSnapshot(joulesRaw, patronTier, userId);
             CACHE.put(billingKey, snap);

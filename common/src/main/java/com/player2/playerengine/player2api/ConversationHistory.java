@@ -25,8 +25,8 @@ public class ConversationHistory {
    private final List<JsonObject> conversationHistory = new ArrayList<>();
    private final Path historyFile;
    private boolean loadedFromFile = false;
-   private static final int MAX_HISTORY = 64;
-   private static final int SUMMARY_COUNT = 48;
+   static final int MAX_HISTORY = 16;
+   static final int COMPACTION_TAIL_COUNT = 8;
 
    public ConversationHistory(String initialSystemPrompt, Path historyFile) {
       this.historyFile = historyFile;
@@ -82,14 +82,22 @@ public class ConversationHistory {
 
    public void addHistory(JsonObject text, boolean doCutOff, Player2APIService player2apiService) {
       this.conversationHistory.add(text);
-      if (doCutOff && this.conversationHistory.size() > 64) {
-         List<JsonObject> toSummarize = new ArrayList<>(this.conversationHistory.subList(1, 49));
+      if (!doCutOff && this.conversationHistory.size() > MAX_HISTORY) {
+         // User/info turns are sent before an assistant reply exists. Enforce the bound now so a
+         // failure-feedback turn can never create the 33rd-message request seen in the live incident.
+         trimOldestToLimit(this.conversationHistory);
+      }
+      if (doCutOff && this.conversationHistory.size() > MAX_HISTORY) {
+         int tailStart = compactionTailStart(this.conversationHistory.size());
+         List<JsonObject> toSummarize = new ArrayList<>(this.conversationHistory.subList(1, tailStart));
          String summary = this.summarizeHistory(toSummarize, player2apiService);
-         if (summary == "") {
-            this.conversationHistory.remove(1);
+         if (summary == null || summary.isBlank()) {
+            // Summarization is best-effort. If its API call fails, still enforce the bounded
+            // retention contract deterministically instead of deleting only one message and
+            // carrying an oversized history into the next completion.
+            trimOldestToLimit(this.conversationHistory);
          } else {
             JsonObject systemPrompt = this.conversationHistory.get(0);
-            int tailStart = this.conversationHistory.size() - 16;
             List<JsonObject> tail = new ArrayList<>(
                   this.conversationHistory.subList(tailStart, this.conversationHistory.size()));
             this.conversationHistory.clear();
@@ -184,9 +192,7 @@ public class ConversationHistory {
                }
 
                loaded.add(obj);
-               if (loaded.size() > 64) {
-                  break;
-               }
+               trimOldestToLimit(loaded);
             }
 
             this.conversationHistory.clear();
@@ -228,6 +234,9 @@ public class ConversationHistory {
          systemMessage.addProperty("content", LogEgressGuard.capForModel(newPrompt, "system"));
          this.conversationHistory.add(0, systemMessage);
       }
+      // A corrupt/missing persisted system line can leave MAX_HISTORY non-system entries loaded;
+      // inserting the restored base prompt must still honor the strict pre-request retention limit.
+      trimOldestToLimit(this.conversationHistory);
    }
 
    public void addSystemMessage(String systemText, Player2APIService player2apiService) {
@@ -351,6 +360,17 @@ public class ConversationHistory {
    public ConversationHistory copyThenWrapLatestWithStatus(String worldStatus, String agentStatus,
          String altoclefStatusMsgs, Player2APIService player2apiService, Optional<String> reminderString,
          Optional<String> validCommandsBlock, Optional<String> memoryBlock, Optional<String> moodBlock) {
+      return copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoclefStatusMsgs,
+            player2apiService, reminderString, validCommandsBlock, memoryBlock, moodBlock, Optional.empty());
+   }
+
+   // Additional prompt overload: identical body PLUS the player-authored per-character prompt injected
+   // at the TAIL of the throwaway copy, AFTER currentMood. It never enters message 0 or persisted
+   // conversation.jsonl, preserving the prefix-cache invariant.
+   public ConversationHistory copyThenWrapLatestWithStatus(String worldStatus, String agentStatus,
+         String altoclefStatusMsgs, Player2APIService player2apiService, Optional<String> reminderString,
+         Optional<String> validCommandsBlock, Optional<String> memoryBlock, Optional<String> moodBlock,
+         Optional<String> additionalPromptBlock) {
       ConversationHistory copy = new ConversationHistory(this.conversationHistory.get(0).get("content").getAsString());
 
       for (int i = 1; i < this.conversationHistory.size() - 1; i++) {
@@ -383,6 +403,9 @@ public class ConversationHistory {
             moodBlock
                   .filter(s -> !s.isBlank())
                   .ifPresent(block -> msgObj.add("currentMood", block));
+            additionalPromptBlock
+                  .filter(s -> !s.isBlank())
+                  .ifPresent(block -> msgObj.add("additionalPrompt", block));
             last.addProperty("content", msgObj.toString());
          }
 
@@ -447,5 +470,22 @@ public class ConversationHistory {
 
    public Path getHistoryFile() {
       return this.historyFile;
+   }
+
+   static int compactionTailStart(int historySize) {
+      return Math.max(1, historySize - COMPACTION_TAIL_COUNT);
+   }
+
+   static void trimOldestToLimit(List<JsonObject> history) {
+      if (history == null) {
+         return;
+      }
+      while (history.size() > MAX_HISTORY) {
+         // Preserve the base system prompt when present; otherwise retain the newest entries.
+         int removeIndex = !history.isEmpty()
+               && history.get(0).has("role")
+               && "system".equals(history.get(0).get("role").getAsString()) ? 1 : 0;
+         history.remove(removeIndex);
+      }
    }
 }

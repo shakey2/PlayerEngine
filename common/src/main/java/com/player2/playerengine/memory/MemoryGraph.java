@@ -66,7 +66,7 @@ public final class MemoryGraph {
      */
     public MemoryNode mergeNode(MemoryNode incoming) {
         if (incoming == null) return null;
-        String canon = MemoryCaps.capName(incoming.canonicalName());
+        String canon = normalizeDurableCanonicalName(MemoryCaps.capName(incoming.canonicalName()), incoming);
         String key = canonicalKey(canon);
 
         String existingId = (key != null) ? canonicalNameToId.get(key) : null;
@@ -280,6 +280,29 @@ public final class MemoryGraph {
         return t.isEmpty() ? null : t;
     }
 
+    private static String normalizeDurableCanonicalName(String canon, MemoryNode incoming) {
+        MemoryNodeType type = incoming == null ? null : MemoryNodeType.fromWire(incoming.type());
+        if (!MemoryDurableFactClassifier.isDurableFactType(type) || canon == null || canon.isBlank()) {
+            return canon;
+        }
+        String normalized = canon;
+        normalized = normalized.replaceAll("(?i)\\bfavourite\\b", "favorite");
+        normalized = normalized.replaceAll("(?i)\\bfavourites\\b", "favorites");
+        normalized = normalized.replaceAll("(?i)\\bcolour\\b", "color");
+        normalized = normalized.replaceAll("(?i)\\bcolours\\b", "colors");
+        normalized = normalized.replaceAll("(?i)\\bvideogames\\b", "video games");
+        normalized = normalized.replaceAll("(?i)\\bvideogame\\b", "video game");
+        normalized = normalized.replaceAll("(?i)\\bvideo games\\b", "video game");
+
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        String legacyColorSuffix = " color preference";
+        if (lower.endsWith(legacyColorSuffix)) {
+            normalized = normalized.substring(0, normalized.length() - legacyColorSuffix.length())
+                    + " favorite color";
+        }
+        return MemoryCaps.capName(normalized);
+    }
+
     private void dropEdgeKey(String edgeKey) {
         MemoryEdge e = edges.remove(edgeKey);
         if (e == null) return;
@@ -321,6 +344,9 @@ public final class MemoryGraph {
 
     /** Set-union merge of {@code incoming} into {@code existing}, keeping existing's id. */
     private static MemoryNode unionMerge(MemoryNode existing, MemoryNode incoming, String canon) {
+        if (isDurableFactMerge(existing, incoming)) {
+            return durableFactMerge(existing, incoming, canon);
+        }
         // Union aliases (and fold each node's own canonical name into the other's aliases is NOT
         // done — canonical name stays the existing one; only alias/tag sets union).
         LinkedHashSet<String> aliasSet = new LinkedHashSet<>(existing.aliases());
@@ -358,6 +384,61 @@ public final class MemoryGraph {
         return new MemoryNode(existing.id(), content, type, MemoryCaps.capName(canon),
                 aliases, tags, importance, createdTick, timestampMs, lastSeen, lastRetrieved,
                 mentionCount, vector, vectorModel, existing.schemaVersion());
+    }
+
+    private static boolean isDurableFactMerge(MemoryNode existing, MemoryNode incoming) {
+        MemoryNodeType existingType = MemoryNodeType.fromWire(existing.type());
+        MemoryNodeType incomingType = MemoryNodeType.fromWire(incoming.type());
+        return MemoryDurableFactClassifier.isDurableFactType(existingType)
+                || MemoryDurableFactClassifier.isDurableFactType(incomingType);
+    }
+
+    /**
+     * Durable fact/preference nodes are atomic, not dossiers. A newer durable upsert replaces the
+     * value-specific content/tags instead of unioning old values like "green" into a corrected "blue"
+     * preference. If a later non-durable upsert happens to share the canonical name, preserve the
+     * resident durable node and only refresh counters/recency.
+     */
+    private static MemoryNode durableFactMerge(MemoryNode existing, MemoryNode incoming, String canon) {
+        MemoryNodeType incomingType = MemoryNodeType.fromWire(incoming.type());
+        boolean incomingDurable = MemoryDurableFactClassifier.isDurableFactType(incomingType);
+        boolean incNewer = incoming.timestampMs() >= existing.timestampMs();
+        boolean replaceAtomicValue = incomingDurable && incNewer;
+
+        String content = MemoryCaps.capContent(replaceAtomicValue ? incoming.content() : existing.content());
+        String type = replaceAtomicValue && incomingType != null ? incomingType.wire() : existing.type();
+        String[] aliases = replaceAtomicValue
+                ? capList(incoming.aliases(), MemoryCaps.ALIASES_MAX, MemoryCaps.NAME_MAX)
+                : capList(existing.aliases(), MemoryCaps.ALIASES_MAX, MemoryCaps.NAME_MAX);
+        String[] tags = replaceAtomicValue
+                ? capList(incoming.tags(), MemoryCaps.TAGS_MAX, MemoryCaps.NAME_MAX)
+                : capList(existing.tags(), MemoryCaps.TAGS_MAX, MemoryCaps.NAME_MAX);
+
+        int importance = Math.max(existing.importance(), incoming.importance());
+        int mentionCount = existing.mentionCount() + incoming.mentionCount();
+        long lastSeen = Math.max(existing.lastSeenTick(), incoming.lastSeenTick());
+        long lastRetrieved = Math.max(existing.lastRetrievedTick(), incoming.lastRetrievedTick());
+        long timestampMs = Math.max(existing.timestampMs(), incoming.timestampMs());
+        long createdTick = mergedCreatedTick(existing, incoming);
+
+        boolean changed = replaceAtomicValue
+                && (!java.util.Objects.equals(content, existing.content())
+                    || !java.util.Objects.equals(type, existing.type())
+                    || !java.util.Arrays.equals(aliases, existing.aliases().toArray(new String[0]))
+                    || !java.util.Arrays.equals(tags, existing.tags().toArray(new String[0])));
+        float[] vector = changed ? null : existing.vector();
+        String vectorModel = changed ? null : existing.vectorModel();
+
+        return new MemoryNode(existing.id(), content, type, MemoryCaps.capName(canon),
+                aliases, tags, importance, createdTick, timestampMs, lastSeen, lastRetrieved,
+                mentionCount, vector, vectorModel, existing.schemaVersion());
+    }
+
+    private static long mergedCreatedTick(MemoryNode existing, MemoryNode incoming) {
+        long createdTick = Math.min(
+                existing.createdTick() == 0 ? Long.MAX_VALUE : existing.createdTick(),
+                incoming.createdTick() == 0 ? Long.MAX_VALUE : incoming.createdTick());
+        return createdTick == Long.MAX_VALUE ? existing.createdTick() : createdTick;
     }
 
     private static String[] capList(List<String> values, int maxCount, int maxLen) {
