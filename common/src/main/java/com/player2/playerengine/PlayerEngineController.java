@@ -30,9 +30,11 @@ import com.player2.playerengine.agentic.AgenticRunRegistry;
 import com.player2.playerengine.player2api.Character;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.tasks.base.TaskRunner;
+import com.player2.playerengine.tasks.movement.BodyLanguageTask;
 import com.player2.playerengine.trackers.*;
 import com.player2.playerengine.trackers.storage.ContainerSubTracker;
 import com.player2.playerengine.trackers.storage.ItemStorageTracker;
+import com.player2.playerengine.trackers.storage.SurvivalConsumptionLedger;
 import com.player2.playerengine.automaton.Baritone;
 import com.player2.playerengine.automaton.api.IBaritone;
 import com.player2.playerengine.automaton.api.entity.LivingEntityInventory;
@@ -40,14 +42,17 @@ import com.player2.playerengine.automaton.api.utils.IEntityContext;
 import com.player2.playerengine.automaton.api.utils.IInteractionController;
 import com.player2.playerengine.trackers.CacheTracker;
 
-import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.HashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.player2.playerengine.executor.IStepExecutorAdapter;
 import com.player2.playerengine.executor.RollbackPolicy;
@@ -60,6 +65,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.TickTask;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -95,10 +101,16 @@ public class PlayerEngineController {
    private InputControls inputControls;
    private SlotHandler slotHandler;
    private final ExplicitEquipPolicy explicitEquipPolicy = new ExplicitEquipPolicy();
+   private final SurvivalConsumptionLedger survivalConsumptionLedger = new SurvivalConsumptionLedger();
    private final PickupArmorEvalQueue pickupArmorEvalQueue;
    private final PickupWeaponEvalQueue pickupWeaponEvalQueue;
    private PlayerExtraController extraController;
    private PlayerEngineSettings settings;
+   private PlayerEngineSettings stagedSettings;
+   private Task observedUserTask;
+   private int stagedAdoptionFailures;
+   private volatile long settingsPublicationGeneration;
+   private volatile SettingsLiveState settingsLiveState = SettingsLiveState.APPLIED;
    private ChunkLoadingTracker chunkLoader;
    private boolean paused = false;
    private Task storedTask;
@@ -107,6 +119,10 @@ public class PlayerEngineController {
    public static HashMap<UUID, Player2APIService> staticAPIServices = new HashMap<>();
    /** Registry of all active PlayerEngineController instances by bot entity UUID. Used by server admin commands. */
    public static final ConcurrentHashMap<UUID, PlayerEngineController> staticControllers = new ConcurrentHashMap<>();
+   /** PlayerEngine-owned additions, keyed by the identity of Baritone's shared mutable setting list. */
+   private static final IdentityHashMap<List<Item>, LinkedHashSet<Item>> THROWAWAY_INJECTIONS =
+         new IdentityHashMap<>();
+   private static final AtomicLong SETTINGS_PUBLICATION_GENERATION = new AtomicLong();
    private boolean shouldDefendFromHostiles = false;
    /** FollowDiag beta logging (state-change-only); mirrors the LOGGER field on the other FollowDiag classes. */
    private static final Logger LOGGER = LogManager.getLogger();
@@ -126,6 +142,11 @@ public class PlayerEngineController {
    private String lastAgenticReportMessage = "";
 
    public PlayerEngineController(IBaritone baritone, Character character, String player2GameId) {
+      this(baritone, character, player2GameId, null);
+   }
+
+   public PlayerEngineController(IBaritone baritone, Character character, String player2GameId, Player owner) {
+      this.owner = owner;
       this.baritone = baritone;
       this.ctx = baritone.getEntityContext();
       this.commandExecutor = new CommandExecutor(this);
@@ -162,13 +183,11 @@ public class PlayerEngineController {
       this.initializeCommands();
       PlayerEngineSettings.load(
             newSettings -> {
-               this.settings = newSettings != null ? newSettings : new PlayerEngineSettings();
-               List<Item> baritoneCanPlace = Arrays.stream(this.settings.getThrowawayItems(this, true)).toList();
-               this.getBaritoneSettings().acceptableThrowawayItems.get().addAll(baritoneCanPlace);
+               this.applyInitiallyLoadedSettings(newSettings);
                if ((!this.getUserTaskChain().isActive() || this.getUserTaskChain().isRunningIdleTask())
-                     && this.getModSettings().shouldRunIdleCommandWhenNotActive()) {
-                  this.getUserTaskChain().signalNextTaskToBeIdleTask();
-                  this.getCommandExecutor().executeWithPrefix(this.getModSettings().getIdleCommand());
+                      && this.getModSettings().shouldRunIdleCommandWhenNotActive()) {
+                  this.getUserTaskChain().runIdleCommand(() -> this.getCommandExecutor()
+                        .executeWithPrefix(this.getModSettings().getIdleCommand()));
                }
 
                this.getExtraBaritoneSettings().avoidBlockBreak(this.userBlockRangeTracker::isNearUserTrackedBlock);
@@ -187,6 +206,7 @@ public class PlayerEngineController {
    }
 
    public void serverTick() {
+      this.observeSettingsTaskBoundary();
       this.inputControls.onTickPre();
       this.storageTracker.setDirty();
       this.miscBlockTracker.tick();
@@ -391,6 +411,26 @@ public class PlayerEngineController {
       });
    }
 
+   /** Installs a scheduler-visible idle policy task without transient next-task state. */
+   public void runIdleUserTask(Task task, Runnable onFinish) {
+      this.userTaskChain.runIdleTask(this, task, onFinish);
+   }
+
+   public void runIdleUserTask(Task task) {
+      this.runIdleUserTask(task, () -> {
+      });
+   }
+
+   /** Clears a policy-idle task without cancelling or replacing real user work. */
+   public boolean clearPolicyIdleUserTask() {
+      return this.userTaskChain.clearPolicyIdleTask();
+   }
+
+   /** Pre-mutation gate for tracked work emitted by the configured idle command. */
+   public boolean rejectsConfiguredIdleTrackedSubmission() {
+      return this.userTaskChain.rejectsConfiguredIdleTrackedSubmission();
+   }
+
    /**
     * Submit a task for tracked execution through the Phase A2 executor adapter.
     *
@@ -460,7 +500,7 @@ public class PlayerEngineController {
    }
 
    public java.util.Optional<com.player2.playerengine.executor.StepExecution> getActiveTrackedStep() {
-      return this.stepExecutorAdapter.getActiveExecution();
+      return this.stepExecutorAdapter.getRunningExecution();
    }
 
    public BotBehaviour getBehaviour() {
@@ -485,6 +525,10 @@ public class PlayerEngineController {
 
    public ItemStorageTracker getItemStorage() {
       return this.storageTracker;
+   }
+
+   public SurvivalConsumptionLedger getSurvivalConsumptionLedger() {
+      return this.survivalConsumptionLedger;
    }
 
    public EntityTracker getEntityTracker() {
@@ -512,6 +556,257 @@ public class PlayerEngineController {
          this.settings = new PlayerEngineSettings();
       }
       return this.settings;
+   }
+
+   public record SettingsPublicationOutcome(int controllerCount, int appliedCount,
+                                            int pendingCount, int failedCount) {
+      public boolean fullyApplied() {
+         return this.pendingCount == 0 && this.failedCount == 0;
+      }
+
+      public boolean hasFailures() {
+         return this.failedCount > 0;
+      }
+   }
+
+   public enum SettingsLiveState {
+      APPLIED,
+      PENDING,
+      FAILED
+   }
+
+   private enum ControllerPublicationState {
+      APPLIED,
+      PENDING,
+      FAILED
+   }
+
+   public static SettingsPublicationOutcome publishSettingsFromAdmin(PlayerEngineSettings settings) {
+      if (settings == null) {
+         return new SettingsPublicationOutcome(1, 0, 0, 1);
+      }
+      List<PlayerEngineController> controllers;
+      try {
+         controllers = List.copyOf(staticControllers.values());
+      } catch (RuntimeException e) {
+         LOGGER.warn("Unable to snapshot PlayerEngine controllers for an admin settings publication.", e);
+         return new SettingsPublicationOutcome(1, 0, 0, 1);
+      }
+      long generation = SETTINGS_PUBLICATION_GENERATION.incrementAndGet();
+      int applied = 0;
+      int pending = 0;
+      int failed = 0;
+      for (PlayerEngineController controller : controllers) {
+         ControllerPublicationState state = ControllerPublicationState.FAILED;
+         try {
+            LivingEntity player = controller.getPlayer();
+            MinecraftServer server = player == null ? null : player.getServer();
+            if (server == null) {
+               controller.markSettingsPublicationState(generation, SettingsLiveState.FAILED);
+               state = ControllerPublicationState.FAILED;
+            } else {
+               PlayerEngineSettings controllerCopy = settings.defensiveCopy();
+               if (server.isSameThread()) {
+                  state = applyAdminSettingsSafely(controller, controllerCopy, server, generation, true);
+               } else {
+                  controller.markSettingsPublicationState(generation, SettingsLiveState.PENDING);
+                  server.execute(() -> applyAdminSettingsSafely(
+                        controller, controllerCopy, server, generation, true));
+                  state = ControllerPublicationState.PENDING;
+               }
+            }
+         } catch (RuntimeException e) {
+            controller.markSettingsPublicationState(generation, SettingsLiveState.FAILED);
+            LOGGER.warn("Unable to publish admin settings to one PlayerEngine controller; continuing.", e);
+         }
+         switch (state) {
+            case APPLIED -> applied++;
+            case PENDING -> pending++;
+            case FAILED -> failed++;
+         }
+      }
+      return new SettingsPublicationOutcome(controllers.size(), applied, pending, failed);
+   }
+
+   public static SettingsLiveState currentSettingsLiveState() {
+      SettingsLiveState aggregate = SettingsLiveState.APPLIED;
+      try {
+         for (PlayerEngineController controller : staticControllers.values()) {
+            if (controller == null) {
+               continue;
+            }
+            SettingsLiveState state = controller.settingsLiveState;
+            if (state == SettingsLiveState.FAILED) {
+               return SettingsLiveState.FAILED;
+            }
+            if (state == SettingsLiveState.PENDING) {
+               aggregate = SettingsLiveState.PENDING;
+            }
+         }
+      } catch (RuntimeException e) {
+         LOGGER.warn("Unable to inspect PlayerEngine live settings state.", e);
+         return SettingsLiveState.FAILED;
+      }
+      return aggregate;
+   }
+
+   private static ControllerPublicationState applyAdminSettingsSafely(
+         PlayerEngineController controller,
+         PlayerEngineSettings settings,
+         MinecraftServer server,
+         long generation,
+      boolean retryAllowed) {
+      try {
+         return controller.applyAdminSettings(settings, generation);
+      } catch (RuntimeException e) {
+         LOGGER.warn("Unable to apply admin settings to one PlayerEngine controller.", e);
+         if (retryAllowed && server != null) {
+            try {
+               server.tell(new TickTask(server.getTickCount() + 1,
+                     () -> applyAdminSettingsSafely(controller, settings, server, generation, false)));
+               controller.markSettingsPublicationState(generation, SettingsLiveState.PENDING);
+               return ControllerPublicationState.PENDING;
+            } catch (RuntimeException retryScheduleFailure) {
+               LOGGER.warn("Unable to schedule one PlayerEngine admin settings retry.", retryScheduleFailure);
+            }
+         }
+         controller.markSettingsPublicationState(generation, SettingsLiveState.FAILED);
+         return ControllerPublicationState.FAILED;
+      }
+   }
+
+   private void applyInitiallyLoadedSettings(PlayerEngineSettings newSettings) {
+      PlayerEngineSettings initial = newSettings != null
+            ? newSettings.defensiveCopy() : new PlayerEngineSettings();
+      this.reconcileAcceptableThrowawayItems(initial);
+      this.settings = initial;
+      this.stagedSettings = null;
+      this.stagedAdoptionFailures = 0;
+      this.settingsLiveState = SettingsLiveState.APPLIED;
+   }
+
+   private synchronized ControllerPublicationState applyAdminSettings(
+         PlayerEngineSettings newSettings, long generation) {
+      if (newSettings == null) {
+         throw new IllegalArgumentException("Admin settings publication cannot be null");
+      }
+      if (generation < this.settingsPublicationGeneration) {
+         return switch (this.settingsLiveState) {
+            case APPLIED -> ControllerPublicationState.APPLIED;
+            case PENDING -> ControllerPublicationState.PENDING;
+            case FAILED -> ControllerPublicationState.FAILED;
+         };
+      }
+      PlayerEngineSettings desired = newSettings.defensiveCopy();
+      Task currentTask = this.userTaskChain == null ? null : this.userTaskChain.getCurrentTask();
+      boolean activeRealTask = this.userTaskChain != null
+            && this.userTaskChain.hasActiveNonIdleUserTask();
+      if (activeRealTask) {
+         PlayerEngineSettings live = desired.defensiveCopy();
+         live.copyNextTaskValuesFrom(this.getModSettings());
+         this.settings = live;
+         this.stagedSettings = desired;
+         this.stagedAdoptionFailures = 0;
+         if (!(currentTask instanceof BodyLanguageTask)) {
+            this.observedUserTask = currentTask;
+         }
+         this.settingsPublicationGeneration = generation;
+         this.settingsLiveState = SettingsLiveState.PENDING;
+         return ControllerPublicationState.PENDING;
+      }
+
+      this.reconcileAcceptableThrowawayItems(desired);
+      this.settings = desired;
+      this.stagedSettings = null;
+      this.observedUserTask = null;
+      this.stagedAdoptionFailures = 0;
+      this.settingsPublicationGeneration = generation;
+      this.settingsLiveState = SettingsLiveState.APPLIED;
+      return ControllerPublicationState.APPLIED;
+   }
+
+   private synchronized void markSettingsPublicationState(long generation, SettingsLiveState state) {
+      if (state != null && generation >= this.settingsPublicationGeneration) {
+         this.settingsPublicationGeneration = generation;
+         this.settingsLiveState = state;
+      }
+   }
+
+   private void observeSettingsTaskBoundary() {
+      if (this.userTaskChain == null) {
+         return;
+      }
+      Task currentTask = this.userTaskChain.getCurrentTask();
+      if (currentTask instanceof BodyLanguageTask) {
+         // A transient gesture is an overlay, not a next-task boundary. Preserve the underlying
+         // task identity so resuming it cannot activate staged settings mid-task.
+         return;
+      }
+      if (!this.userTaskChain.hasActiveNonIdleUserTask() || currentTask == null) {
+         this.observedUserTask = null;
+         this.adoptStagedSettings();
+      } else if (this.observedUserTask == null) {
+         this.observedUserTask = currentTask;
+      } else if (this.observedUserTask != currentTask) {
+         this.observedUserTask = currentTask;
+         this.adoptStagedSettings();
+      }
+   }
+
+   private void adoptStagedSettings() {
+      if (this.stagedSettings == null || this.stagedAdoptionFailures >= 2) {
+         return;
+      }
+      PlayerEngineSettings desired = this.stagedSettings;
+      try {
+         this.reconcileAcceptableThrowawayItems(desired);
+         this.settings = desired;
+         this.stagedSettings = null;
+         this.stagedAdoptionFailures = 0;
+         this.settingsLiveState = SettingsLiveState.APPLIED;
+      } catch (RuntimeException e) {
+         this.stagedAdoptionFailures++;
+         this.settingsLiveState = this.stagedAdoptionFailures >= 2
+               ? SettingsLiveState.FAILED : SettingsLiveState.PENDING;
+         LOGGER.warn("Unable to adopt staged PlayerEngine settings at a task boundary (attempt {}/2).",
+               this.stagedAdoptionFailures, e);
+      }
+   }
+
+   private void reconcileAcceptableThrowawayItems(PlayerEngineSettings newSettings) {
+      List<Item> acceptable = this.getBaritoneSettings().acceptableThrowawayItems.get();
+      LinkedHashSet<Item> configured = new LinkedHashSet<>();
+      for (Item item : newSettings.getThrowawayItems(this, true)) {
+         if (item != null) {
+            configured.add(item);
+         }
+      }
+      synchronized (THROWAWAY_INJECTIONS) {
+         List<Item> underlying = new ArrayList<>(acceptable);
+         LinkedHashSet<Item> previouslyInjected = THROWAWAY_INJECTIONS.get(acceptable);
+         if (previouslyInjected != null) {
+            for (Item item : previouslyInjected) {
+               underlying.remove(item);
+            }
+         }
+
+         LinkedHashSet<Item> underlyingItems = new LinkedHashSet<>(underlying);
+         LinkedHashSet<Item> newlyInjected = new LinkedHashSet<>();
+         for (Item item : configured) {
+            if (underlyingItems.add(item)) {
+               underlying.add(item);
+               newlyInjected.add(item);
+            }
+         }
+
+         acceptable.clear();
+         acceptable.addAll(underlying);
+         if (newlyInjected.isEmpty()) {
+            THROWAWAY_INJECTIONS.remove(acceptable);
+         } else {
+            THROWAWAY_INJECTIONS.put(acceptable, newlyInjected);
+         }
+      }
    }
 
    public FoodChain getFoodChain() {
@@ -600,7 +895,10 @@ public class PlayerEngineController {
 
    public void setOwner(Player owner) {
       this.owner = owner;
-      aiPersistantData.updateSystemPrompt();
+      if (aiPersistantData != null) {
+         aiPersistantData.rebindOwnerPersistenceIfChanged();
+         aiPersistantData.updateSystemPrompt();
+      }
    }
 
    public boolean isOwner(UUID playerToCheck) {

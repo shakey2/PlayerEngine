@@ -32,7 +32,6 @@ public class CollectCropTask extends ResourceTask {
    private final Block[] cropBlock;
    private final Set<BlockPos> emptyCropland = new HashSet<>();
    private final Task collectSeedTask;
-   private final HashSet<BlockPos> wasFullyGrown = new HashSet<>();
 
    public CollectCropTask(ItemTarget cropToCollect, Block[] cropBlock, Item[] cropSeed, Predicate<BlockPos> canBreak) {
       super(cropToCollect);
@@ -93,13 +92,7 @@ public class CollectCropTask extends ResourceTask {
             Blocks.FARMLAND
          );
       } else {
-         Predicate<BlockPos> validCrop = blockPos -> !this.canBreak.test(blockPos)
-            ? false
-            : (
-               mod.getModSettings().shouldReplantCrops() && !this.isMature(mod, blockPos)
-                  ? false
-                  : (mod.getWorld().getBlockState(blockPos).getBlock() == Blocks.WHEAT ? this.isMature(mod, blockPos) : true)
-            );
+         Predicate<BlockPos> validCrop = blockPos -> this.canBreak.test(blockPos) && this.isMature(mod, blockPos);
          if (this.isInWrongDimension(mod) && !mod.getBlockScanner().anyFound(validCrop, this.cropBlock)) {
             return this.getToCorrectDimensionTask(mod);
          } else {
@@ -157,21 +150,12 @@ public class CollectCropTask extends ResourceTask {
       if (mod.getChunkTracker().isChunkLoaded(blockPos) && WorldHelper.canReach(this.controller, blockPos)) {
          BlockState s = mod.getWorld().getBlockState(blockPos);
          if (s.getBlock() instanceof CropBlock crop) {
-            boolean mature = crop.isMaxAge(s);
-            if (this.wasFullyGrown.contains(blockPos)) {
-               if (!mature) {
-                  this.wasFullyGrown.remove(blockPos);
-               }
-            } else if (mature) {
-               this.wasFullyGrown.add(blockPos);
-            }
-
-            return mature;
+            return crop.isMaxAge(s);
          } else {
             return false;
          }
       } else {
-         return this.wasFullyGrown.contains(blockPos);
+         return false;
       }
    }
 }

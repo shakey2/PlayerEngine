@@ -20,6 +20,8 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     private int maxSpawnedCompanionsPerPlayer = 3;
     /** Max distinct character IDs with on-disk storage per player; 0 = unlimited (0–100). */
     private int maxStoredCharacterIdsPerPlayer = 20;
+    /** Default max output tokens for mod-built /v1/chat/completions requests. Clamped [1, 100000]. */
+    private int chatCompletionMaxOutputTokens = 10000;
 
     // --- Phase A4: Cost-safety controls ---
 
@@ -37,14 +39,14 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     /** How often to re-poll GET /v1/joules per billing key, in seconds [60–86400]. */
     private int joulesRefreshIntervalSeconds = 300;
 
-    /** AI profile name to route to at soft limits (null = no profile override). */
+    /** Named profile for soft-limit fallback; null means the implicit Default profile. */
     private String fallbackProfile = null;
     /** What to do at soft limits: SWITCH_PROFILE or HARD_STOP. */
     private BudgetFallbackBehavior budgetFallbackBehavior = BudgetFallbackBehavior.HARD_STOP;
 
     // --- Phase B3: RAG live prompt ---
 
-    /** Max tools injected into the NPC system prompt per turn (clamped 5–20 on read). */
+    /** Max tools injected into the NPC system prompt per turn (clamped 1–50 on read). */
     private int ragTopK = 12;
     /** When retrieval fails, fall back to the full command list instead of always-include only. */
     private boolean ragFallbackToFullList = true;
@@ -247,6 +249,22 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
         this.maxStoredCharacterIdsPerPlayer = maxStoredCharacterIdsPerPlayer;
     }
 
+    public int getChatCompletionMaxOutputTokens() {
+        return chatCompletionMaxOutputTokens;
+    }
+
+    public void setChatCompletionMaxOutputTokens(int chatCompletionMaxOutputTokens) {
+        this.chatCompletionMaxOutputTokens = chatCompletionMaxOutputTokens;
+    }
+
+    /** Clamped to [1, 100000]. */
+    public int getChatCompletionMaxOutputTokensClamped() {
+        int n = chatCompletionMaxOutputTokens;
+        if (n < 1) return 1;
+        if (n > 100000) return 100000;
+        return n;
+    }
+
     // --- Phase A4 getters/setters ---
 
     public int getSoftBudgetCallsPerWindow() { return softBudgetCallsPerWindow; }
@@ -267,8 +285,14 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
     public int getJoulesRefreshIntervalSeconds() { return joulesRefreshIntervalSeconds; }
     public void setJoulesRefreshIntervalSeconds(int v) { this.joulesRefreshIntervalSeconds = v; }
 
-    public String getFallbackProfile() { return fallbackProfile; }
-    public void setFallbackProfile(String v) { this.fallbackProfile = (v == null || v.isBlank()) ? null : v.trim(); }
+    public String getFallbackProfile() {
+        return fallbackProfile == null || fallbackProfile.isBlank()
+                || "Default".equalsIgnoreCase(fallbackProfile.trim()) ? null : fallbackProfile;
+    }
+    public void setFallbackProfile(String v) {
+        this.fallbackProfile = v == null || v.isBlank()
+                || "Default".equalsIgnoreCase(v.trim()) ? null : v;
+    }
 
     public BudgetFallbackBehavior getBudgetFallbackBehavior() {
         return budgetFallbackBehavior == null ? BudgetFallbackBehavior.HARD_STOP : budgetFallbackBehavior;
@@ -283,11 +307,11 @@ public class Player2ServerRuntimeConfig implements BudgetThresholds {
 
     public void setRagTopK(int v) { this.ragTopK = v; }
 
-    /** Clamped to [5, 20]. */
+    /** Clamped to [1, 50]. */
     public int getRagTopKClamped() {
         int k = ragTopK;
-        if (k < 5) return 5;
-        if (k > 20) return 20;
+        if (k < 1) return 1;
+        if (k > 50) return 50;
         return k;
     }
 

@@ -20,8 +20,8 @@ import java.util.Optional;
  *   <li>{@code RERANKING} or {@code SUMMARIZATION} → Default (always cheapest).
  *   <li>{@code PLANNING} or {@code DECISION} + Joules snapshot present + soft threshold enabled
  *       + balance below threshold → Default (Joules-soft demotion).
- *   <li>{@code PLANNING} or {@code DECISION} + exactly one named profile in
- *       {@code GET /v1/ai_profiles} → that profile's base URL.
+ *   <li>{@code PLANNING} or {@code DECISION} + a fresh patron Joules snapshot + exactly one
+ *       named profile in {@code GET /v1/ai_profiles} → that profile's base URL.
  *   <li>Default.
  * </ol>
  *
@@ -46,7 +46,10 @@ public final class ModelTierRouter {
             JoulesCache.JoulesSnapshot snapshot,
             BudgetThresholds thresholds,
             Player2ServerRuntimeConfig serverConfig) {
-        Optional<String> soleNamed = apiService != null
+        boolean mayUseNamed = isPlanningOrDecision(taskClass)
+                && JoulesCache.isFreshPatronSnapshot(snapshot, thresholds)
+                && (serverConfig == null || !serverConfig.isDedicatedClientProxy());
+        Optional<String> soleNamed = mayUseNamed && apiService != null
                 ? ProfileUrlResolver.getSoleNamedProfileBaseUrl(apiService)
                 : Optional.empty();
         return resolveWithRule(taskClass, soleNamed, snapshot, thresholds, serverConfig).decision();
@@ -86,18 +89,18 @@ public final class ModelTierRouter {
                 return new RoutingResult(RoutingDecision.defaultProfile(), 4);
             }
 
-            if (soleNamedProfileBaseUrl != null && soleNamedProfileBaseUrl.isPresent()) {
-                boolean isPatron = snapshot != null && snapshot.isPatron();
-                if (!isPatron) {
-                    LOGGER.warn("ModelTierRouter: routing {} to named profile despite non-patron tier "
-                            + "(profile present in /v1/ai_profiles — edge case)", taskClass);
-                }
+            if (soleNamedProfileBaseUrl != null && soleNamedProfileBaseUrl.isPresent()
+                    && JoulesCache.isFreshPatronSnapshot(snapshot, thresholds)) {
                 LOGGER.debug("ModelTierRouter: rule 5 — {} → named profile", taskClass);
                 return new RoutingResult(RoutingDecision.namedProfile(soleNamedProfileBaseUrl.get()), 5);
             }
         }
 
         return new RoutingResult(RoutingDecision.defaultProfile(), 6);
+    }
+
+    private static boolean isPlanningOrDecision(AiTaskClass taskClass) {
+        return taskClass == AiTaskClass.PLANNING || taskClass == AiTaskClass.DECISION;
     }
 
     /** Human-readable outcome for {@code /playerengine routing probe}. */

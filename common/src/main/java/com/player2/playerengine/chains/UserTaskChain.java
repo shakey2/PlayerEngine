@@ -7,6 +7,8 @@ import com.player2.playerengine.tasks.agentic.GatherLooseItemsTask;
 import com.player2.playerengine.tasks.agentic.MineBlockTask;
 import com.player2.playerengine.tasks.base.Task;
 import com.player2.playerengine.tasks.base.TaskRunner;
+import com.player2.playerengine.tasks.base.TaskSuspensionCause;
+import com.player2.playerengine.tasks.base.TransientlyResumableTask;
 import com.player2.playerengine.tasks.movement.BodyLanguageTask;
 import com.player2.playerengine.tasks.movement.FollowPlayerTask;
 import com.player2.playerengine.util.time.Stopwatch;
@@ -16,10 +18,16 @@ import org.apache.logging.log4j.Logger;
 public class UserTaskChain extends SingleTaskChain {
    private static final Logger LOGGER = LogManager.getLogger();
 
+   enum RuntimeMode {
+      LIVE,
+      DETACHED_SELF_TEST
+   }
+
    private final Stopwatch taskStopwatch = new Stopwatch();
+   private final RuntimeMode runtimeMode;
    private Runnable currentOnFinish = null;
    private boolean runningIdleTask;
-   private boolean nextTaskIdleFlag;
+   private boolean installingIdleCommandTask;
 
    /**
     * A user task suspended by a TRANSIENT body-language gesture (e.g. an inline {@code [bl:nod_head]}
@@ -39,6 +47,15 @@ public class UserTaskChain extends SingleTaskChain {
     * the CommandExecutor sequential chain) is not lost during the gesture overlay.
     */
    private Runnable suspendedOnFinish = null;
+   /** True only when the suspended task was certified and successfully prepared for restart. */
+   private boolean suspendedTaskResumePrepared = false;
+   /**
+    * True while a gesture-finish frame owns a snapshotted suspended root locally. During this
+    * interval {@link #suspendedTask} and {@link #mainTask} may both be null while the gesture's
+    * completion callback runs, but the root task, tracked execution, and original callback are
+    * still authoritative and are about to be restored or terminalized by that frame.
+    */
+   private boolean pendingGestureResumeOwnership = false;
    /** True while we are re-assigning {@link #suspendedTask} so the resume path is not re-suspended. */
    private boolean resumingSuspended = false;
    /**
@@ -54,7 +71,12 @@ public class UserTaskChain extends SingleTaskChain {
    private boolean firingReplacedTerminal = false;
 
    public UserTaskChain(TaskRunner runner) {
+      this(runner, RuntimeMode.LIVE);
+   }
+
+   UserTaskChain(TaskRunner runner, RuntimeMode runtimeMode) {
       super(runner);
+      this.runtimeMode = java.util.Objects.requireNonNull(runtimeMode, "runtimeMode");
    }
 
    /**
@@ -77,10 +99,44 @@ public class UserTaskChain extends SingleTaskChain {
     * a side effect, or report a false success.
     */
    private static boolean isResumeSafe(Task task) {
-      return task instanceof ResourceTask
+      return task instanceof TransientlyResumableTask
+            || task instanceof ResourceTask
             || task instanceof FollowPlayerTask
             || task instanceof MineBlockTask
             || task instanceof GatherLooseItemsTask;
+   }
+
+   /** Terminalizes and resolves a detached submission without letting callback re-entry orphan work. */
+   private void abandonAndFinishSuspended(Task task, Runnable onFinish) {
+      if (task != null && !task.stopped()) {
+         if (task.isTransientlySuspended()) {
+            task.abandonTransientResume();
+         } else {
+            task.stop(null);
+         }
+      }
+      if (onFinish == null) {
+         return;
+      }
+      boolean alreadyFiring = this.firingReplacedTerminal;
+      this.firingReplacedTerminal = true;
+      try {
+         onFinish.run();
+      } finally {
+         this.firingReplacedTerminal = alreadyFiring;
+      }
+   }
+
+   private static Runnable once(Runnable delegate) {
+      if (delegate == null) {
+         return null;
+      }
+      java.util.concurrent.atomic.AtomicBoolean fired = new java.util.concurrent.atomic.AtomicBoolean();
+      return () -> {
+         if (fired.compareAndSet(false, true)) {
+            delegate.run();
+         }
+      };
    }
 
    private static String prettyPrintTimeDuration(double seconds) {
@@ -109,20 +165,25 @@ public class UserTaskChain extends SingleTaskChain {
 
    @Override
    protected void onTick() {
-      if (PlayerEngineController.inGame()) {
+      if (this.runtimeMode == RuntimeMode.DETACHED_SELF_TEST
+            || PlayerEngineController.inGame()) {
          super.onTick();
       }
    }
 
    public void cancel(PlayerEngineController mod) {
+      Task abandonedTask = this.suspendedTask;
+      Runnable abandonedOnFinish = this.suspendedOnFinish;
       // An explicit cancel is a genuine stop of the user task — drop any task suspended for a
       // transient gesture so it is not silently resumed after the user cancelled everything.
       this.suspendedTask = null;
       this.suspendedOnFinish = null;
-      if (this.mainTask != null && this.mainTask.isActive()) {
+      this.suspendedTaskResumePrepared = false;
+      if (this.mainTask != null) {
          this.stop();
          this.onTaskFinish(mod);
       }
+      this.abandonAndFinishSuspended(abandonedTask, abandonedOnFinish);
    }
 
    @Override
@@ -136,21 +197,178 @@ public class UserTaskChain extends SingleTaskChain {
    }
 
    public void runTask(PlayerEngineController mod, Task task, Runnable onFinish) {
-      this.runningIdleTask = this.nextTaskIdleFlag;
-      this.nextTaskIdleFlag = false;
-      if (!this.runningIdleTask) {
-         Debug.logMessage("User Task Set: " + task.toString());
+      if (this.installingIdleCommandTask) {
+         this.runIdleTask(mod, task, onFinish);
+         return;
       }
+      this.runTaskInternal(mod, task, onFinish, false);
+   }
+
+   /** Tracked-step install path: equality must not retain a task whose callback closes over another instance. */
+   public void runTaskReplacing(PlayerEngineController mod, Task task, Runnable onFinish) {
+      if (this.installingIdleCommandTask) {
+         this.runIdleTask(mod, task, onFinish);
+         return;
+      }
+      this.runTaskInternal(mod, task, onFinish, true);
+   }
+
+   /**
+    * Atomically installs a policy-idle task only when the chain is empty or already owns policy
+    * idle work. A live, assigned, suspended, or terminal-awaiting-reap non-idle root remains
+    * authoritative: neither its task nor its callback is touched by an opportunistic idle install.
+    */
+   public void runIdleTask(PlayerEngineController mod, Task task, Runnable onFinish) {
+      Task incomingIdle = java.util.Objects.requireNonNull(task, "task");
+      Runnable incomingOnFinish = once(onFinish);
+
+      // A superseded callback cannot use policy idle to displace the task that superseded it. A
+      // suspended root is also authoritative even if a future lifecycle change temporarily leaves
+      // the visible slot empty. Reject only the incoming idle submission and drain its callback.
+      if ((this.firingReplacedTerminal && !this.resumingSuspended)
+            || this.hasProtectedNonIdleOwnership()) {
+         this.rejectPolicyIdleSubmission(mod, incomingIdle, incomingOnFinish);
+         return;
+      }
+
+      Task replacedIdle = this.mainTask;
+      Runnable replacedIdleOnFinish = replacedIdle == null ? null : this.currentOnFinish;
+      this.currentOnFinish = incomingOnFinish;
+      this.runningIdleTask = true;
+      this.taskStopwatch.begin();
+
+      // Force identity replacement even when two idle task instances compare equal. Retaining the
+      // old task while storing the new callback would associate completion with the wrong object.
+      this.replaceTask(incomingIdle);
+      if (this.runtimeMode == RuntimeMode.LIVE) {
+         mod.getTaskRunner().enable();
+         if (mod.getModSettings().failedToLoad()) {
+            Debug.logWarning("Settings file failed to load at some point. Check logs for more info, or delete the file to re-load working settings.");
+         }
+      }
+
+      // Fire only after the new idle task and callback are fully installed. The shared stale guard
+      // prevents the displaced idle callback from replacing the newer policy task.
+      if (replacedIdle != null) {
+         this.abandonAndFinishSuspended(replacedIdle, replacedIdleOnFinish);
+      }
+   }
+
+   private void rejectPolicyIdleSubmission(
+         PlayerEngineController mod,
+         Task incomingIdle,
+         Runnable incomingOnFinish) {
+      incomingIdle.controller = mod;
+      incomingIdle.reset();
+      this.abandonAndFinishSuspended(incomingIdle, incomingOnFinish);
+   }
+
+   /**
+    * Scopes a configurable idle command's synchronous task installation. Any task it submits is
+    * routed through {@link #runIdleTask}, so a re-entrant/configured idle command cannot replace
+    * real work; no marker remains when the command installs no task or fails validation.
+    */
+   public void runIdleCommand(Runnable commandInstaller) {
+      Runnable checked = java.util.Objects.requireNonNull(commandInstaller, "commandInstaller");
+      boolean previous = this.installingIdleCommandTask;
+      this.installingIdleCommandTask = true;
+      try {
+         checked.run();
+      } finally {
+         this.installingIdleCommandTask = previous;
+      }
+   }
+
+   /**
+    * True only while a superseded task's terminal callback is being drained. A tracked task
+    * submitted from that callback is stale ownership and must be rejected before its adapter can
+    * supersede the already-installed authoritative execution.
+    */
+   public boolean rejectsReentrantTrackedSubmission() {
+      return this.firingReplacedTerminal && !this.resumingSuspended;
+   }
+
+   /**
+    * Adapter preflight for a tracked task emitted synchronously by the configured idle command.
+    * It must be queried before the adapter mutates its active execution/completion slot.
+    */
+   public boolean rejectsConfiguredIdleTrackedSubmission() {
+      return this.installingIdleCommandTask && this.hasProtectedNonIdleOwnership();
+   }
+
+   private boolean hasProtectedNonIdleOwnership() {
+      return this.pendingGestureResumeOwnership
+            || this.suspendedTask != null
+            || this.mainTask != null && !this.runningIdleTask;
+   }
+
+   /**
+    * Clears only the currently installed policy-idle task. Real user work is never touched. The
+    * detached idle callback is resolved exactly once without invoking the normal auto-idle fallback.
+    */
+   public boolean clearPolicyIdleTask() {
+      // A displaced idle callback no longer owns the replacement idle slot. It may resolve its own
+      // terminal, but cannot clear policy work installed after it.
+      if (this.firingReplacedTerminal && !this.resumingSuspended) {
+         return false;
+      }
+      if (this.mainTask == null || !this.runningIdleTask) {
+         return false;
+      }
+      Task idleTask = this.mainTask;
+      Runnable idleOnFinish = this.currentOnFinish;
+      this.mainTask = null;
+      this.currentOnFinish = null;
+      this.runningIdleTask = false;
+      this.abandonAndFinishSuspended(idleTask, idleOnFinish);
+      return true;
+   }
+
+   private void runTaskInternal(
+         PlayerEngineController mod,
+         Task task,
+         Runnable onFinish,
+         boolean forceReplace) {
+      // A callback belonging to a task that has just been superseded is stale ownership. If it
+      // synchronously tries to submit the old command's next step, keep the already-installed new
+      // task authoritative. Tracked callers detect the non-retention on return and resolve their
+      // submission fail-clean; terminalizing here also gives typed tasks a truthful outcome.
+      if (this.firingReplacedTerminal && !this.resumingSuspended) {
+         task.controller = mod;
+         task.reset();
+         task.stop(null);
+         Runnable rejectedOnFinish = once(onFinish);
+         if (rejectedOnFinish != null) {
+            rejectedOnFinish.run();
+         }
+         return;
+      }
+      this.runningIdleTask = false;
+      Debug.logMessage("User Task Set: " + task.toString());
 
       boolean incomingIsFollow = task instanceof FollowPlayerTask;
       boolean incomingIsGesture = task instanceof BodyLanguageTask;
+      Task replacedGestureTask = this.mainTask instanceof BodyLanguageTask
+            && !this.mainTask.stopped()
+            ? this.mainTask
+            : null;
       // Captured BEFORE setTask() overwrites this.mainTask — the diag flag must reflect reality at
       // the moment of overwrite, not after the task has already been cleared (the old bug logged
       // followWasActive=false at gesture-start because the overwrite ran first).
-      boolean existingIsFollow = (this.mainTask instanceof FollowPlayerTask) && this.mainTask.isActive();
-      boolean existingIsActive = this.mainTask != null && this.mainTask.isActive()
+      boolean existingIsFollow = this.mainTask instanceof FollowPlayerTask
+            && !this.mainTask.stopped();
+      Task finishedExistingTask = this.mainTask != null
+            && this.mainTask.isFinished()
+            && !(this.mainTask instanceof BodyLanguageTask)
+            ? this.mainTask
+            : null;
+      boolean existingIsActive = this.mainTask != null
+            && (this.mainTask.isActive() || this.mainTask.isAssigned())
+            && !this.mainTask.stopped()
+            && !this.mainTask.isFinished()
             && !(this.mainTask instanceof BodyLanguageTask);
       Task existingTask = existingIsActive ? this.mainTask : null;
+      boolean installAsTransientOverlay = false;
 
       // Transient-overlay rule: a body-language gesture overwriting an active non-gesture user task
       // stashes that task and its onFinish callback here. ONLY a task in the certified-safe set
@@ -163,11 +381,27 @@ public class UserTaskChain extends SingleTaskChain {
       // the gesture interrupted the step). For untracked non-safe tasks the stashed onFinish is a
       // harmless no-op, so firing it is equivalent to the pre-fix drop. Any OTHER genuine non-gesture
       // user task is a real replacement and clears any stashed task.
+      Task droppedSuspendedTask = null;
+      Runnable droppedSuspendedOnFinish = null;
       if (!this.resumingSuspended && !this.runningIdleTask) {
          if (incomingIsGesture && existingTask != null) {
             this.suspendedTask = existingTask;
             this.suspendedOnFinish = this.currentOnFinish;  // save BEFORE overwrite below
-            boolean willResume = isResumeSafe(existingTask);
+             boolean willResume = isResumeSafe(existingTask);
+             if (willResume && existingTask instanceof TransientlyResumableTask) {
+                if (existingTask.isActive()) {
+                   existingTask.interrupt(task, TaskSuspensionCause.GESTURE_OVERLAY);
+                   willResume = existingTask.isTransientlySuspended();
+                } else {
+                   // It has been assigned but has not started, so there is no state to checkpoint
+                   // and no terminal stop hook should run merely to display a gesture overlay.
+                   willResume = existingTask.isAssigned();
+                }
+                installAsTransientOverlay = willResume;
+             } else if (willResume && existingTask.isAssigned()) {
+                installAsTransientOverlay = true;
+             }
+            this.suspendedTaskResumePrepared = willResume;
             if (existingIsFollow) {
                LOGGER.info("[FollowDiag] FOLLOW-SUSPEND: active follow '{}' suspended by transient gesture '{}' (will resume on finish)",
                      existingTask.toString(), task.toString());
@@ -180,7 +414,7 @@ public class UserTaskChain extends SingleTaskChain {
                LOGGER.info("[FollowDiag] TASK-DROP: non-resume-safe task '{}' dropped by transient gesture '{}' (will NOT resume; step resolved fail-clean on finish)",
                      existingTask.toString(), task.toString());
             }
-         } else if (!incomingIsFollow && !incomingIsGesture) {
+         } else if (!incomingIsGesture) {
             // Genuine replacement task: cancel any suspended task for good (matches pre-regression behaviour).
             if (this.suspendedTask != null) {
                if (this.suspendedTask instanceof FollowPlayerTask) {
@@ -200,14 +434,11 @@ public class UserTaskChain extends SingleTaskChain {
             // adapter records FATAL:task_stopped_without_finish; untracked tasks' stashed onFinish is a
             // harmless no-op). RE-ENTRANCY: capture into a local and null BOTH fields BEFORE .run(), so
             // the chain sees a clean suspend slot if firing re-enters runTask/onTaskFinish.
-            Runnable droppedSuspendedOnFinish = this.suspendedOnFinish;
+            droppedSuspendedTask = this.suspendedTask;
+            droppedSuspendedOnFinish = this.suspendedOnFinish;
             this.suspendedTask = null;
             this.suspendedOnFinish = null;
-            if (droppedSuspendedOnFinish != null) {
-               LOGGER.info("[FollowDiag] SUSPEND-DROP-FINISH: genuine task '{}' discards a suspended task; firing its stashed onFinish to resolve the orphaned step (no resume)",
-                     task.toString());
-               droppedSuspendedOnFinish.run();
-            }
+            this.suspendedTaskResumePrepared = false;
          }
       }
 
@@ -240,10 +471,20 @@ public class UserTaskChain extends SingleTaskChain {
             && !incomingIsGesture && !this.firingReplacedTerminal) {
          replacedActiveOnFinish = this.currentOnFinish;
       }
+      Runnable finishedExistingOnFinish = null;
+      if (finishedExistingTask != null && !this.runningIdleTask
+            && !this.resumingSuspended && !this.firingReplacedTerminal) {
+         finishedExistingOnFinish = this.currentOnFinish;
+      }
+      Runnable replacedGestureOnFinish = null;
+      if (replacedGestureTask != null && !this.runningIdleTask
+            && !this.resumingSuspended && !this.firingReplacedTerminal) {
+         replacedGestureOnFinish = this.currentOnFinish;
+      }
 
       // Overwrite currentOnFinish AFTER the suspend logic has had a chance to save it above (and after
       // the replaced-active terminal has been captured into the local above).
-      this.currentOnFinish = onFinish;
+      this.currentOnFinish = once(onFinish);
 
       if (existingIsFollow && !this.runningIdleTask && !(incomingIsGesture && this.suspendedTask != null)) {
          LOGGER.info("[FollowDiag] FOLLOW-OVERWRITE: active follow '{}' being replaced by '{}' (incoming isFollow={})",
@@ -254,11 +495,28 @@ public class UserTaskChain extends SingleTaskChain {
                existingIsFollow);
       }
 
-      mod.getTaskRunner().enable();
       this.taskStopwatch.begin();
-      this.setTask(task);
-      if (mod.getModSettings().failedToLoad()) {
-         Debug.logWarning("Settings file failed to load at some point. Check logs for more info, or delete the file to re-load working settings.");
+      if (installAsTransientOverlay) {
+         this.replaceTaskAfterTransientSuspend(task);
+      } else if (forceReplace || replacedGestureTask != null) {
+         this.replaceTask(task);
+      } else {
+         this.setTask(task);
+      }
+      if (this.runtimeMode == RuntimeMode.LIVE) {
+         mod.getTaskRunner().enable();
+         if (mod.getModSettings().failedToLoad()) {
+            Debug.logWarning("Settings file failed to load at some point. Check logs for more info, or delete the file to re-load working settings.");
+         }
+      }
+
+      // SUSPEND-DROP-FINISH, also fired LAST: the incoming task is fully installed before a dropped
+      // suspended terminal can synchronously submit another task. The shared guard prevents that
+      // inner install from firing the never-run incoming terminal, and there is no outer install tail.
+      if (droppedSuspendedTask != null) {
+         LOGGER.info("[FollowDiag] SUSPEND-DROP-FINISH: genuine task '{}' discards a suspended task; firing its stashed onFinish to resolve the orphaned step (no resume)",
+               task.toString());
+         this.abandonAndFinishSuspended(droppedSuspendedTask, droppedSuspendedOnFinish);
       }
 
       // ACTIVE-REPLACE-FINISH, fired LAST: the incoming task is now fully installed (currentOnFinish and
@@ -277,11 +535,22 @@ public class UserTaskChain extends SingleTaskChain {
             this.firingReplacedTerminal = false;
          }
       }
+      if (finishedExistingOnFinish != null) {
+         LOGGER.info("[FollowDiag] ACTIVE-FINISH-DURING-INSTALL: task '{}' reached terminal state before chain reap; firing its onFinish exactly once after installing '{}'",
+               finishedExistingTask.toString(), task.toString());
+         this.abandonAndFinishSuspended(finishedExistingTask, finishedExistingOnFinish);
+      }
+      if (replacedGestureOnFinish != null) {
+         LOGGER.info("[FollowDiag] GESTURE-REPLACE-FINISH: gesture '{}' replaced by '{}'; firing the old gesture callback exactly once",
+               replacedGestureTask.toString(), task.toString());
+         this.abandonAndFinishSuspended(replacedGestureTask, replacedGestureOnFinish);
+      }
    }
 
    @Override
    protected void onTaskFinish(PlayerEngineController mod) {
-      boolean shouldIdle = mod.getModSettings().shouldRunIdleCommandWhenNotActive();
+      boolean shouldIdle = this.runtimeMode == RuntimeMode.LIVE
+            && mod.getModSettings().shouldRunIdleCommandWhenNotActive();
       double seconds = this.taskStopwatch.time();
       Task oldTask = this.mainTask;
 
@@ -291,13 +560,23 @@ public class UserTaskChain extends SingleTaskChain {
       // still reflect the gesture that is finishing.
       Task resumeTask = null;
       Runnable resumeOnFinish = null;
+      boolean resumePrepared = false;
       if (oldTask instanceof BodyLanguageTask && this.suspendedTask != null
             && !this.runningIdleTask && !this.resumingSuspended) {
          resumeTask = this.suspendedTask;
          resumeOnFinish = this.suspendedOnFinish;
+         resumePrepared = this.suspendedTaskResumePrepared;
       }
+      // Keep protected ownership visible after the suspended fields are cleared below. In
+      // particular, a configured idle command submitted by the gesture's completion callback must
+      // fail adapter preflight before it can terminalize the still-authoritative tracked execution.
+      boolean previousPendingGestureResumeOwnership = this.pendingGestureResumeOwnership;
+      this.pendingGestureResumeOwnership = previousPendingGestureResumeOwnership
+            || resumeTask != null;
+      try {
       this.suspendedTask = null;
       this.suspendedOnFinish = null;
+      this.suspendedTaskResumePrepared = false;
 
       if (oldTask instanceof FollowPlayerTask && !this.runningIdleTask) {
          // String.format here is intentional: Log4j lazy-eval doesn't apply but the call is
@@ -307,11 +586,13 @@ public class UserTaskChain extends SingleTaskChain {
                String.format("%.1f", seconds), oldTask.isFinished(), oldTask.stopped(), shouldIdle);
       }
       this.mainTask = null;
-      if (!shouldIdle) {
-         mod.stop();
-      } else {
-         mod.getBaritone().getPathingBehavior().forceCancel();
-         mod.getBaritone().getInputOverrideHandler().clearAllKeys();
+      if (this.runtimeMode == RuntimeMode.LIVE) {
+         if (!shouldIdle) {
+            mod.stop();
+         } else {
+            mod.getBaritone().getPathingBehavior().forceCancel();
+            mod.getBaritone().getInputOverrideHandler().clearAllKeys();
+         }
       }
 
       if (this.currentOnFinish != null) {
@@ -320,10 +601,21 @@ public class UserTaskChain extends SingleTaskChain {
 
       // Transient-overlay finish: a body-language gesture just finished and a non-gesture task was
       // stashed for it. The onFinish callback above (the gesture's finish()) has already run its
-      // executor cleanup. Skip everything here if that callback already installed a fresh user task (a
-      // genuine command issued during the gesture's completion) — mainTask would be non-null then.
-      if (resumeTask != null && this.mainTask == null) {
-         if (isResumeSafe(resumeTask)) {
+      // executor cleanup. A genuine non-idle task installed by that callback wins; a policy-idle
+      // LookAtOwner/Idle install loses to the exact suspended root below.
+      boolean callbackInstalledPolicyIdle = resumeTask != null
+            && this.mainTask != null
+            && this.runningIdleTask;
+      if (resumeTask != null && (this.mainTask == null || callbackInstalledPolicyIdle)) {
+         boolean readyToResume = resumePrepared && isResumeSafe(resumeTask);
+         if (readyToResume) {
+            // A post-command LookAtOwner/Idle install is policy, not a genuine replacement. The
+            // exact suspended root and its original callback remain authoritative. Capture the
+            // idle callback before runTask overwrites it, let the resume replace/stop the idle task,
+            // then resolve that displaced idle callback under the stale-submission guard.
+            Task displacedPolicyIdle = callbackInstalledPolicyIdle ? this.mainTask : null;
+            Runnable displacedPolicyIdleOnFinish = callbackInstalledPolicyIdle
+                  ? this.currentOnFinish : null;
             // RESUME path (certified-safe set only): re-run the same task object. reset() (via setTask
             // inside runTask) re-arms it from onStart().
             //   - FollowPlayerTask: self-terminates gracefully if target is gone (FOLLOWED_TARGET_GONE).
@@ -347,6 +639,10 @@ public class UserTaskChain extends SingleTaskChain {
             } finally {
                this.resumingSuspended = false;
             }
+            if (displacedPolicyIdle != null) {
+               this.abandonAndFinishSuspended(
+                     displacedPolicyIdle, displacedPolicyIdleOnFinish);
+            }
             return;
          } else {
             // FAIL-CLEAN path (non-safe tasks): do NOT re-run the task — it is dropped (overwrite-drop,
@@ -356,14 +652,19 @@ public class UserTaskChain extends SingleTaskChain {
             // true, so the adapter records a truthful FAILED stop (the gesture interrupted the step)
             // rather than a silent hang or a false success. For an untracked task the stashed onFinish
             // is a harmless no-op, so this is equivalent to the pre-fix drop.
-            if (resumeOnFinish != null) {
-               LOGGER.info("[FollowDiag] TASK-DROP-FINISH: gesture finished, non-resume-safe task '{}' dropped; firing its onFinish to resolve the step (no resume)",
-                     resumeTask.toString());
-               resumeOnFinish.run();
-            }
+            LOGGER.info("[FollowDiag] TASK-DROP-FINISH: gesture finished, non-resume-safe task '{}' dropped; firing its onFinish to resolve the step (no resume)",
+                  resumeTask.toString());
+            this.abandonAndFinishSuspended(resumeTask, resumeOnFinish);
             // Fall through to the idle/done bookkeeping below (mainTask stays null unless the fired
             // callback installed a fresh task).
          }
+      } else if (resumeTask != null) {
+         LOGGER.info("[FollowDiag] TASK-SUSPEND-CLEAR: task installed during gesture completion; suspended task '{}' discarded",
+               resumeTask.toString());
+         this.abandonAndFinishSuspended(resumeTask, resumeOnFinish);
+      }
+      } finally {
+         this.pendingGestureResumeOwnership = previousPendingGestureResumeOwnership;
       }
 
       boolean actuallyDone = this.mainTask == null;
@@ -372,15 +673,15 @@ public class UserTaskChain extends SingleTaskChain {
             Debug.logMessage("User task FINISHED. Took %s seconds.", prettyPrintTimeDuration(seconds));
          }
 
-         if (shouldIdle) {
+         if (shouldIdle && this.runtimeMode == RuntimeMode.LIVE) {
             // Guard mirrors FOLLOW-FINISH at line 104: exclude the case where the idle task
             // itself is a follow invocation, which would emit a spurious "will NOT auto-resume".
             if (oldTask instanceof FollowPlayerTask && !this.runningIdleTask) {
                LOGGER.info("[FollowDiag] FOLLOW-IDLE-FALLBACK: follow ended, chain executing idleCommand='{}' - follow will NOT auto-resume",
                      mod.getModSettings().getIdleCommand());
             }
-            this.controller.getCommandExecutor().executeWithPrefix(mod.getModSettings().getIdleCommand());
-            this.signalNextTaskToBeIdleTask();
+            this.runIdleCommand(() -> this.controller.getCommandExecutor()
+                  .executeWithPrefix(mod.getModSettings().getIdleCommand()));
             this.runningIdleTask = true;
          }
       }
@@ -388,10 +689,6 @@ public class UserTaskChain extends SingleTaskChain {
 
    public boolean isRunningIdleTask() {
       return this.isActive() && this.runningIdleTask;
-   }
-
-   public void signalNextTaskToBeIdleTask() {
-      this.nextTaskIdleFlag = true;
    }
 
    /** True when a non-idle user task is active (Part C0 idle guard). */

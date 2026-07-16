@@ -173,7 +173,7 @@ public final class FuelGatherTask extends Task {
             Vec3 origin = this.controller.getPlayer().position();
             String dimensionId = dimensionId();
             List<BlockPos> coords = MarkedChestToolLocator.candidateCoordinates(
-                    targetFuelItem, origin, params.radius(), dimensionId);
+                    this.controller, targetFuelItem, origin, params.radius(), dimensionId);
             for (BlockPos pos : coords) {
                 if (!triedContainers.contains(pos)) {
                     markedCandidates.add(pos);

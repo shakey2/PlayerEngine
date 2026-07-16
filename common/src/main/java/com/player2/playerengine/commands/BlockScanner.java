@@ -11,6 +11,8 @@ import com.player2.playerengine.util.helpers.BaritoneHelper;
 import com.player2.playerengine.util.helpers.WorldHelper;
 import com.player2.playerengine.util.time.TimerGame;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -94,6 +96,179 @@ public class BlockScanner {
       List<BlockPos> locations = this.getKnownLocationsIncludeUnreachable(blocks);
       locations.removeIf(this::isUnreachable);
       return locations;
+   }
+
+   /**
+    * Returns a bounded prefix of the current scanner snapshot without copying or validating the
+    * entire tracked set. The cap applies to visited entries, so unreachable-heavy data cannot turn
+    * this helper into an unbounded server-thread scan.
+    */
+   public List<BlockPos> getKnownLocationsBounded(int maxVisited, Block... blocks) {
+      if (maxVisited <= 0) {
+         return List.of();
+      }
+      ArrayList<BlockPos> locations = new ArrayList<>(Math.min(maxVisited, 256));
+      int visited = 0;
+      for (Block block : blocks) {
+         HashSet<BlockPos> tracked = this.trackedBlocks.get(block);
+         if (tracked == null) {
+            continue;
+         }
+         for (BlockPos pos : tracked) {
+            if (visited >= maxVisited) {
+               return locations;
+            }
+            visited++;
+            if (!this.isUnreachable(pos)) {
+               locations.add(pos.immutable());
+            }
+         }
+      }
+      return locations;
+   }
+
+   /**
+    * One circular window over a bounded prefix of the current tracked-position snapshot. Unlike
+    * {@link #getKnownLocationsBounded(int, Block...)}, a caller-retained cursor advances past the
+    * first window, so repeated bounded discovery rounds cannot keep returning the same prefix.
+    * The HashSet membership order is intentionally unspecified; callers deterministically sort the
+    * small returned window after applying their predicates. Both cursor traversal and returned work
+    * are capped by {@code cycleBound}. Unreachable entries consume visit budget and cursor but are
+    * omitted from the result.
+    */
+   public KnownLocationWindow getKnownLocationsWindow(
+      int cursor, int maxVisited, int cycleBound, Block... blocks
+   ) {
+      if (maxVisited <= 0 || blocks == null || blocks.length == 0) {
+         return new KnownLocationWindow(List.of(), 0, 0);
+      }
+      ArrayList<Collection<BlockPos>> orderedGroups = new ArrayList<>(blocks.length);
+      HashSet<Block> seenBlocks = new HashSet<>();
+      for (Block block : blocks) {
+         if (block == null || !seenBlocks.add(block)) {
+            continue;
+         }
+         HashSet<BlockPos> tracked = this.trackedBlocks.get(block);
+         if (tracked != null && !tracked.isEmpty()) {
+            orderedGroups.add(tracked);
+         }
+      }
+      return boundedWindow(
+         cursor, maxVisited, cycleBound, orderedGroups, this::isUnreachable
+      );
+   }
+
+   static KnownLocationWindow boundedWindow(
+      int cursor,
+      int maxVisited,
+      int cycleBound,
+      List<? extends Collection<BlockPos>> orderedGroups,
+      Predicate<BlockPos> unreachable
+   ) {
+      if (cycleBound <= 0) {
+         throw new IllegalArgumentException("cycleBound must be positive");
+      }
+      if (cursor < 0 || cursor >= cycleBound) {
+         throw new IllegalArgumentException("cursor must be within the bounded cycle");
+      }
+      if (maxVisited <= 0 || orderedGroups == null || orderedGroups.isEmpty()) {
+         return new KnownLocationWindow(List.of(), 0, 0);
+      }
+      Predicate<BlockPos> unreachableTest = unreachable == null ? pos -> false : unreachable;
+      ArrayList<BlockPos> locations = new ArrayList<>(Math.min(maxVisited, 256));
+      int index = 0;
+      int visited = 0;
+      boolean reachedEnd = true;
+      outer:
+      for (Collection<BlockPos> group : orderedGroups) {
+         if (group == null) {
+            continue;
+         }
+         for (BlockPos position : group) {
+            if (index >= cycleBound) {
+               reachedEnd = false;
+               break outer;
+            }
+            if (index++ < cursor) {
+               continue;
+            }
+            if (visited >= maxVisited) {
+               reachedEnd = false;
+               break outer;
+            }
+            visited++;
+            if (position != null && !unreachableTest.test(position)) {
+               locations.add(position.immutable());
+            }
+         }
+      }
+      if (visited >= maxVisited) {
+         reachedEnd = false;
+      }
+      if (!reachedEnd) {
+         int nextCursor = cursor + visited;
+         if (nextCursor >= cycleBound) {
+            nextCursor = 0;
+         }
+         return new KnownLocationWindow(locations, nextCursor, visited);
+      }
+
+      int total = index;
+      if (total == 0) {
+         return new KnownLocationWindow(List.of(), 0, 0);
+      }
+      if (cursor >= total) {
+         return boundedWindow(
+            cursor % total,
+            maxVisited,
+            cycleBound,
+            orderedGroups,
+            unreachableTest
+         );
+      }
+      int wrapVisits = Math.min(maxVisited - visited, cursor);
+      if (wrapVisits > 0) {
+         visited += collectPrefix(
+            orderedGroups, wrapVisits, unreachableTest, locations
+         );
+      }
+      int nextCursor = (cursor + visited) % total;
+      return new KnownLocationWindow(locations, nextCursor, visited);
+   }
+
+   private static int collectPrefix(
+      List<? extends Collection<BlockPos>> orderedGroups,
+      int visitLimit,
+      Predicate<BlockPos> unreachable,
+      List<BlockPos> output
+   ) {
+      int visited = 0;
+      for (Collection<BlockPos> group : orderedGroups) {
+         if (group == null) {
+            continue;
+         }
+         for (BlockPos position : group) {
+            if (visited >= visitLimit) {
+               return visited;
+            }
+            visited++;
+            if (position != null && !unreachable.test(position)) {
+               output.add(position.immutable());
+            }
+         }
+      }
+      return visited;
+   }
+
+   public record KnownLocationWindow(
+      List<BlockPos> locations, int nextCursor, int visited
+   ) {
+      public KnownLocationWindow {
+         locations = locations == null ? List.of() : List.copyOf(locations);
+         if (nextCursor < 0 || visited < 0) {
+            throw new IllegalArgumentException("window metadata cannot be negative");
+         }
+      }
    }
 
    public Optional<BlockPos> getNearestWithinRange(Vec3 pos, double range, Block... blocks) {

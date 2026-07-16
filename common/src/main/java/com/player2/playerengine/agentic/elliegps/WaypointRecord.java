@@ -33,7 +33,7 @@ import java.util.List;
  * so both halves of a double chest map to exactly one record.
  *
  * <p>Unknown {@code type} values and unknown JSON fields are preserved verbatim on round-trip
- * (forward compatibility). Only {@link WaypointTypes#INVENTORY} records are indexed in C5.
+ * (forward compatibility). Inventory and supported farm records are indexable.
  *
  * <p>The {@code data} field is always present for inventory-type records and holds an
  * {@link InventoryWaypointData} instance. Unknown types carry raw JSON.
@@ -73,7 +73,8 @@ public final class WaypointRecord {
 
     /**
      * The type-specific data object. For {@link WaypointTypes#INVENTORY} this is an
-     * {@link InventoryWaypointData} instance. Unknown types carry the raw Gson element.
+     * {@link InventoryWaypointData}; for {@link WaypointTypes#FARM} it is a
+     * {@link FarmWaypointData}. Unknown types carry the raw Gson element.
      * Null when absent.
      *
      * <p>Gson serializes this as a JSON object in the {@code "data"} field.
@@ -142,6 +143,12 @@ public final class WaypointRecord {
         return null;
     }
 
+    /** Returns typed farm data for farm records, or {@code null} for every other shape. */
+    public FarmWaypointData farmData() {
+        if (data instanceof FarmWaypointData farm) return farm;
+        return null;
+    }
+
     // -------------------------------------------------------------------------
     // Serialization helpers
     // -------------------------------------------------------------------------
@@ -182,6 +189,8 @@ public final class WaypointRecord {
         // data
         if (WaypointTypes.INVENTORY.equals(type) && data instanceof InventoryWaypointData inv) {
             envelope.add("data", GSON.toJsonTree(inv));
+        } else if (WaypointTypes.FARM.equals(type) && data instanceof FarmWaypointData farm) {
+            envelope.add("data", farm.toJson());
         } else if (data instanceof JsonElement je) {
             envelope.add("data", je);
         } else if (data != null) {
@@ -202,8 +211,39 @@ public final class WaypointRecord {
      */
     void inheritUnknownFieldsFrom(WaypointRecord other) {
         if (other != null && other.rawSource != null) {
-            this.rawSource = other.rawSource;
+            this.rawSource = other.rawSource.deepCopy();
         }
+    }
+
+    /**
+     * Returns a deep defensive copy, including unknown envelope fields and type-specific payload.
+     * Store query APIs use this method so callers can never mutate the authoritative in-memory map.
+     */
+    public WaypointRecord copy() {
+        WaypointRecord copied = fromJson(toJson());
+        if (copied == null) {
+            throw new IllegalStateException("could not copy waypoint record");
+        }
+        return copied;
+    }
+
+    /**
+     * Persisted semantic equality used by checked mutations. Scan time alone is deliberately ignored;
+     * every other envelope, payload, and retained-extra field participates.
+     */
+    public boolean semanticallyEquals(WaypointRecord other) {
+        if (other == null) {
+            return false;
+        }
+        JsonElement left = toJson().deepCopy();
+        JsonElement right = other.toJson().deepCopy();
+        if (left.isJsonObject()) {
+            left.getAsJsonObject().remove("updatedGameTime");
+        }
+        if (right.isJsonObject()) {
+            right.getAsJsonObject().remove("updatedGameTime");
+        }
+        return left.equals(right);
     }
 
     /**
@@ -250,6 +290,8 @@ public final class WaypointRecord {
                 JsonElement dataElem = obj.get("data");
                 if (WaypointTypes.INVENTORY.equals(r.type)) {
                     r.data = GSON.fromJson(dataElem, InventoryWaypointData.class);
+                } else if (WaypointTypes.FARM.equals(r.type)) {
+                    r.data = FarmWaypointData.fromJson(dataElem);
                 } else {
                     // Unknown type: preserve raw
                     r.data = dataElem;

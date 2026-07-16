@@ -21,6 +21,8 @@ import com.player2.playerengine.player2api.AgentSideEffects;
 import com.player2.playerengine.player2api.Character;
 import com.player2.playerengine.player2api.Event;
 import com.player2.playerengine.player2api.LLMCompleter;
+import com.player2.playerengine.player2api.OwnerStopIntent;
+import com.player2.playerengine.player2api.OwnerStopTargetResolution;
 import com.player2.playerengine.player2api.Player2PayerResolution;
 import com.player2.playerengine.player2api.AgentConversationData;
 
@@ -59,7 +61,8 @@ public class ConversationManager {
             ChatEvent.RECEIVED.register((player, component) -> {
                 String message = component.plainCopy().getString();
                 String sender = player.getName().getString();
-                ConversationManager.onUserChatMessage(new UserMessage(message, sender));
+                ConversationManager.onUserChatMessage(new UserMessage(
+                        message, sender, false, player.getUUID()));
                 return EventResult.pass();
             });
         }
@@ -174,6 +177,9 @@ public class ConversationManager {
     // register when a user sends a chat message
     public static void onUserChatMessage(UserMessage msg) {
         LOGGER.info("User message event={}", msg);
+        if (handleAuthenticatedOwnerStop(msg)) {
+            return;
+        }
         boolean callByName = Player2ServerConfigHolder.get().isCallByNameChat();
         List<AgentConversationData> nearby = filterQueueData(d -> isCloseToPlayer(d, msg.userName()))
                 .collect(Collectors.toList());
@@ -233,6 +239,123 @@ public class ConversationManager {
         }
         if (queued == 0) {
             logMessageNotDelivered(msg, true, "call_by_name_all_targets_blocked", nearby, resolved);
+        }
+    }
+
+    private record StableCompanionKey(UUID ownerUuid, String characterId) {
+    }
+
+    /**
+     * Emergency owner control is intentionally narrower than conversation routing: exact named stop
+     * phrases may reach the owner's companion at any distance, while ordinary remote chat remains
+     * range-gated. The authenticated UUID comes from the server chat/STT ingress, never from message text.
+     */
+    private static boolean handleAuthenticatedOwnerStop(UserMessage msg) {
+        UUID ownerUuid = msg == null ? null : msg.authenticatedUserUuid();
+        if (ownerUuid == null || msg.message() == null) {
+            return false;
+        }
+
+        HashSet<StableCompanionKey> matchingKeys = new HashSet<>();
+        for (AgentConversationData data : queueData.values()) {
+            Character character = characterForOwner(data, ownerUuid);
+            StableCompanionKey key = stableKey(ownerUuid, character);
+            if (key != null && OwnerStopIntent.matches(msg.message(), character)) {
+                matchingKeys.add(key);
+            }
+        }
+        OwnerStopTargetResolution.Resolution resolution = OwnerStopTargetResolution.resolve(
+                matchingKeys.stream().map(StableCompanionKey::characterId).toList());
+        if (resolution.kind() == OwnerStopTargetResolution.Kind.NONE) {
+            return false;
+        }
+
+        // Consume an ambiguous emergency phrase so it cannot fall through to proximity routing/the model.
+        if (resolution.kind() == OwnerStopTargetResolution.Kind.AMBIGUOUS) {
+            MinecraftServer server = null;
+            for (AgentConversationData data : queueData.values()) {
+                StableCompanionKey key = stableKeyForOwner(data, ownerUuid);
+                if (key == null || !matchingKeys.contains(key)) {
+                    continue;
+                }
+                data.deferInfo(new Event.InfoMessage(
+                        "The owner's immediate stop request matched multiple companions with the same name, "
+                                + "so no companion was stopped. Ask for an unambiguous companion name."));
+                if (server == null && data.getMod().getPlayer() != null) {
+                    server = data.getMod().getPlayer().getServer();
+                }
+            }
+            notifyAuthenticatedOwner(ownerUuid, server,
+                    Component.translatable("message.playerengine.agent.owner_stop_ambiguous"));
+            LOGGER.warn("Authenticated owner stop was ambiguous across {} stable character ids; cancelled none",
+                    matchingKeys.size());
+            return true;
+        }
+
+        StableCompanionKey targetKey = new StableCompanionKey(ownerUuid, resolution.characterId());
+        List<AgentConversationData> targets = new ArrayList<>();
+        for (AgentConversationData data : queueData.values()) {
+            if (targetKey.equals(stableKeyForOwner(data, ownerUuid))) {
+                targets.add(data);
+            }
+        }
+        if (targets.isEmpty()) {
+            return false;
+        }
+
+        MinecraftServer server = null;
+        String displayName = targets.get(0).getName();
+        boolean requestStillDraining = false;
+        for (AgentConversationData data : targets) {
+            requestStillDraining |= data.cancelPendingModelActionsForOperatorStop();
+            data.getMod().isStopping = true;
+            data.getMod().stop();
+            if (server == null && data.getMod().getPlayer() != null) {
+                server = data.getMod().getPlayer().getServer();
+            }
+        }
+
+        notifyAuthenticatedOwner(ownerUuid, server, requestStillDraining
+                ? Component.translatable("message.playerengine.agent.owner_stop_ack_delayed", displayName)
+                : Component.translatable("message.playerengine.agent.owner_stop_ack", displayName));
+        LOGGER.info("Handled authenticated owner stop for stable character id={} controllers={}",
+                targetKey.characterId(), targets.size());
+        return true;
+    }
+
+    private static StableCompanionKey stableKeyForOwner(AgentConversationData data, UUID ownerUuid) {
+        return stableKey(ownerUuid, characterForOwner(data, ownerUuid));
+    }
+
+    private static Character characterForOwner(AgentConversationData data, UUID ownerUuid) {
+        if (data == null || ownerUuid == null) {
+            return null;
+        }
+        try {
+            return data.isOwner(ownerUuid) ? data.getCharacter() : null;
+        } catch (RuntimeException staleData) {
+            LOGGER.warn("Skipping stale companion while resolving authenticated owner stop: type={}",
+                    staleData.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private static StableCompanionKey stableKey(UUID ownerUuid, Character character) {
+        if (character == null || character.id() == null || character.id().isBlank()) {
+            return null;
+        }
+        return new StableCompanionKey(ownerUuid, character.id());
+    }
+
+    private static void notifyAuthenticatedOwner(UUID ownerUuid, MinecraftServer server, Component message) {
+        if (ownerUuid == null || server == null || message == null) {
+            return;
+        }
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (ownerUuid.equals(player.getUUID())) {
+                AgentSideEffects.broadcastChatToPlayer(server, message, player);
+                return;
+            }
         }
     }
 

@@ -41,6 +41,11 @@ public final class PlayerEngineClient {
    }
 
    public static void syncTtsPreferenceToServer() {
+      if (!ChatclefConfigPersistantState.runWhenLoaded(
+            () -> Minecraft.getInstance().execute(PlayerEngineClient::syncTtsPreferenceToServer))) {
+         return;
+      }
+
       Minecraft mc = Minecraft.getInstance();
       if (mc.getConnection() == null || mc.player == null) {
          return;
@@ -55,10 +60,14 @@ public final class PlayerEngineClient {
    public static void onInitializeClient() {
       EntityRendererRegistry.register(PlayerEngine.FISHING_BOBBER, CustomFishingBobberRenderer::new);
       STTUtils.onInitialize();
-      ClientLifecycleEvent.CLIENT_STOPPING.register(client -> STTUtils.shutdown());
+      ChatclefConfigPersistantState.preload();
+      ClientLifecycleEvent.CLIENT_STOPPING.register(client -> {
+         STTUtils.shutdown();
+         ChatclefConfigPersistantState.shutdown();
+      });
       NetworkManager.registerReceiver(NetworkManager.Side.S2C,
             ResourceLocation.fromNamespaceAndPath("playerengine", "stream_tts"), (buf, context) -> {
-               if (!ChatclefConfigPersistantState.isTtsEnabled()) {
+               if (!ChatclefConfigPersistantState.isLoaded() || !ChatclefConfigPersistantState.isTtsEnabled()) {
                   return;
                }
                // ---- read in the EXACT server write order (Player2APIService.textToSpeech) ----

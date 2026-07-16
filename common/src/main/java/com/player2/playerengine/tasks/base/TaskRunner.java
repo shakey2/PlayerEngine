@@ -3,6 +3,7 @@ package com.player2.playerengine.tasks.base;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.util.Debug;
 import java.util.ArrayList;
+import java.util.UUID;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -47,8 +48,8 @@ public class TaskRunner {
             // When no chain is active maxPriority retains NEGATIVE_INFINITY; log "N/A" to avoid
             // confusing beta testers who see newPriority=-Infinity and assume something broke.
             String loggedPriority = (maxChain != null) ? String.valueOf(maxPriority) : "N/A";
-            LOGGER.info("[FollowDiag] CHAIN-CHANGE: {} -> {} (newPriority={})",
-                  oldChainName, newChainName, loggedPriority);
+            LOGGER.info("[FollowDiag] CHAIN-CHANGE controller={}: {} -> {} (newPriority={})",
+                  diagnosticControllerIdentity(this.mod), oldChainName, newChainName, loggedPriority);
             this.lastLoggedChainName = newChainName;
          }
 
@@ -100,5 +101,47 @@ public class TaskRunner {
 
    public PlayerEngineController getMod() {
       return this.mod;
+   }
+
+   /** Disk-log-only controller identity; never enters conversation or model feedback surfaces. */
+   static String diagnosticControllerIdentity(PlayerEngineController controller) {
+      if (controller == null) {
+         return formatDiagnosticIdentity(null, null);
+      }
+
+      String displayName = null;
+      UUID entityId = null;
+      try {
+         if (controller.getAIPersistantData() != null
+               && controller.getAIPersistantData().getCharacter() != null) {
+            displayName = controller.getAIPersistantData().getCharacter().shortName();
+         }
+      } catch (RuntimeException ignored) {
+         // Diagnostics must never destabilize a scheduler tick.
+      }
+      try {
+         if (controller.getEntity() != null) {
+            entityId = controller.getEntity().getUUID();
+            if (displayName == null || displayName.isBlank()) {
+               displayName = controller.getEntity().getName().getString();
+            }
+         }
+      } catch (RuntimeException ignored) {
+         // A controller can be between entity lifecycle states while diagnostics are emitted.
+      }
+      return formatDiagnosticIdentity(displayName, entityId);
+   }
+
+   /** Package-visible pure formatter exercised by {@link TaskRunnerSelfTest}. */
+   static String formatDiagnosticIdentity(String displayName, UUID entityId) {
+      String name = displayName == null
+            ? "" : displayName.strip().replace('\r', ' ').replace('\n', ' ').replace('\t', ' ');
+      if (name.isBlank()) {
+         name = "unknown";
+      } else if (name.length() > 32) {
+         name = name.substring(0, 32);
+      }
+      String shortId = entityId == null ? "unknown" : entityId.toString().substring(0, 8);
+      return name + " (" + shortId + ")";
    }
 }

@@ -3,6 +3,8 @@ package com.player2.playerengine.commands;
 import com.player2.playerengine.PlayerEngineController;
 import com.player2.playerengine.agentic.elliegps.EllieGPSStore;
 import com.player2.playerengine.agentic.elliegps.WaypointRecord;
+import com.player2.playerengine.agentic.elliegps.WaypointMutationResult;
+import com.player2.playerengine.agentic.elliegps.WaypointMutationStatus;
 import com.player2.playerengine.agentic.elliegps.WaypointReportFormatter;
 import com.player2.playerengine.commands.base.Arg;
 import com.player2.playerengine.commands.base.ArgParser;
@@ -98,29 +100,75 @@ public class DeleteWaypointCommand extends Command {
             return;
         }
 
-        // Delete from store (the store persists and reindexes internally)
+        // Delete from the authoritative store before reporting success.
         String deletedId = record.id;
-        store.delete(deletedId);
+        WaypointMutationResult mutation = store.delete(deletedId);
+        switch (mutation.status()) {
+            case COMMITTED, COMMITTED_INDEX_DEGRADED -> {
+                // Continue below; JSON is authoritative even if the derived index degraded.
+            }
+            case NOT_FOUND, NOT_FOUND_INDEX_DEGRADED, NO_CHANGE, NO_CHANGE_INDEX_DEGRADED -> {
+                mod.reportAgenticProgress(WaypointReportFormatter.mutationNotFoundComponent(), true);
+                boolean degraded = mutation.status() == WaypointMutationStatus.NOT_FOUND_INDEX_DEGRADED
+                        || mutation.status() == WaypointMutationStatus.NO_CHANGE_INDEX_DEGRADED;
+                if (degraded) {
+                    mod.reportAgenticProgress(
+                            WaypointReportFormatter.indexDegradedComponent(false), true);
+                }
+                this.finishWithError(WaypointReportFormatter.boundModel(
+                        WaypointReportFormatter.mutationNotFoundModel()
+                                + (degraded ? " " + WaypointReportFormatter.indexDegradedModel(false) : "")));
+                return;
+            }
+            case FAILED_JSON_COMMIT -> {
+                mod.reportAgenticProgress(WaypointReportFormatter.jsonCommitFailedComponent(), true);
+                this.finishWithError(WaypointReportFormatter.jsonCommitFailedModel());
+                return;
+            }
+            case REJECTED_TYPE_CONFLICT, REJECTED_TARGET_CONFLICT -> {
+                mod.reportAgenticProgress(WaypointReportFormatter.waypointConflictComponent(), true);
+                this.finishWithError(WaypointReportFormatter.waypointConflictModel(mutation.status()));
+                return;
+            }
+            case FAILED_STORE_UNAVAILABLE -> {
+                fail(mod, StorageAccessCode.CONTAINER_UNREACHABLE,
+                        "EllieGPS store not available (no world loaded)");
+                return;
+            }
+        }
 
         // Model path: English String; player path: translatable Component (separate audiences)
-        AiConversationFeedback.enqueueInfo(mod, WaypointReportFormatter.waypointDeleted(posStr, dimensionId));
+        boolean indexDegraded = mutation.status() == WaypointMutationStatus.COMMITTED_INDEX_DEGRADED;
+        String modelResult = WaypointReportFormatter.waypointDeleted(posStr, dimensionId);
+        if (indexDegraded) {
+            modelResult += " " + WaypointReportFormatter.indexDegradedModel(true);
+        }
+        AiConversationFeedback.enqueueInfo(mod, WaypointReportFormatter.boundModel(modelResult));
         mod.reportAgenticProgress(
                 WaypointReportFormatter.waypointDeletedComponent(posStr, dimensionId), true);
+        if (indexDegraded) {
+            mod.reportAgenticProgress(WaypointReportFormatter.indexDegradedComponent(true), true);
+        }
         Debug.logMessage("waypoint-delete ok id=" + deletedId
                 + " bot=" + mod.getEntity().getName().getString());
-        this.finish();
+        if (indexDegraded) {
+            this.finishWithNote(WaypointReportFormatter.indexDegradedModel(true));
+        } else {
+            this.finish();
+        }
     }
 
     /** Dual-audience failure (player chat + model finishWithError). */
     private void fail(PlayerEngineController mod, StorageAccessCode code, String detail) {
+        String bounded = WaypointReportFormatter.boundReason(detail);
         Debug.logWarning("waypoint-delete fail code=" + code.token()
-                + " detail=" + detail
+                + " detail=" + bounded
                 + " bot=" + mod.getEntity().getName().getString());
         // Player path: translatable prefix; detail stays English (shared with model — not localized)
         mod.reportAgenticProgress(
-                Component.translatable("message.playerengine.elliegps.delete_fail", detail),
+                Component.translatable("message.playerengine.elliegps.delete_fail", bounded),
                 true);
         // Model path: English token:detail for AI truthfulness
-        this.finishWithError(code.token() + ": " + detail);
+        this.finishWithError(WaypointReportFormatter.boundModel(code.token() + ": " + bounded));
     }
 }

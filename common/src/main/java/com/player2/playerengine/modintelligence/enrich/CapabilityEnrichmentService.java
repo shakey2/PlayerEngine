@@ -20,6 +20,7 @@ import org.apache.logging.log4j.Logger;
 import java.io.BufferedWriter;
 import java.io.FileReader;
 import java.io.FileWriter;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,16 +32,16 @@ public final class CapabilityEnrichmentService {
     private CapabilityEnrichmentService() {}
 
     public static void runBatch(MinecraftServer server) {
-        runBatch(server, null, false);
+        runBatch(server, null, false, ModIntelligenceService.currentGeneration());
     }
 
     public static void runBatch(MinecraftServer server, Integer limitOverride) {
-        runBatch(server, limitOverride, limitOverride != null);
+        runBatch(server, limitOverride, limitOverride != null, ModIntelligenceService.currentGeneration());
     }
 
     /**
      * @param limitOverride per-batch call cap from an explicit {@code /playerengine capability enrich
-     *        <limit>} invocation — overrides the config cap for this batch (0 = unlimited) and skips
+     *        <limit>} invocation - overrides the config cap for this batch (0 = unlimited) and skips
      *        the B4.5 large-queue budget gate (informed consent); {@code null} = config governs.
      *        The joules budget hard/soft limits always remain enforced.
      * @param explicit {@code true} when this batch came from an explicit operator command (even with a
@@ -48,43 +49,60 @@ public final class CapabilityEnrichmentService {
      *        the pending-override slot instead of being dropped.
      */
     public static void runBatch(MinecraftServer server, Integer limitOverride, boolean explicit) {
+        runBatch(server, limitOverride, explicit, ModIntelligenceService.currentGeneration());
+    }
+
+    public static void runBatch(MinecraftServer server, Integer limitOverride, boolean explicit, long generation) {
+        if (!ModIntelligenceService.isCurrentGeneration(generation)) {
+            return;
+        }
         Player2ServerRuntimeConfig cfg = Player2ServerConfigHolder.get();
         if (!cfg.isModIntelligenceEnabled() || !cfg.isModIntelligenceEnrichmentEnabled()) {
+            ModIntelligenceService.recordOperationStatus(generation,
+                    ModIntelligenceService.OperationStatus.ENRICHMENT_DEFERRED);
             return;
         }
         if (!ModIntelligenceEnrichmentClient.isBillingAvailable(server)) {
-            LOGGER.info("ModIntelligence enrichment: deferred — no online player or stored owner token for billing");
+            ModIntelligenceService.recordOperationStatus(generation,
+                    ModIntelligenceService.OperationStatus.ENRICHMENT_DEFERRED);
+            LOGGER.info("ModIntelligence enrichment: deferred - no online player or stored owner token for billing");
             return;
         }
         if (ModIntelligenceEnrichmentClient.wouldExceedHardBudget(server)) {
-            LOGGER.info("ModIntelligence enrichment: deferred — budget hard limit would block calls");
+            ModIntelligenceService.recordOperationStatus(generation,
+                    ModIntelligenceService.OperationStatus.ENRICHMENT_DEFERRED);
+            LOGGER.info("ModIntelligence enrichment: deferred - budget hard limit would block calls");
             return;
         }
 
-        if (!ModIntelligenceService.tryBeginEnrichment()) {
+        ModIntelligenceService.OperationClaim claim = ModIntelligenceService.tryBeginEnrichment(generation);
+        if (claim == null) {
             // Lost the lock race to a batch scheduled in the same window. An explicit batch must not
             // vanish: park it in the pending slot; the running batch's finishEnrichment() starts it
             // (parkExplicit re-checks the lock so a winner finishing in this window can't strand it).
             if (explicit) {
-                ModIntelligenceService.parkExplicit(server, limitOverride);
-                LOGGER.info("ModIntelligence enrichment: another batch already running — "
+                ModIntelligenceService.parkExplicit(server, limitOverride, generation);
+                LOGGER.info("ModIntelligence enrichment: another batch already running - "
                         + "explicit batch parked as pending follow-up");
             } else {
-                LOGGER.debug("ModIntelligence enrichment: another batch already running — auto batch skipped");
+                LOGGER.debug("ModIntelligence enrichment: another batch already running - auto batch skipped");
             }
             return;
         }
         int calls = 0;
+        int validated = 0;
         int failures = 0;
         int remainingCount = 0;
+        ModIntelligenceService.OperationStatus outcome =
+                ModIntelligenceService.OperationStatus.ENRICHMENT_COMPLETE;
         ModelBlacklist.ModelBlacklistSnapshot blacklist = ModelBlacklist.load();
-        ModelBlacklist.setBatchSnapshot(blacklist);
+        ModelBlacklist.setBatchSnapshot(generation, blacklist);
         try {
-            List<CapabilityMap> queue = CapabilityEnrichmentQueue.loadQueued();
+            List<CapabilityMap> queue = CapabilityEnrichmentQueue.loadQueuedChecked();
             if (queue.isEmpty()) {
                 // Visible (info) so a pending explicit follow-up that finds nothing left is verifiable.
-                LOGGER.info("ModIntelligence enrichment: queue empty — nothing to enrich (calls=0)");
-                ModIntelligenceService.recordLastEnrichmentBatch(0, 0, 0);
+                LOGGER.info("ModIntelligence enrichment: queue empty - nothing to enrich (calls=0)");
+                outcome = ModIntelligenceService.OperationStatus.ENRICHMENT_EMPTY;
                 return;
             }
 
@@ -94,7 +112,7 @@ public final class CapabilityEnrichmentService {
                 ModIntelligenceSpendSafety.notifyPlayer(
                         server, ModIntelligenceSpendSafety.messageFor(defer.get(), queue.size(), blacklist));
                 remainingCount = queue.size();
-                ModIntelligenceService.recordLastEnrichmentBatch(0, 0, remainingCount);
+                outcome = ModIntelligenceService.OperationStatus.ENRICHMENT_DEFERRED;
                 return;
             }
 
@@ -125,29 +143,41 @@ public final class CapabilityEnrichmentService {
                     userMsg.addProperty("role", "user");
                     userMsg.addProperty("content", CapabilityEnrichmentPrompt.buildUserJson(map));
                     history.addHistory(userMsg, false, null);
+                    calls++;
                     String response = ModIntelligenceEnrichmentClient.complete(server, history);
+                    if (!ModIntelligenceService.isCurrentOperation(claim)) {
+                        return;
+                    }
                     CapabilityEnrichmentResult parsed =
                             CapabilityEnrichmentValidator.parseAndValidate(response, map.getSubjectKind());
                     CapabilityEnrichmentMerger.merge(map, parsed);
-                    store.getActiveMaps().put(key, map);
+                    synchronized (store) {
+                        store.getActiveMaps().put(key, map);
+                    }
                     markManifestEnriched(key);
-                    calls++;
+                    validated++;
                     pending.removeIf(m -> CapabilityStore.entryKey(m).equals(key));
                 } catch (Exception e) {
+                    if (!ModIntelligenceService.isCurrentOperation(claim)) {
+                        return;
+                    }
                     String msg = e.getMessage() == null ? "" : e.getMessage();
                     if ("billing_unavailable".equals(msg) || "budget_hard_limit".equals(msg)) {
+                        outcome = ModIntelligenceService.OperationStatus.ENRICHMENT_DEFERRED;
                         LOGGER.info("ModIntelligence enrichment: stopping batch ({})", msg);
                         break;
                     }
                     if ("model_blacklisted".equals(msg)
                             || "model_missing".equals(msg)
                             || "model_blacklist_invalid".equals(msg)) {
+                        outcome = ModIntelligenceService.OperationStatus.ENRICHMENT_DEFERRED;
                         ModIntelligenceSpendSafety.notifyBatchAbort(server, msg, null);
                         logFailure(map, "EnrichmentAbort", msg);
                         break;
                     }
                     if (msg.contains("422") || msg.contains("user input rejected")) {
-                        LOGGER.warn("ModIntelligence enrichment: stopping batch — Player2 rejected request "
+                        outcome = ModIntelligenceService.OperationStatus.ENRICHMENT_PARTIAL;
+                        LOGGER.warn("ModIntelligence enrichment: stopping batch - Player2 rejected request "
                                 + "(check response_format / prompt). First error: {}", msg);
                         break;
                     }
@@ -162,31 +192,40 @@ public final class CapabilityEnrichmentService {
 
             remainingCount = pending.size();
             persistPendingQueue(pending);
-            if (calls > 0) {
-                CapabilityStoreWriter.writeJsonl(ModIntelligencePaths.capabilityMapsFile(),
-                        store.getActiveMaps().values());
-                String fp = store.getManifest() == null ? "" : store.getManifest().getPackFingerprint();
-                CapabilityIndex.rebuildFromMaps(store.getActiveMaps().values(), fp);
+            if (!ModIntelligenceService.isCurrentOperation(claim)) {
+                return;
+            }
+            if (validated > 0) {
+                List<CapabilityMap> activeSnapshot;
+                String fp;
+                synchronized (store) {
+                    activeSnapshot = new ArrayList<>(store.getActiveMaps().values());
+                    fp = store.getManifest() == null ? "" : store.getManifest().getPackFingerprint();
+                }
+                CapabilityStoreWriter.writeJsonl(ModIntelligencePaths.capabilityMapsFile(), activeSnapshot);
+                CapabilityIndex.rebuildFromMaps(activeSnapshot, fp);
             }
             LOGGER.info("ModIntelligence enrichment: calls={} failures={} remaining={}",
                     calls, failures, remainingCount);
+            if (outcome == ModIntelligenceService.OperationStatus.ENRICHMENT_COMPLETE
+                    && (failures > 0 || remainingCount > 0)) {
+                outcome = ModIntelligenceService.OperationStatus.ENRICHMENT_PARTIAL;
+            }
         } catch (Exception e) {
+            outcome = ModIntelligenceService.OperationStatus.ENRICHMENT_FAILED;
             LOGGER.warn("ModIntelligence enrichment batch failed: {}", e.getMessage());
         } finally {
-            ModelBlacklist.clearBatchSnapshot();
-            ModIntelligenceService.recordLastEnrichmentBatch(calls, failures, remainingCount);
+            ModelBlacklist.clearBatchSnapshot(generation);
+            ModIntelligenceService.recordLastEnrichmentBatch(claim, validated, failures, remainingCount);
+            ModIntelligenceService.recordOperationStatus(claim, outcome);
             // Releases the lock AND starts the pending explicit follow-up batch, if one arrived
-            // mid-flight — on every completion path (success, failure, early stop).
-            ModIntelligenceService.finishEnrichment(server);
+            // mid-flight - on every completion path (success, failure, early stop).
+            ModIntelligenceService.finishEnrichment(server, claim);
         }
     }
 
-    private static void persistPendingQueue(List<CapabilityMap> pending) {
-        try {
-            CapabilityEnrichmentQueue.saveQueued(pending);
-        } catch (Exception e) {
-            LOGGER.warn("ModIntelligence enrichment: could not persist queue: {}", e.getMessage());
-        }
+    private static void persistPendingQueue(List<CapabilityMap> pending) throws IOException {
+        CapabilityEnrichmentQueue.saveQueued(pending);
     }
 
     private static void markManifestEnriched(String entryKey) {

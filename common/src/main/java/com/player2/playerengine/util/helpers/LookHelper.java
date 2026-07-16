@@ -6,6 +6,8 @@ import com.player2.playerengine.automaton.api.utils.IEntityContext;
 import com.player2.playerengine.automaton.api.utils.RayTraceUtils;
 import com.player2.playerengine.automaton.api.utils.Rotation;
 import com.player2.playerengine.automaton.api.utils.RotationUtils;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
@@ -22,31 +24,65 @@ import net.minecraft.world.level.ClipContext.Fluid;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.HitResult.Type;
 
 public interface LookHelper {
    static Optional<Rotation> getReach(PlayerEngineController controller, BlockPos target, Direction side) {
       IEntityContext context = controller.getBaritone().getEntityContext();
-      Optional<Rotation> reachableRotation;
       if (side == null) {
-         reachableRotation = RotationUtils.reachable(context.entity(), target, context.playerController().getBlockReachDistance());
-      } else {
-         Vec3i sideVector = side.getNormal();
-         Vec3 centerOffset = new Vec3(0.5 + sideVector.getX() * 0.5, 0.5 + sideVector.getY() * 0.5, 0.5 + sideVector.getZ() * 0.5);
-         Vec3 sidePoint = centerOffset.add(target.getX(), target.getY(), target.getZ());
-         reachableRotation = RotationUtils.reachableOffset(context.entity(), target, sidePoint, context.playerController().getBlockReachDistance(), false);
+         return RotationUtils.reachable(
+                 context.entity(), target, context.playerController().getBlockReachDistance());
+      }
+
+      Vec3i sideVector = side.getNormal();
+      double reachDistance = context.playerController().getBlockReachDistance();
+      for (Vec3 sidePoint : faceTargetPoints(target, side)) {
+         Optional<Rotation> reachableRotation = RotationUtils.reachableOffset(
+                 context.entity(), target, sidePoint, reachDistance, false);
          if (reachableRotation.isPresent()) {
             Vec3 cameraPos = context.entity().getEyePosition(1.0F);
             Vec3 vecToPlayerPos = cameraPos.subtract(sidePoint);
             double dotProduct = vecToPlayerPos.normalize().dot(new Vec3(sideVector.getX(), sideVector.getY(), sideVector.getZ()));
             if (dotProduct < 0.0) {
-               return Optional.empty();
+               continue;
+            }
+            HitResult hit = RayTraceUtils.rayTraceTowards(
+                    context.entity(), reachableRotation.get(), reachDistance, false);
+            if (isBlockFaceHit(hit, target, side)) {
+               return reachableRotation;
             }
          }
       }
 
-      return reachableRotation;
+      return Optional.empty();
+   }
+
+   static boolean isBlockFaceHit(HitResult hit, BlockPos target, Direction side) {
+      return hit instanceof BlockHitResult blockHit
+              && blockHit.getType() == Type.BLOCK
+              && blockHit.getBlockPos().equals(target)
+              && blockHit.getDirection() == side;
+   }
+
+   private static List<Vec3> faceTargetPoints(BlockPos target, Direction side) {
+      final double inside = 0.001;
+      double face = side.getAxisDirection() == Direction.AxisDirection.POSITIVE
+              ? 1.0 - inside
+              : inside;
+      double[] tangents = {0.5, 0.25, 0.75};
+      ArrayList<Vec3> points = new ArrayList<>(9);
+      for (double first : tangents) {
+         for (double second : tangents) {
+            double x = side.getAxis() == Direction.Axis.X ? face : first;
+            double y = side.getAxis() == Direction.Axis.Y ? face
+                    : side.getAxis() == Direction.Axis.X ? first : second;
+            double z = side.getAxis() == Direction.Axis.Z ? face : second;
+            points.add(new Vec3(target.getX() + x, target.getY() + y, target.getZ() + z));
+         }
+      }
+      return List.copyOf(points);
    }
 
    static Optional<Rotation> getReach(PlayerEngineController controller, BlockPos target) {

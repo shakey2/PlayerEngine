@@ -18,3 +18,46 @@ dependencies {
     // Schematic parsing
 	implementation 'net.sandrohc:schematic4j:1.1.0'
 }
+
+def farmingSelfTest = tasks.register('farmingSelfTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs deterministic farming and checked EllieGPS waypoint self-tests.'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass.set('com.player2.playerengine.agentic.elliegps.FarmingSelfTestSuite')
+    enableAssertions = true
+}
+
+def ellieGpsAtomicCallerFiles = files(
+        'src/main/java/com/player2/playerengine/commands/CreateWaypointCommand.java',
+        'src/main/java/com/player2/playerengine/commands/AuditWaypointCommand.java',
+        'src/main/java/com/player2/playerengine/agentic/elliegps/WaypointAutoRegistrar.java')
+
+def checkEllieGpsAtomicCallers = tasks.register('checkEllieGpsAtomicCallers') {
+    group = 'verification'
+    description = 'Guards canonical waypoint refresh callers against delete-then-upsert regressions.'
+    inputs.files(ellieGpsAtomicCallerFiles)
+
+    doLast {
+        ellieGpsAtomicCallerFiles.files.each { File sourceFile ->
+            if (!sourceFile.isFile()) {
+                throw new GradleException("Missing EllieGPS atomic-caller source: ${sourceFile}")
+            }
+            String source = sourceFile.getText('UTF-8')
+            if (!(source =~ /\b(?:store|liveStore)\s*\.\s*replace\s*\(/).find()) {
+                throw new GradleException(
+                        "${sourceFile.name} must refresh canonical waypoint ids with replace(...)")
+            }
+            if ((source =~ /\b(?:store|liveStore)\s*\.\s*delete\s*\(/).find()
+                    || (source =~ /\bEllieGPSStore\s*\.\s*delete\s*\(/).find()) {
+                throw new GradleException(
+                        "${sourceFile.name} must not delete a waypoint directly during refresh")
+            }
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn farmingSelfTest
+    dependsOn checkEllieGpsAtomicCallers
+}

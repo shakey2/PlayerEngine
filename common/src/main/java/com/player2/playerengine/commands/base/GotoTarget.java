@@ -22,10 +22,10 @@ public class GotoTarget {
    public static GotoTarget parseRemainder(String line) throws CommandException {
       line = line.trim();
       if (line.startsWith("(") && line.endsWith(")")) {
-         line = line.substring(1, line.length() - 1);
+         line = line.substring(1, line.length() - 1).trim();
       }
 
-      String[] parts = line.split(" ");
+      String[] parts = line.isEmpty() ? new String[0] : line.split("\\s+");
       List<Integer> numbers = new ArrayList<>();
       Dimension dimension = null;
 
@@ -43,7 +43,7 @@ public class GotoTarget {
       int y = 0;
       int z = 0;
 
-      return new GotoTarget(x, y, z, dimension, switch (numbers.size()) {
+      GotoTarget.GotoTargetCoordType type = switch (numbers.size()) {
          case 0 -> GotoTarget.GotoTargetCoordType.NONE;
          case 1 -> {
             y = numbers.get(0);
@@ -61,7 +61,8 @@ public class GotoTarget {
             yield GotoTarget.GotoTargetCoordType.XYZ;
          }
          default -> throw new CommandException("Unexpected number of integers passed to coordinate: " + numbers.size());
-      });
+      };
+      return new GotoTarget(x, y, z, dimension, type);
    }
 
    public int getX() {

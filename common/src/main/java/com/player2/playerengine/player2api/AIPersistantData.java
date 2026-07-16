@@ -15,6 +15,8 @@ import net.minecraft.world.level.storage.LevelResource;
 
 
 public class AIPersistantData {
+    public static final int ADDITIONAL_PROMPT_MAX_CHARS = 300;
+
     // contains data relating to AI processing, only including data that is
     // permanent,
     // and persists across game state (not queue stuff)
@@ -34,6 +36,8 @@ public class AIPersistantData {
     private com.player2.playerengine.player2api.mood.CompanionMood currentMood =
             com.player2.playerengine.player2api.mood.CompanionMood.neutral();
     private Path moodFile;
+    private String additionalPrompt = "";
+    private Path additionalPromptFile;
 
     public AIPersistantData(PlayerEngineController mod, Character character) {
         this.character = character;
@@ -55,6 +59,57 @@ public class AIPersistantData {
         // exactly like the conversation-history fallback above.
         this.moodFile = getMoodFileOrNull(mod, worldRoot, this.characterId);
         loadMoodFromDiskTolerant();
+        this.additionalPromptFile = getAdditionalPromptFileOrNull(mod, worldRoot, this.characterId);
+        loadAdditionalPromptFromDiskTolerant();
+    }
+
+    /**
+     * Re-resolves owner-scoped persistence after a controller gains its owner later in entity load.
+     * This only moves from the current fallback/legacy path to the current owner's canonical path; it
+     * never scans sibling owner directories, which would risk leaking another player's companion data.
+     */
+    public void rebindOwnerPersistenceIfChanged() {
+        Path worldRoot = resolveWorldRootOrNull(mod);
+        Path targetHistoryFile = getConversationHistoryFileOrNull(mod, worldRoot, this.characterId);
+        if (targetHistoryFile != null && !Objects.equals(this.conversationHistoryFile, targetHistoryFile)) {
+            Path previousHistoryFile = this.conversationHistoryFile;
+            migrateLegacyHistoryIfPresent(this.character, this.characterId, worldRoot, targetHistoryFile, mod);
+            copyFileIfTargetMissing(previousHistoryFile, targetHistoryFile);
+            this.conversationHistoryFile = targetHistoryFile;
+            String systemPrompt = Prompts.getAINPCSystemPrompt(character, mod.getCommandExecutor().allCommands(), mod.getOwnerUsername());
+            this.conversationHistory = new ConversationHistory(withRelationshipSuffix(systemPrompt), this.conversationHistoryFile);
+        }
+
+        Path targetMoodFile = getMoodFileOrNull(mod, worldRoot, this.characterId);
+        if (targetMoodFile != null && !Objects.equals(this.moodFile, targetMoodFile)) {
+            copyFileIfTargetMissing(this.moodFile, targetMoodFile);
+            this.moodFile = targetMoodFile;
+            loadMoodFromDiskTolerant();
+        }
+
+        Path targetAdditionalPromptFile = getAdditionalPromptFileOrNull(mod, worldRoot, this.characterId);
+        if (targetAdditionalPromptFile != null && !Objects.equals(this.additionalPromptFile, targetAdditionalPromptFile)) {
+            copyFileIfTargetMissing(this.additionalPromptFile, targetAdditionalPromptFile);
+            this.additionalPromptFile = targetAdditionalPromptFile;
+            loadAdditionalPromptFromDiskTolerant();
+        }
+    }
+
+    private static void copyFileIfTargetMissing(Path source, Path target) {
+        if (source == null || target == null || Objects.equals(source, target)) {
+            return;
+        }
+        try {
+            if (!Files.exists(source) || Files.exists(target)) {
+                return;
+            }
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
+            Files.copy(source, target);
+        } catch (Exception ignored) {
+            // Best-effort owner-scope rebind; callers continue with the target path either way.
+        }
     }
 
     /**
@@ -205,7 +260,7 @@ public class AIPersistantData {
      */
     public ConversationHistory getConversationHistoryWrappedWithStatus(String worldStatus, String agentStatus, String altoClefDebugMsgs, Player2APIService player2apiService, Optional<String> reminderString, Optional<String> validCommandsBlock, Optional<String> memoryBlock, Optional<String> moodBlock){
         return this.conversationHistory
-                .copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoClefDebugMsgs, player2apiService, reminderString, validCommandsBlock, memoryBlock, moodBlock);
+                .copyThenWrapLatestWithStatus(worldStatus, agentStatus, altoClefDebugMsgs, player2apiService, reminderString, validCommandsBlock, memoryBlock, moodBlock, additionalPromptBlock());
     }
     public void addAssistantMessage(String llmMessage, Player2APIService player2apiService){
         this.conversationHistory.addAssistantMessage(llmMessage, player2apiService);
@@ -256,6 +311,100 @@ public class AIPersistantData {
         conversationHistory.reloadNow();
         // After reload, ensure the system prompt is updated to match the current command list/owner.
         updateSystemPrompt();
+    }
+
+    public String getAdditionalPrompt() {
+        return this.additionalPrompt;
+    }
+
+    public void updateAdditionalPrompt(String prompt) {
+        this.additionalPrompt = cleanAdditionalPrompt(prompt);
+    }
+
+    public void saveAdditionalPromptNow() {
+        try {
+            writeAdditionalPromptFile(this.additionalPromptFile, this.additionalPrompt);
+        } catch (Exception e) {
+            com.player2.playerengine.util.Debug.logWarning("saveAdditionalPromptNow: failed to write additional prompt for character %s", this.characterId);
+        }
+    }
+
+    public void reloadAdditionalPromptFromDisk() {
+        loadAdditionalPromptFromDiskTolerant();
+    }
+
+    public static String cleanAdditionalPrompt(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String normalized = raw.replace("\r\n", "\n").replace('\r', '\n');
+        StringBuilder cleaned = new StringBuilder(Math.min(normalized.length(), ADDITIONAL_PROMPT_MAX_CHARS));
+        for (int i = 0; i < normalized.length() && cleaned.length() < ADDITIONAL_PROMPT_MAX_CHARS; i++) {
+            char c = normalized.charAt(i);
+            if (java.lang.Character.isISOControl(c) && c != '\n' && c != '\t') {
+                continue;
+            }
+            cleaned.append(c);
+        }
+        return cleaned.toString().trim();
+    }
+
+    public static String readAdditionalPrompt(MinecraftServer server, UUID ownerUuid, String characterId) {
+        if (server == null || ownerUuid == null || characterId == null || characterId.isBlank()) {
+            return "";
+        }
+        try {
+            Path file = Player2NpcPersistencePaths.additionalPromptFile(server, ownerUuid, characterId);
+            if (!Files.exists(file)) {
+                return "";
+            }
+            return cleanAdditionalPrompt(Files.readString(file, java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    public static void saveAdditionalPrompt(MinecraftServer server, UUID ownerUuid, String characterId, String prompt) throws java.io.IOException {
+        if (server == null || ownerUuid == null || characterId == null || characterId.isBlank()) {
+            throw new java.io.IOException("missing_target");
+        }
+        writeAdditionalPromptFile(Player2NpcPersistencePaths.additionalPromptFile(server, ownerUuid, characterId), prompt);
+    }
+
+    private Optional<String> additionalPromptBlock() {
+        String prompt = cleanAdditionalPrompt(this.additionalPrompt);
+        return prompt.isBlank() ? Optional.empty() : Optional.of(prompt);
+    }
+
+    private void loadAdditionalPromptFromDiskTolerant() {
+        if (this.additionalPromptFile == null || !Files.exists(this.additionalPromptFile)) {
+            this.additionalPrompt = "";
+            return;
+        }
+        try {
+            this.additionalPrompt = cleanAdditionalPrompt(Files.readString(this.additionalPromptFile, java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            this.additionalPrompt = "";
+            com.player2.playerengine.util.Debug.logWarning("loadAdditionalPrompt: failed to read additional prompt for character %s", this.characterId);
+        }
+    }
+
+    private static void writeAdditionalPromptFile(Path file, String prompt) throws java.io.IOException {
+        if (file == null) {
+            return;
+        }
+        if (file.getParent() != null) {
+            Files.createDirectories(file.getParent());
+        }
+        Path tmp = file.resolveSibling(Player2NpcPersistencePaths.ADDITIONAL_PROMPT_FILE_NAME + ".tmp");
+        Files.writeString(tmp, cleanAdditionalPrompt(prompt), java.nio.charset.StandardCharsets.UTF_8);
+        try {
+            Files.move(tmp, file,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -361,6 +510,25 @@ public class AIPersistantData {
                     .resolve(entityUuid.toString())
                     .resolve(characterId)
                     .resolve(Player2NpcPersistencePaths.MOOD_FILE_NAME);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static Path getAdditionalPromptFileOrNull(PlayerEngineController mod, Path worldRoot, String characterId) {
+        if (mod == null || mod.getPlayer() == null) return null;
+        if (characterId == null || characterId.isBlank()) return null;
+        if (worldRoot == null) return null;
+        try {
+            UUID ownerUuid = resolveOwnerUuidOrNull(mod);
+            if (ownerUuid != null) {
+                return Player2NpcPersistencePaths.additionalPromptFile(worldRoot, ownerUuid, characterId);
+            }
+            UUID entityUuid = mod.getPlayer().getUUID();
+            return Player2NpcPersistencePaths.persistentDataRoot(worldRoot)
+                    .resolve(entityUuid.toString())
+                    .resolve(characterId)
+                    .resolve(Player2NpcPersistencePaths.ADDITIONAL_PROMPT_FILE_NAME);
         } catch (Exception e) {
             return null;
         }
@@ -493,7 +661,12 @@ public class AIPersistantData {
             }
             if (Files.exists(newHistoryFile)) return;
 
-            // 3) Old entity-scoped path (same layout whether or not owner is now known)
+            // 3) Stranded owner-scoped path from older owner-resolution bugs. Only copy a same-character
+            // file whose system header names the currently resolved owner username.
+            migrateStrandedOwnerHistoryIfPresent(mod.getOwnerUsername(), characterId, worldRoot, newHistoryFile);
+            if (Files.exists(newHistoryFile)) return;
+
+            // 4) Old entity-scoped path (same layout whether or not owner is now known)
             if (worldRoot != null && characterId != null && !characterId.isBlank() && mod.getPlayer() != null) {
                 UUID entityUuid = mod.getPlayer().getUUID();
                 Path oldEntityScoped = worldRoot
@@ -508,6 +681,58 @@ public class AIPersistantData {
             }
         } catch (Exception e) {
             // Best-effort migration; ignore failures.
+        }
+    }
+
+    private static void migrateStrandedOwnerHistoryIfPresent(String ownerUsername, String characterId,
+                                                             Path worldRoot, Path newHistoryFile) {
+        if (worldRoot == null || newHistoryFile == null) return;
+        if (characterId == null || characterId.isBlank()) return;
+        if (ownerUsername == null || ownerUsername.isBlank() || "UNKNOWN OWNER".equals(ownerUsername)) return;
+        Path ownersRoot = Player2NpcPersistencePaths.ownersRoot(worldRoot);
+        if (!Files.isDirectory(ownersRoot)) return;
+        Path target = newHistoryFile.normalize();
+        Path[] best = new Path[1];
+        try (java.util.stream.Stream<Path> owners = Files.list(ownersRoot)) {
+            owners.filter(Files::isDirectory).forEach(ownerDir -> {
+                Path candidate = ownerDir.resolve(characterId).resolve("conversation.jsonl");
+                if (candidate.normalize().equals(target) || !Files.isRegularFile(candidate)) {
+                    return;
+                }
+                if (!historyHeaderNamesOwner(candidate, ownerUsername)) {
+                    return;
+                }
+                if (best[0] == null || isNewerFile(candidate, best[0])) {
+                    best[0] = candidate;
+                }
+            });
+            if (best[0] != null && !Files.exists(newHistoryFile)) {
+                Files.copy(best[0], newHistoryFile);
+            }
+        } catch (Exception ignored) {
+            // Best-effort migration; ignore failures.
+        }
+    }
+
+    private static boolean historyHeaderNamesOwner(Path historyFile, String ownerUsername) {
+        try (java.io.BufferedReader reader = Files.newBufferedReader(historyFile, java.nio.charset.StandardCharsets.UTF_8)) {
+            String firstLine = reader.readLine();
+            if (firstLine == null || firstLine.isBlank()) {
+                return false;
+            }
+            String lower = firstLine.toLowerCase(java.util.Locale.ROOT);
+            String owner = ownerUsername.toLowerCase(java.util.Locale.ROOT);
+            return lower.contains("owner") && lower.contains("username") && lower.contains("\"" + owner + "\"");
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isNewerFile(Path candidate, Path current) {
+        try {
+            return Files.getLastModifiedTime(candidate).toMillis() > Files.getLastModifiedTime(current).toMillis();
+        } catch (Exception ignored) {
+            return false;
         }
     }
 

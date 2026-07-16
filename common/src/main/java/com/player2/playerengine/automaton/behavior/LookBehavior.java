@@ -85,8 +85,19 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
       assert actualTarget != null;
 
       LivingEntity entity = this.ctx.entity();
-      double lookScrambleFactor = this.baritone.settings().randomLooking.get();
-      updateLook(entity, actualTarget, lookScrambleFactor, !this.baritone.settings().freeLook.get());
+      boolean freeLook = this.baritone.settings().freeLook.get();
+      double lookScrambleFactor = effectiveLookScramble(
+              this.baritone.settings().randomLooking.get(), forcePrimary);
+      updateLook(entity, actualTarget, lookScrambleFactor,
+              shouldNudgePitch(forcePrimary, freeLook));
+   }
+
+   static double effectiveLookScramble(double configured, boolean forcePrimary) {
+      return forcePrimary ? 0.0 : configured;
+   }
+
+   static boolean shouldNudgePitch(boolean forcePrimary, boolean freeLook) {
+      return !forcePrimary && !freeLook;
    }
 
    private static void updateLook(LivingEntity entity, Rotation target, double lookScrambleFactor, boolean nudgePitch) {
@@ -96,9 +107,24 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
       entity.setXRot(desiredPitch);
       entity.setYRot((float)(entity.getYRot() + (Math.random() - 0.5) * lookScrambleFactor));
       entity.setXRot((float)(entity.getXRot() + (Math.random() - 0.5) * lookScrambleFactor));
+      entity.setXRot(levelAdjustedPitch(
+              oldPitch, desiredPitch, entity.getXRot(), nudgePitch));
+   }
+
+   static float levelAdjustedPitch(
+           float oldPitch,
+           float desiredPitch,
+           float resultingPitch,
+           boolean nudgePitch) {
       if (desiredPitch == oldPitch && nudgePitch) {
-         nudgeToLevel(entity);
+         if (resultingPitch < -20.0F) {
+            return resultingPitch + 1.0F;
+         }
+         if (resultingPitch > 10.0F) {
+            return resultingPitch - 1.0F;
+         }
       }
+      return resultingPitch;
    }
 
    @Nullable
@@ -144,11 +170,4 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
       }
    }
 
-   private static void nudgeToLevel(LivingEntity entity) {
-      if (entity.getXRot() < -20.0F) {
-         entity.setXRot(entity.getXRot() + 1.0F);
-      } else if (entity.getXRot() > 10.0F) {
-         entity.setXRot(entity.getXRot() - 1.0F);
-      }
-   }
 }

@@ -50,25 +50,52 @@ public final class ModelTierRouterSelfTest {
             RoutingResult r = resolve(AiTaskClass.DECISION, Optional.empty(), snap(500, "gold"), thresholds(100, 0), config(false));
             assertEq(6, r.matchedRule(), "rule");
         });
-        failed += run("snapshot null skips demotion (rule 5)", () -> {
+        failed += run("snapshot null fails closed to Default", () -> {
             RoutingResult r = resolve(AiTaskClass.DECISION, Optional.of("http://127.0.0.1:1/named"), null, thresholds(100, 0), config(false));
-            assertEq(5, r.matchedRule(), "rule");
+            assertEq(6, r.matchedRule(), "rule");
+            assertTrue(r.decision().profileBaseUrlOverride().isEmpty(), "default");
         });
         failed += run("softJoulesThreshold 0 skips demotion (rule 5)", () -> {
-            RoutingResult r = resolve(AiTaskClass.DECISION, Optional.of("http://127.0.0.1:1/named"), snap(1, ""), thresholds(0, 0), config(false));
+            RoutingResult r = resolve(AiTaskClass.DECISION, Optional.of("http://127.0.0.1:1/named"), snap(1, "gold"), thresholds(0, 0), config(false));
             assertEq(5, r.matchedRule(), "rule");
         });
         failed += run("multi-profile empty sole → rule 6", () -> {
             RoutingResult r = resolve(AiTaskClass.PLANNING, Optional.empty(), snap(500, "gold"), thresholds(100, 0), config(false));
             assertEq(6, r.matchedRule(), "rule");
         });
-        failed += run("non-patron with named still routes rule 5", () -> {
+        failed += run("non-patron with named fails closed to Default", () -> {
             RoutingResult r = resolve(AiTaskClass.DECISION, Optional.of("http://127.0.0.1:1/named"), snap(500, ""), thresholds(100, 0), config(false));
-            assertEq(5, r.matchedRule(), "rule");
+            assertEq(6, r.matchedRule(), "rule");
+            assertTrue(r.decision().profileBaseUrlOverride().isEmpty(), "default");
+        });
+        failed += run("stale patron snapshot fails closed to Default", () -> {
+            RoutingResult r = resolve(AiTaskClass.DECISION, Optional.of("http://127.0.0.1:1/named"),
+                    staleSnap(500, "gold"), thresholds(100, 0), config(false));
+            assertEq(6, r.matchedRule(), "rule");
+            assertTrue(r.decision().profileBaseUrlOverride().isEmpty(), "default");
+        });
+        failed += run("A4 named fallback accepts fresh patron snapshot", () ->
+                assertTrue(Player2APIService.canUseNamedFallback(snap(500, "gold"), thresholds(100, 0)), "eligible"));
+        failed += run("A4 named fallback rejects missing snapshot", () ->
+                assertFalse(Player2APIService.canUseNamedFallback(null, thresholds(100, 0)), "ineligible"));
+        failed += run("A4 named fallback rejects non-patron snapshot", () ->
+                assertFalse(Player2APIService.canUseNamedFallback(snap(500, "   "), thresholds(100, 0)), "ineligible"));
+        failed += run("A4 named fallback rejects stale patron snapshot", () ->
+                assertFalse(Player2APIService.canUseNamedFallback(staleSnap(500, "gold"), thresholds(100, 0)), "ineligible"));
+        failed += run("profile names preserve exact safe identity", () -> {
+            assertTrue(ProfileUrlResolver.isValidNamedProfileName("Patron Tier"), "internal space accepted");
+            assertFalse(ProfileUrlResolver.isValidNamedProfileName(" Patron Tier"), "leading whitespace");
+            assertFalse(ProfileUrlResolver.isValidNamedProfileName("Patron Tier "), "trailing whitespace");
+            assertFalse(ProfileUrlResolver.isValidNamedProfileName("\u00a0Patron Tier"), "leading space character");
+            assertFalse(ProfileUrlResolver.isValidNamedProfileName("Default"), "implicit Default excluded");
+            assertFalse(ProfileUrlResolver.isValidNamedProfileName("dEfAuLt"), "Default excluded ignoring case");
+            assertFalse(ProfileUrlResolver.isValidNamedProfileName("Patron\nTier"), "control character");
+            assertFalse(ProfileUrlResolver.isValidNamedProfileName("Patron\u200eTier"), "format character");
+            assertFalse(ProfileUrlResolver.isValidNamedProfileName("x".repeat(81)), "UTF-16 length cap");
         });
 
         if (failed == 0) {
-            System.out.println("ModelTierRouterSelfTest: PASS (" + 11 + " cases)");
+            System.out.println("ModelTierRouterSelfTest: PASS (" + 17 + " cases)");
         } else {
             System.err.println("ModelTierRouterSelfTest: FAIL (" + failed + " case(s) failed)");
             System.exit(1);
@@ -86,6 +113,10 @@ public final class ModelTierRouterSelfTest {
 
     private static JoulesCache.JoulesSnapshot snap(long joules, String tier) {
         return JoulesCache.snapshotForProbe(joules, tier);
+    }
+
+    private static JoulesCache.JoulesSnapshot staleSnap(long joules, String tier) {
+        return JoulesCache.snapshotForProbe(joules, tier, System.currentTimeMillis() - 120_000L);
     }
 
     private static BudgetThresholds thresholds(int softJoules, int hardJoules) {

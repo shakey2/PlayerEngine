@@ -1067,9 +1067,24 @@ public class MCCommands {
 
     private static int capabilityRebuild(CommandSourceStack src, boolean force) {
         MinecraftServer server = src.getServer();
-        src.sendSuccess(() -> Component.translatable("message.playerengine.capability.rebuild_started"), false);
-        PlayerEngine.getExecutor().execute(() -> ModIntelligenceService.runIngestion(server, force));
-        return 1;
+        return switch (ModIntelligenceService.requestIngestion(server, force)) {
+            case STARTED -> {
+                src.sendSuccess(() -> Component.translatable("message.playerengine.capability.rebuild_started"), false);
+                yield 1;
+            }
+            case ALREADY_RUNNING -> {
+                src.sendFailure(Component.translatable("message.playerengine.capability.rebuild_already_running"));
+                yield 0;
+            }
+            case DISABLED -> {
+                src.sendFailure(Component.translatable("message.playerengine.capability.rebuild_disabled"));
+                yield 0;
+            }
+            case EXECUTOR_UNAVAILABLE -> {
+                src.sendFailure(Component.translatable("message.playerengine.capability.rebuild_executor_unavailable"));
+                yield 0;
+            }
+        };
     }
 
     /**
@@ -1138,6 +1153,11 @@ public class MCCommands {
             case BILLING_UNAVAILABLE -> {
                 src.sendFailure(Component.translatable(
                         "message.playerengine.capability.enrich_billing_not_yet"));
+                yield 0;
+            }
+            case EXECUTOR_UNAVAILABLE -> {
+                src.sendFailure(Component.translatable(
+                        "message.playerengine.capability.enrich_executor_unavailable"));
                 yield 0;
             }
         };

@@ -53,6 +53,7 @@ public final class AgenticRunRegistry {
         private String smeltProgress = "";
         private String smithProgress = "";
         private String mineProgress = "";
+        private String farmProgress = "";
         private String storageTargetSummary = "";
         // Set true once the run reaches a terminal outcome (see terminal(...)). The post-terminal
         // guard (C4) reads this off the run-state object the tasks hold, NOT via an
@@ -78,6 +79,8 @@ public final class AgenticRunRegistry {
         private String smithDegradationReason = "";
         private DegradationLevel mineDegradation = DegradationLevel.CLEAN;
         private String mineDegradationReason = "";
+        private DegradationLevel farmDegradation = DegradationLevel.CLEAN;
+        private String farmDegradationReason = "";
 
         public AgenticRunState(String runId, String goalSummary, String planningSource) {
             this.runId = runId;
@@ -117,6 +120,10 @@ public final class AgenticRunRegistry {
 
         public void setMineProgress(String progress) {
             this.mineProgress = progress != null ? progress : "";
+        }
+
+        public void setFarmProgress(String progress) {
+            this.farmProgress = progress != null ? progress : "";
         }
 
         public void setStorageTargetSummary(String summary) {
@@ -194,6 +201,11 @@ public final class AgenticRunRegistry {
             this.mineDegradationReason = reason != null ? reason : "";
         }
 
+        public void setFarmDegraded(DegradationLevel level, String reason) {
+            this.farmDegradation = level != null ? level : DegradationLevel.CLEAN;
+            this.farmDegradationReason = reason != null ? reason : "";
+        }
+
         public DegradationLevel getGatherDegradation() { return gatherDegradation; }
         public String getGatherDegradationReason() { return gatherDegradationReason; }
         public DegradationLevel getDepositDegradation() { return depositDegradation; }
@@ -208,6 +220,8 @@ public final class AgenticRunRegistry {
         public String getSmithDegradationReason() { return smithDegradationReason; }
         public DegradationLevel getMineDegradation() { return mineDegradation; }
         public String getMineDegradationReason() { return mineDegradationReason; }
+        public DegradationLevel getFarmDegradation() { return farmDegradation; }
+        public String getFarmDegradationReason() { return farmDegradationReason; }
 
         // Progress/target readers used by AgenticDegradationSummary to emit FACTUAL success notes on
         // a clean run (deposited N, gathered N, chest at x y z). The *Progress strings are rewritten
@@ -219,6 +233,7 @@ public final class AgenticRunRegistry {
         public String getSmeltProgress() { return smeltProgress; }
         public String getSmithProgress() { return smithProgress; }
         public String getMineProgress() { return mineProgress; }
+        public String getFarmProgress() { return farmProgress; }
         public String getStorageTargetSummary() { return storageTargetSummary; }
 
         /**
@@ -248,6 +263,9 @@ public final class AgenticRunRegistry {
             }
             if (k.contains("mine")) {
                 return mineProgress;
+            }
+            if (k.contains("farm")) {
+                return farmProgress;
             }
             // resolve_storage_chest and other storage steps report via storageProgress.
             return storageProgress;
@@ -315,6 +333,12 @@ public final class AgenticRunRegistry {
                     msg.append(" | ");
                 }
                 msg.append(mineProgress);
+            }
+            if (!farmProgress.isBlank()) {
+                if (msg.length() > 0) {
+                    msg.append(" | ");
+                }
+                msg.append(farmProgress);
             }
             return new AgenticRunSnapshot(
                     runId,

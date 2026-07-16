@@ -14,7 +14,7 @@ import java.util.List;
  * <ul>
  *   <li>{@code id}              — stable opaque id; graph map key (W1)</li>
  *   <li>{@code content}         — hard-capped at WRITE TIME (the egress boundary) (W1)</li>
- *   <li>{@code type}            — lenient CHARACTER/PLACE/EVENT/FACTION/ITEM string (W2)</li>
+ *   <li>{@code type}            — lenient CHARACTER/PLACE/EVENT/FACTION/ITEM/FACT/PREFERENCE string (W2)</li>
  *   <li>{@code canonicalName}   — dedupe/merge key (W2)</li>
  *   <li>{@code aliases}         — merged alias set (W2)</li>
  *   <li>{@code tags}            — topic/entity-type tags (W1)</li>

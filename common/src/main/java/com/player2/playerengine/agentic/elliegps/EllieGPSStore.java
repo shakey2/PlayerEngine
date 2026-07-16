@@ -7,6 +7,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.player2.playerengine.PlayerEngine;
 import com.player2.playerengine.player2api.Player2NpcPersistencePaths;
+import com.player2.playerengine.retrieval.RetrievalHit;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 
@@ -17,111 +18,68 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.Objects;
 
 /**
- * Per-world EllieGPS waypoint store.
+ * Per-world authoritative EllieGPS waypoint store.
  *
- * <p>Owns {@code waypoints.json} under
- * {@code <worldRoot>/player2npc/persistentdata/elliegps/} and provides the CRUD API all other
- * EllieGPS workstreams build against.
- *
- * <h3>Threading contract</h3>
- * All mutations ({@link #upsert}, {@link #delete}, {@link #markStale}) MUST be called on the
- * server thread. A {@code volatile} immutable published snapshot is maintained for the
- * counting service to read lock-free from any thread.
- *
- * <h3>Persistence invariant</h3>
- * {@code waypoints.json} is always the source of truth; the index (bin + version.txt) is
- * always rebuildable from it. Every mutation writes JSON first via atomic tmp-rename, then
- * rebuilds the in-memory {@link EllieGPSWaypointIndex} (and its persisted bin + version
- * token) internally — callers never need to reindex after a store mutation, so the index can
- * never silently drift from the store (Decision 3: corpus is tiny, full rebuild per mutation
- * is the pinned design).
- *
- * <h3>Corrupt-file quarantine (Decision 14)</h3>
- * If {@code waypoints.json} cannot be parsed, it is renamed to
- * {@code waypoints.json.corrupt-<epoch>} and the store starts empty with a WARN log. A
- * one-time operator-visible note is surfaced on first command use.
- *
- * <h3>Forward compatibility</h3>
- * Records with unknown {@code type} values and unknown fields are preserved verbatim.
- * Files with {@code schemaVersion > 1} are quarantined rather than silently truncated.
- *
- * <h3>Singleton pattern</h3>
- * The static {@link #INSTANCE} is set by {@link #loadForServer(MinecraftServer)} at
- * {@code SERVER_STARTING} and cleared by {@link #clear()} at {@code SERVER_STOPPING}.
+ * <p>All mutations are synchronous server-thread operations. A complete candidate JSON document is
+ * atomically promoted before candidate memory becomes visible. The derived index is synchronized
+ * afterwards and may fail independently, producing a committed degradation rather than a false JSON
+ * failure. Query methods return defensive record copies; authoritative records never escape.
  */
 public final class EllieGPSStore {
 
-    // -------------------------------------------------------------------------
-    // Singleton holder
-    // -------------------------------------------------------------------------
-
-    /** The store for the currently loaded world. Null when no world is loaded. */
     private static volatile EllieGPSStore INSTANCE;
 
-    /** Returns the store for the currently loaded world, or {@code null} when no world is loaded. */
+    private static final int SUPPORTED_SCHEMA_VERSION = WaypointRecord.WAYPOINT_SCHEMA_VERSION;
+    private static final String WAYPOINTS_FILE_NAME = "waypoints.json";
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final WaypointPersistenceBackend PRODUCTION_PERSISTENCE_BACKEND =
+            EllieGPSStore::persistAtomically;
+
+    private final Path worldRoot;
+    private final WaypointPersistenceBackend persistenceBackend;
+    private final WaypointIndexBackend indexBackend;
+
+    /** Server-thread-owned authoritative map. Its mutable records never leave this class. */
+    private Map<String, WaypointRecord> records = new LinkedHashMap<>();
+
+    /** Immutable private snapshot; accessors deep-copy its elements before returning. */
+    private volatile List<WaypointRecord> publishedSnapshot = List.of();
+    /** Constant-time type/position membership, including records loaded under legacy IDs. */
+    private volatile java.util.Set<PositionTypeKey> positionTypeIndex = java.util.Set.of();
+    /** O(1) invalidation token for hot immutable-snapshot consumers. */
+    private volatile long mutationGeneration;
+
+    private volatile boolean startedFromQuarantine;
+    private JsonObject rootExtras;
+
+    private EllieGPSStore(Path worldRoot) {
+        this(worldRoot, PRODUCTION_PERSISTENCE_BACKEND, EllieGPSWaypointIndex.productionBackend());
+    }
+
+    /** Package-private injection constructor used by deterministic store tests. */
+    EllieGPSStore(
+            Path worldRoot,
+            WaypointPersistenceBackend persistenceBackend,
+            WaypointIndexBackend indexBackend) {
+        this.worldRoot = Objects.requireNonNull(worldRoot, "worldRoot");
+        this.persistenceBackend = Objects.requireNonNull(persistenceBackend, "persistenceBackend");
+        this.indexBackend = Objects.requireNonNull(indexBackend, "indexBackend");
+    }
+
+    /** Returns the active world store, or {@code null} outside a loaded world. */
     public static EllieGPSStore get() {
         return INSTANCE;
     }
 
-    // -------------------------------------------------------------------------
-    // Constants
-    // -------------------------------------------------------------------------
-
-    private static final int SUPPORTED_SCHEMA_VERSION = WaypointRecord.WAYPOINT_SCHEMA_VERSION;
-    private static final String WAYPOINTS_FILE_NAME    = "waypoints.json";
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-
-    // -------------------------------------------------------------------------
-    // State
-    // -------------------------------------------------------------------------
-
-    /** The world-root path this store was loaded for (for path builders). */
-    private final Path worldRoot;
-
-    /**
-     * Primary record store keyed by waypoint id. Maintains insertion order.
-     * Mutated only on the server thread.
-     */
-    private final Map<String, WaypointRecord> records = new LinkedHashMap<>();
-
-    /**
-     * Immutable published snapshot for lock-free reads by the counting service.
-     * Updated atomically via {@code volatile} on every mutation.
-     */
-    private volatile List<WaypointRecord> publishedSnapshot = List.of();
-
-    /**
-     * True if the store was started empty due to a corrupt-file quarantine.
-     * Surfaced to the operator ONCE on first command use via {@link #consumeQuarantineNote()}.
-     */
-    private volatile boolean startedFromQuarantine = false;
-
-    /**
-     * Unknown top-level members of the loaded {@code waypoints.json} root object (everything
-     * except {@code schemaVersion} and {@code waypoints}). Retained so a newer build's root
-     * fields round-trip on persist (Decision 2 forward compatibility). Null when the file was
-     * absent or freshly created.
-     */
-    private JsonObject rootExtras;
-
-    // -------------------------------------------------------------------------
-    // Load / clear lifecycle
-    // -------------------------------------------------------------------------
-
-    private EllieGPSStore(Path worldRoot) {
-        this.worldRoot = worldRoot;
-    }
-
-    /**
-     * Loads the store for the given server's world. Sets {@link #INSTANCE}.
-     * Called from {@code SERVER_STARTING}; never throws — failures quarantine + start empty.
-     */
+    /** Existing lifecycle API: load the current world's authoritative JSON store. */
     public static EllieGPSStore loadForServer(MinecraftServer server) {
         Path worldRoot = server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT);
         EllieGPSStore store = new EllieGPSStore(worldRoot);
@@ -130,134 +88,280 @@ public final class EllieGPSStore {
         return store;
     }
 
-    /**
-     * Clears the in-memory state and nulls the singleton. Called from {@code SERVER_STOPPING}.
-     * After this the counting service degrades to 0.
-     */
+    /** Package-private singleton seam for deterministic FarmWaypointService tests. */
+    static AutoCloseable overrideForTest(EllieGPSStore replacement) {
+        Objects.requireNonNull(replacement, "replacement");
+        EllieGPSStore previous = INSTANCE;
+        INSTANCE = replacement;
+        return () -> {
+            if (INSTANCE != replacement) {
+                throw new IllegalStateException("EllieGPSStore test overrides must close in LIFO order");
+            }
+            INSTANCE = previous;
+        };
+    }
+
+    /** Existing lifecycle API: clear memory and detach this active singleton. */
     public void clear() {
-        records.clear();
+        records = new LinkedHashMap<>();
         publishedSnapshot = List.of();
-        INSTANCE = null;
+        positionTypeIndex = java.util.Set.of();
+        mutationGeneration++;
+        if (INSTANCE == this) {
+            INSTANCE = null;
+        }
         PlayerEngine.LOGGER.info("EllieGPS: store cleared.");
     }
 
-    // -------------------------------------------------------------------------
-    // CRUD API
-    // -------------------------------------------------------------------------
-
-    /**
-     * Inserts or replaces the record with the given id. Preserves {@code createdGameTime} on
-     * refresh (the caller should set it from the existing record when refreshing).
-     *
-     * <p>Persists {@code waypoints.json}, publishes the new snapshot, and rebuilds the index.
-     */
-    public void upsert(WaypointRecord record) {
-        records.put(record.id, record);
-        publishSnapshot();
-        persist();
-        reindex();
-        PlayerEngine.LOGGER.info("EllieGPS: upserted waypoint id={}", record.id);
-    }
-
-    /**
-     * Deletes the record with the given id (if present). Works without resolving the block —
-     * stale records with the block gone are always deletable.
-     *
-     * <p>Persists, publishes, and rebuilds the index if a record was removed.
-     *
-     * @return true if a record was found and deleted
-     */
-    public boolean delete(String id) {
-        WaypointRecord removed = records.remove(id);
-        if (removed != null) {
-            publishSnapshot();
-            persist();
-            reindex();
-            PlayerEngine.LOGGER.info("EllieGPS: deleted waypoint id={}", id);
-            return true;
+    /** Checked insert/refresh at the candidate stable ID. */
+    public WaypointMutationResult upsert(WaypointRecord candidate) {
+        WaypointRecord safeCandidate = validatedCopy(candidate);
+        WaypointRecord previous = records.get(safeCandidate.id);
+        if (previous != null && !Objects.equals(previous.type, safeCandidate.type)) {
+            return result(WaypointMutationStatus.REJECTED_TYPE_CONFLICT, previous, previous);
         }
-        return false;
+        if (previous != null && previous.semanticallyEquals(safeCandidate)) {
+            WaypointIndexUpdateStatus index = ensureIndexSynchronized();
+            return result(
+                    index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                            ? WaypointMutationStatus.NO_CHANGE
+                            : WaypointMutationStatus.NO_CHANGE_INDEX_DEGRADED,
+                    previous,
+                    previous);
+        }
+
+        Map<String, WaypointRecord> next = new LinkedHashMap<>(records);
+        next.put(safeCandidate.id, safeCandidate);
+        if (!commitAndPublish(next)) {
+            return result(
+                    WaypointMutationStatus.FAILED_JSON_COMMIT,
+                    previous,
+                    previous);
+        }
+        WaypointIndexUpdateStatus index = synchronizeIndex();
+        WaypointRecord current = records.get(safeCandidate.id);
+        WaypointMutationStatus status = index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                ? WaypointMutationStatus.COMMITTED
+                : WaypointMutationStatus.COMMITTED_INDEX_DEGRADED;
+        PlayerEngine.LOGGER.info("EllieGPS: upserted waypoint id={} status={}", safeCandidate.id, status);
+        return result(status, previous, current);
     }
 
     /**
-     * Marks the record with the given id as stale or un-stale. Persists, publishes, and
-     * rebuilds the index.
-     *
-     * @return true if the record was found and updated
+     * Atomically replaces {@code oldId} with {@code candidate}. This is the only legal
+     * re-canonicalization operation.
      */
-    public boolean markStale(String id, boolean stale) {
-        WaypointRecord r = records.get(id);
-        if (r == null) return false;
-        r.stale = stale;
-        publishSnapshot();
-        persist();
-        reindex();
-        PlayerEngine.LOGGER.info("EllieGPS: marked waypoint id={} stale={}", id, stale);
-        return true;
+    public WaypointMutationResult replace(String oldId, WaypointRecord candidate) {
+        if (oldId == null || oldId.isBlank()) {
+            throw new IllegalArgumentException("oldId is required");
+        }
+        WaypointRecord safeCandidate = validatedCopy(candidate);
+        WaypointRecord previous = records.get(oldId);
+        WaypointRecord target = records.get(safeCandidate.id);
+
+        if (previous == null) {
+            WaypointIndexUpdateStatus index = ensureIndexSynchronized();
+            return result(
+                    index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                            ? WaypointMutationStatus.NOT_FOUND
+                            : WaypointMutationStatus.NOT_FOUND_INDEX_DEGRADED,
+                    null,
+                    target);
+        }
+
+        if (oldId.equals(safeCandidate.id)) {
+            return upsert(safeCandidate);
+        }
+
+        if (!Objects.equals(previous.type, safeCandidate.type)) {
+            return result(WaypointMutationStatus.REJECTED_TYPE_CONFLICT, previous, target);
+        }
+        if (target != null) {
+            WaypointMutationStatus conflict = Objects.equals(target.type, safeCandidate.type)
+                    ? WaypointMutationStatus.REJECTED_TARGET_CONFLICT
+                    : WaypointMutationStatus.REJECTED_TYPE_CONFLICT;
+            return result(conflict, previous, target);
+        }
+
+        Map<String, WaypointRecord> next = new LinkedHashMap<>(records);
+        next.remove(oldId);
+        next.put(safeCandidate.id, safeCandidate);
+        if (!commitAndPublish(next)) {
+            return result(WaypointMutationStatus.FAILED_JSON_COMMIT, previous, null);
+        }
+        WaypointIndexUpdateStatus index = synchronizeIndex();
+        WaypointMutationStatus status = index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                ? WaypointMutationStatus.COMMITTED
+                : WaypointMutationStatus.COMMITTED_INDEX_DEGRADED;
+        PlayerEngine.LOGGER.info(
+                "EllieGPS: replaced waypoint oldId={} newId={} status={}",
+                oldId,
+                safeCandidate.id,
+                status);
+        return result(status, previous, records.get(safeCandidate.id));
     }
 
-    /**
-     * Rebuilds the in-memory {@link EllieGPSWaypointIndex} (and its persisted bin + version
-     * token) from this store's current records. Called internally after every mutation so the
-     * index can never silently drift from the store. {@code rebuildFrom} also installs the
-     * rebuilt index as the static current instance and never throws.
-     */
-    private void reindex() {
-        EllieGPSWaypointIndex.rebuildFrom(this);
+    /** Checked explicit deletion. */
+    public WaypointMutationResult delete(String id) {
+        WaypointRecord previous = id == null ? null : records.get(id);
+        if (previous == null) {
+            WaypointIndexUpdateStatus index = ensureIndexSynchronized();
+            return result(
+                    index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                            ? WaypointMutationStatus.NOT_FOUND
+                            : WaypointMutationStatus.NOT_FOUND_INDEX_DEGRADED,
+                    null,
+                    null);
+        }
+
+        Map<String, WaypointRecord> next = new LinkedHashMap<>(records);
+        next.remove(id);
+        if (!commitAndPublish(next)) {
+            return result(WaypointMutationStatus.FAILED_JSON_COMMIT, previous, previous);
+        }
+        WaypointIndexUpdateStatus index = synchronizeIndex();
+        WaypointMutationStatus status = index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                ? WaypointMutationStatus.COMMITTED
+                : WaypointMutationStatus.COMMITTED_INDEX_DEGRADED;
+        PlayerEngine.LOGGER.info("EllieGPS: deleted waypoint id={} status={}", id, status);
+        return result(status, previous, null);
     }
 
-    // -------------------------------------------------------------------------
-    // Query API
-    // -------------------------------------------------------------------------
+    /** Checked stale-mark operation. Already-stale is a semantic no-op with index validation. */
+    public WaypointMutationResult markStale(String id) {
+        WaypointRecord previous = id == null ? null : records.get(id);
+        if (previous == null) {
+            WaypointIndexUpdateStatus index = ensureIndexSynchronized();
+            return result(
+                    index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                            ? WaypointMutationStatus.NOT_FOUND
+                            : WaypointMutationStatus.NOT_FOUND_INDEX_DEGRADED,
+                    null,
+                    null);
+        }
 
-    /**
-     * Finds the record whose stored canonical or secondary position equals {@code pos} in the
-     * given dimension. Returns {@code null} if not found.
-     *
-     * <p>Called on the server thread by commands and the auto-hook.
-     */
+        WaypointRecord stale = previous.copy();
+        stale.stale = true;
+        if (previous.semanticallyEquals(stale)) {
+            WaypointIndexUpdateStatus index = ensureIndexSynchronized();
+            return result(
+                    index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                            ? WaypointMutationStatus.NO_CHANGE
+                            : WaypointMutationStatus.NO_CHANGE_INDEX_DEGRADED,
+                    previous,
+                    previous);
+        }
+
+        Map<String, WaypointRecord> next = new LinkedHashMap<>(records);
+        next.put(id, stale);
+        if (!commitAndPublish(next)) {
+            return result(WaypointMutationStatus.FAILED_JSON_COMMIT, previous, previous);
+        }
+        WaypointIndexUpdateStatus index = synchronizeIndex();
+        WaypointMutationStatus status = index == WaypointIndexUpdateStatus.INDEX_COMMITTED
+                ? WaypointMutationStatus.COMMITTED
+                : WaypointMutationStatus.COMMITTED_INDEX_DEGRADED;
+        PlayerEngine.LOGGER.info("EllieGPS: marked waypoint id={} stale status={}", id, status);
+        return result(status, previous, records.get(id));
+    }
+
+    /** Position lookup in current dimension; returns a defensive copy. */
     public WaypointRecord byPosition(String dimensionId, BlockPos pos) {
-        for (WaypointRecord r : records.values()) {
-            if (!dimensionId.equals(r.dimension)) continue;
-            BlockPos canon = r.canonicalBlockPos();
-            if (canon != null && canon.equals(pos)) return r;
-            BlockPos secondary = r.secondaryBlockPos();
-            if (secondary != null && secondary.equals(pos)) return r;
+        for (WaypointRecord record : records.values()) {
+            if (!Objects.equals(dimensionId, record.dimension)) {
+                continue;
+            }
+            BlockPos canonical = record.canonicalBlockPos();
+            if (canonical != null && canonical.equals(pos)) {
+                return record.copy();
+            }
+            BlockPos secondary = record.secondaryBlockPos();
+            if (secondary != null && secondary.equals(pos)) {
+                return record.copy();
+            }
         }
         return null;
     }
 
+    /** Stable-ID lookup in the authoritative server-thread store; returns a defensive copy. */
+    public WaypointRecord byId(String id) {
+        WaypointRecord record = id == null ? null : records.get(id);
+        return record == null ? null : record.copy();
+    }
+
+    /** Constant-time position/type check for hot server-thread safety gates. */
+    public boolean hasTypeAtPosition(String type, String dimensionId, BlockPos pos) {
+        if (type == null || dimensionId == null || pos == null) {
+            return false;
+        }
+        return positionTypeIndex.contains(new PositionTypeKey(
+                type, dimensionId, pos.getX(), pos.getY(), pos.getZ()));
+    }
+
+    /** Monotonic in-process generation for O(1) cache invalidation after authoritative mutation. */
+    public long mutationGeneration() {
+        return mutationGeneration;
+    }
+
+    /** O(1) authoritative size gate for callers that must refuse before defensive copying. */
+    public int recordCount() {
+        return records.size();
+    }
+
     /**
-     * Returns all records in insertion order. Immutable view; safe to iterate.
-     * Called on the server thread only.
+     * Availability/completeness-bearing authoritative snapshot. The size gate runs before any
+     * defensive record copy, so hot fail-closed consumers cannot allocate an oversized snapshot.
      */
+    public BoundedSnapshot boundedSnapshot(int maxRecords) {
+        return boundedSnapshot(records, maxRecords);
+    }
+
+    static BoundedSnapshot boundedSnapshot(
+            Map<String, WaypointRecord> source,
+            int maxRecords) {
+        if (maxRecords < 0) {
+            throw new IllegalArgumentException("maxRecords cannot be negative");
+        }
+        if (source == null) {
+            return new BoundedSnapshot(false, false, List.of());
+        }
+        if (source.size() > maxRecords) {
+            return new BoundedSnapshot(true, false, List.of());
+        }
+        try {
+            return new BoundedSnapshot(true, true, copyRecords(source.values()));
+        } catch (RuntimeException copyFailure) {
+            return new BoundedSnapshot(false, false, List.of());
+        }
+    }
+
+    public record BoundedSnapshot(
+            boolean available,
+            boolean complete,
+            List<WaypointRecord> records) {
+        public BoundedSnapshot {
+            records = records == null ? List.of() : List.copyOf(records);
+            if ((!available || !complete) && !records.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "incomplete bounded snapshots cannot expose records");
+            }
+        }
+    }
+
+    /** Server-thread authoritative snapshot as defensive record copies. */
     public List<WaypointRecord> all() {
-        return List.copyOf(records.values());
+        return copyRecords(records.values());
     }
 
-    /**
-     * Returns the immutable published snapshot for lock-free reads by the counting service.
-     * May be called from any thread.
-     */
+    /** Lock-free published snapshot as fresh defensive record copies. */
     public List<WaypointRecord> publishedRecords() {
-        return publishedSnapshot;
+        return copyRecords(publishedSnapshot);
     }
 
-    /**
-     * Returns true if this store was started empty because its source file was quarantined.
-     * Prefer {@link #consumeQuarantineNote()} on command paths — this accessor does not clear
-     * the flag.
-     */
     public boolean startedFromQuarantine() {
         return startedFromQuarantine;
     }
 
-    /**
-     * One-time quarantine-note check for command guard chains (Decision 14): returns true
-     * exactly once after a corrupt-file quarantine, then clears the flag so the operator note
-     * is surfaced on the FIRST EllieGPS command only — whichever of the five commands runs
-     * first — and never repeated.
-     */
     public boolean consumeQuarantineNote() {
         if (startedFromQuarantine) {
             startedFromQuarantine = false;
@@ -266,59 +370,170 @@ public final class EllieGPSStore {
         return false;
     }
 
-    /**
-     * Returns the world root this store was loaded for (used by {@link EllieGPSWaypointIndex}
-     * to locate the index directory).
-     */
     public Path worldRoot() {
         return worldRoot;
     }
 
-    // -------------------------------------------------------------------------
-    // Version token (Decision 3 — pinned format)
-    // -------------------------------------------------------------------------
-
     /**
-     * Computes the deterministic version token for the current inventory-type records.
-     *
-     * <p>Format: {@code "1:" + SHA-256} over the UTF-8 bytes of one line per inventory-type
-     * record, sorted ascending by id, joined with {@code \n}. Each line is:
-     * {@code id + "|" + updatedGameTime + "|" + stale + "|" + description + "|" + String.join(",", keywords)}.
+     * Token prefix 2 covers every supported indexable record, including typed farm payload data.
+     * Full record JSON is used so any document-affecting field necessarily invalidates the index.
      */
     public String versionToken() {
-        List<WaypointRecord> inv = records.values().stream()
-                .filter(r -> WaypointTypes.INVENTORY.equals(r.type))
-                .sorted((a, b) -> a.id.compareTo(b.id))
-                .collect(Collectors.toList());
-        StringBuilder sb = new StringBuilder();
-        for (WaypointRecord r : inv) {
-            String kwLine = r.keywords != null ? String.join(",", r.keywords) : "";
-            sb.append(r.id).append('|')
-              .append(r.updatedGameTime).append('|')
-              .append(r.stale).append('|')
-              .append(r.description != null ? r.description : "").append('|')
-              .append(kwLine).append('\n');
+        ArrayList<WaypointRecord> indexable = new ArrayList<>();
+        for (WaypointRecord record : records.values()) {
+            if (isIndexable(record)) {
+                indexable.add(record);
+            }
+        }
+        indexable.sort((left, right) -> left.id.compareTo(right.id));
+        StringBuilder material = new StringBuilder();
+        for (WaypointRecord record : indexable) {
+            material.append(record.toJson()).append('\n');
         }
         try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hashBytes = md.digest(sb.toString().getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder(hashBytes.length * 2);
-            for (byte b : hashBytes) hex.append(String.format("%02x", b));
-            return "1:" + hex;
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(material.toString().getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(hash.length * 2);
+            for (byte value : hash) {
+                hex.append(String.format("%02x", value));
+            }
+            return "2:" + hex;
         } catch (Exception e) {
             PlayerEngine.LOGGER.warn("EllieGPS: SHA-256 unavailable for version token: {}", e.getMessage());
-            return "1:unknown";
+            return "2:unknown";
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Internal: load and persist
-    // -------------------------------------------------------------------------
+    /** Frozen package-private search seam. */
+    boolean isIndexHealthy() {
+        try {
+            return indexBackend.isHealthyFor(versionToken());
+        } catch (RuntimeException e) {
+            PlayerEngine.LOGGER.warn("EllieGPS index health check failed: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** Frozen package-private search seam. */
+    WaypointIndexUpdateStatus synchronizeIndex() {
+        try {
+            WaypointIndexUpdateStatus status = indexBackend.synchronize(this);
+            return status == null ? WaypointIndexUpdateStatus.INDEX_FAILED : status;
+        } catch (RuntimeException e) {
+            PlayerEngine.LOGGER.warn("EllieGPS index synchronization failed: {}", e.getMessage());
+            return WaypointIndexUpdateStatus.INDEX_FAILED;
+        }
+    }
+
+    /** Frozen package-private search seam. */
+    List<RetrievalHit> queryIndex(String query, int limit) throws Exception {
+        return indexBackend.query(query, limit);
+    }
+
+    private WaypointIndexUpdateStatus ensureIndexSynchronized() {
+        return isIndexHealthy()
+                ? WaypointIndexUpdateStatus.INDEX_COMMITTED
+                : synchronizeIndex();
+    }
+
+    private boolean commitAndPublish(Map<String, WaypointRecord> next) {
+        final List<WaypointRecord> nextSnapshot;
+        final java.util.Set<PositionTypeKey> nextPositionTypeIndex;
+        final String json;
+        try {
+            nextSnapshot = copyRecords(next.values());
+            nextPositionTypeIndex = buildPositionTypeIndex(next.values());
+            json = serialize(next);
+        } catch (RuntimeException e) {
+            PlayerEngine.LOGGER.warn("EllieGPS: candidate waypoint set was invalid: {}", e.getMessage());
+            return false;
+        }
+
+        Path file = Player2NpcPersistencePaths.ellieGpsWaypointsFile(worldRoot);
+        try {
+            persistenceBackend.persist(file, json);
+        } catch (Exception e) {
+            PlayerEngine.LOGGER.warn("EllieGPS: failed to commit waypoints.json: {}", e.getMessage());
+            return false;
+        }
+
+        records = next;
+        publishedSnapshot = nextSnapshot;
+        positionTypeIndex = nextPositionTypeIndex;
+        mutationGeneration++;
+        return true;
+    }
+
+    private String serialize(Map<String, WaypointRecord> source) {
+        JsonObject root = rootExtras == null ? new JsonObject() : rootExtras.deepCopy();
+        root.addProperty("schemaVersion", SUPPORTED_SCHEMA_VERSION);
+        JsonArray array = new JsonArray();
+        for (WaypointRecord record : source.values()) {
+            array.add(record.toJson());
+        }
+        root.add("waypoints", array);
+        return GSON.toJson(root);
+    }
+
+    private static WaypointRecord validatedCopy(WaypointRecord candidate) {
+        if (candidate == null) {
+            throw new IllegalArgumentException("waypoint candidate is required");
+        }
+        WaypointRecord copy = candidate.copy();
+        if (copy.schemaVersion != WaypointRecord.WAYPOINT_SCHEMA_VERSION
+                || copy.id == null || copy.id.isBlank()
+                || copy.type == null || copy.type.isBlank()
+                || copy.dimension == null || copy.dimension.isBlank()
+                || copy.pos == null || copy.pos.length != 3) {
+            throw new IllegalArgumentException("waypoint candidate has an invalid schema-v1 envelope");
+        }
+        BlockPos canonical = copy.canonicalBlockPos();
+        if (canonical == null || !copy.id.equals(WaypointRecord.idFor(copy.dimension, canonical))) {
+            throw new IllegalArgumentException("waypoint candidate id does not match dimension and position");
+        }
+        if (WaypointTypes.FARM.equals(copy.type)) {
+            FarmWaypointData farm = copy.farmData();
+            if (farm == null || !farm.isSupportedVersion()) {
+                throw new IllegalArgumentException("cannot mutate an unsupported farm payload");
+            }
+        }
+        return copy;
+    }
+
+    private static boolean isIndexable(WaypointRecord record) {
+        if (WaypointTypes.INVENTORY.equals(record.type)) {
+            return record.inventoryData() != null;
+        }
+        if (WaypointTypes.FARM.equals(record.type)) {
+            FarmWaypointData farm = record.farmData();
+            return farm != null && farm.isSupportedVersion();
+        }
+        return false;
+    }
+
+    private static WaypointMutationResult result(
+            WaypointMutationStatus status,
+            WaypointRecord previous,
+            WaypointRecord current) {
+        return new WaypointMutationResult(
+                status,
+                previous == null ? null : previous.copy(),
+                current == null ? null : current.copy());
+    }
+
+    private static List<WaypointRecord> copyRecords(Iterable<WaypointRecord> source) {
+        ArrayList<WaypointRecord> copies = new ArrayList<>();
+        for (WaypointRecord record : source) {
+            copies.add(record.copy());
+        }
+        return List.copyOf(copies);
+    }
 
     private void load() {
         Path file = Player2NpcPersistencePaths.ellieGpsWaypointsFile(worldRoot);
         if (!Files.exists(file)) {
-            PlayerEngine.LOGGER.info("EllieGPS: no waypoints.json found — starting empty.");
+            PlayerEngine.LOGGER.info("EllieGPS: no waypoints.json found; starting empty.");
+            publishCurrentSnapshot();
             return;
         }
         try {
@@ -337,84 +552,93 @@ public final class EllieGPSStore {
                 quarantine(file, "missing or invalid waypoints array");
                 return;
             }
-            JsonArray arr = root.get("waypoints").getAsJsonArray();
-            // Retain unknown top-level root members so they round-trip on persist (Decision 2).
+
             JsonObject extras = root.deepCopy();
             extras.remove("schemaVersion");
             extras.remove("waypoints");
-            rootExtras = extras.size() > 0 ? extras : null;
-            int loaded = 0, skipped = 0;
-            for (JsonElement elem : arr) {
-                WaypointRecord r = WaypointRecord.fromJson(elem);
-                if (r == null || r.id == null) { skipped++; continue; }
-                records.put(r.id, r);
+            rootExtras = extras.size() == 0 ? null : extras;
+
+            LinkedHashMap<String, WaypointRecord> loadedRecords = new LinkedHashMap<>();
+            int loaded = 0;
+            int skipped = 0;
+            for (JsonElement element : root.getAsJsonArray("waypoints")) {
+                WaypointRecord record = WaypointRecord.fromJson(element);
+                if (record == null || record.id == null) {
+                    skipped++;
+                    continue;
+                }
+                loadedRecords.put(record.id, record);
                 loaded++;
             }
+            records = loadedRecords;
+            publishCurrentSnapshot();
             PlayerEngine.LOGGER.info("EllieGPS: loaded {} waypoint(s), {} skipped.", loaded, skipped);
-            publishSnapshot();
         } catch (Exception e) {
             quarantine(file, e.getMessage());
         }
     }
 
-    /**
-     * Quarantines the given file by renaming it to {@code waypoints.json.corrupt-<epoch>},
-     * logs a WARN, marks the store as started-from-quarantine, and starts empty.
-     */
     private void quarantine(Path file, String reason) {
         String quarantineName = WAYPOINTS_FILE_NAME + ".corrupt-" + System.currentTimeMillis();
         try {
-            Path quarantineTarget = file.getParent().resolve(quarantineName);
-            Files.move(file, quarantineTarget, StandardCopyOption.REPLACE_EXISTING);
+            Path target = file.getParent().resolve(quarantineName);
+            Files.move(file, target, StandardCopyOption.REPLACE_EXISTING);
             PlayerEngine.LOGGER.warn(
-                "EllieGPS: quarantined corrupt waypoints.json as {} (reason: {}); starting empty.",
-                quarantineName, reason);
-        } catch (IOException ex) {
+                    "EllieGPS: quarantined corrupt waypoints.json as {} (reason: {}); starting empty.",
+                    quarantineName,
+                    reason);
+        } catch (IOException e) {
             PlayerEngine.LOGGER.warn(
-                "EllieGPS: could not quarantine waypoints.json (reason: {}; rename error: {}); starting empty.",
-                reason, ex.getMessage());
+                    "EllieGPS: could not quarantine waypoints.json (reason: {}; rename error: {}); starting empty.",
+                    reason,
+                    e.getMessage());
         }
-        records.clear();
+        records = new LinkedHashMap<>();
         publishedSnapshot = List.of();
+        positionTypeIndex = java.util.Set.of();
+        mutationGeneration++;
         rootExtras = null;
         startedFromQuarantine = true;
     }
 
-    /**
-     * Writes the current records to {@code waypoints.json} via atomic tmp-rename. The root
-     * object starts from any retained unknown top-level members ({@link #rootExtras}) so a
-     * newer build's root fields survive a save by this build (Decision 2).
-     */
-    private void persist() {
-        Path file = Player2NpcPersistencePaths.ellieGpsWaypointsFile(worldRoot);
-        try {
-            Files.createDirectories(file.getParent());
-            JsonObject root = (rootExtras != null) ? rootExtras.deepCopy() : new JsonObject();
-            root.addProperty("schemaVersion", SUPPORTED_SCHEMA_VERSION);
-            JsonArray arr = new JsonArray();
-            for (WaypointRecord r : records.values()) arr.add(r.toJson());
-            root.add("waypoints", arr);
-            String json = GSON.toJson(root);
-            // Write to tmp, then atomic-move
-            Path tmp = file.resolveSibling(WAYPOINTS_FILE_NAME + ".tmp");
-            Files.writeString(tmp, json, StandardCharsets.UTF_8);
-            atomicReplace(tmp, file);
-        } catch (Exception e) {
-            PlayerEngine.LOGGER.warn("EllieGPS: failed to persist waypoints.json: {}", e.getMessage());
-        }
+    private void publishCurrentSnapshot() {
+        publishedSnapshot = copyRecords(records.values());
+        positionTypeIndex = buildPositionTypeIndex(records.values());
+        mutationGeneration++;
     }
 
-    private static void atomicReplace(Path tmp, Path target) throws IOException {
+    private static java.util.Set<PositionTypeKey> buildPositionTypeIndex(
+            Iterable<WaypointRecord> source) {
+        HashSet<PositionTypeKey> result = new HashSet<>();
+        for (WaypointRecord record : source) {
+            BlockPos pos = record == null ? null : record.canonicalBlockPos();
+            if (pos != null && record.type != null && record.dimension != null) {
+                result.add(new PositionTypeKey(
+                        record.type, record.dimension, pos.getX(), pos.getY(), pos.getZ()));
+            }
+        }
+        return java.util.Set.copyOf(result);
+    }
+
+    private record PositionTypeKey(String type, String dimension, int x, int y, int z) {
+    }
+
+    private static void persistAtomically(Path file, String serializedStore) throws IOException {
+        Files.createDirectories(file.getParent());
+        Path temporary = file.resolveSibling(WAYPOINTS_FILE_NAME + ".tmp");
+        Files.writeString(temporary, serializedStore, StandardCharsets.UTF_8);
+        atomicReplace(temporary, file);
+    }
+
+    private static void atomicReplace(Path temporary, Path target) throws IOException {
         try {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            Files.move(
+                    temporary,
+                    target,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-            PlayerEngine.LOGGER.debug("EllieGPS: atomic move unavailable for {}", target.getFileName());
+            Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
         }
-    }
-
-    /** Publishes an immutable snapshot of the current records for the counting service. */
-    private void publishSnapshot() {
-        publishedSnapshot = List.copyOf(records.values());
     }
 }

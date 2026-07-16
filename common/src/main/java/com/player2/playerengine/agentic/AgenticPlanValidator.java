@@ -1,6 +1,8 @@
 package com.player2.playerengine.agentic;
 
 import com.player2.playerengine.PlayerEngineSettings;
+import com.player2.playerengine.tasks.farming.FarmPlantingRequestParser;
+import com.player2.playerengine.util.helpers.AutomaticMiningSourcePolicy;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -75,6 +77,26 @@ public final class AgenticPlanValidator {
                 continue;
             }
             Map<String, String> args = sanitizeArgs(step.args());
+            if (AgenticSchemas.STEP_MINE_BLOCK.equals(kind)
+                    && AutomaticMiningSourcePolicy.isProtectedAgenticMineTarget(mineBlockId(args))) {
+                // A model-authored multi-step plan must not satisfy "obtain/place a chest" by
+                // dismantling a chest. Invalidating here makes AgenticPlannerService choose its
+                // deterministic storage fallback; the direct player-issued `mine chest` command
+                // bypasses agentic validation and remains available.
+                errors.add("protected_mining_source:chest");
+                continue;
+            }
+            if ((AgenticSchemas.STEP_SETUP_FARM.equals(kind)
+                    || AgenticSchemas.STEP_HARVEST_FARM.equals(kind))
+                    && !validSetupFarmCoordinates(args)) {
+                errors.add(kind + "_coordinates_all_or_none");
+                continue;
+            }
+            if (AgenticSchemas.STEP_PLANT_FARM.equals(kind)
+                    && !FarmPlantingRequestParser.parseArgs(args).valid()) {
+                errors.add("plant_farm_arguments_invalid");
+                continue;
+            }
             String rationale = sanitizeOptionalSingleLine(step.rationale(), RATIONALE_MAX, warnings);
             if (id != null) {
                 sanitizedSteps.add(new AgenticStepSpec(id, kind, args, rationale));
@@ -114,6 +136,9 @@ public final class AgenticPlanValidator {
      * [mine_block, gather_loose_items]
      * [mine_block, resolve_storage_chest, deposit_items]
      * [mine_block, resolve_storage_chest, deposit_items, label_chest]
+     * [setup_farm]
+     * [harvest_farm]
+     * [plant_farm]
      * </pre>
      * A lone [deposit_items] (no resolved target) and any label_chest that is
      * not last / not preceded by deposit_items are rejected. Duplicate kinds and
@@ -125,7 +150,7 @@ public final class AgenticPlanValidator {
      * explicitly requests storage. [m,r] (resolve-without-deposit) and any
      * gather+mine+store quadruple are intentionally excluded to keep the matrix bounded.
      */
-    private static String validateSequence(List<AgenticStepSpec> steps) {
+    static String validateSequence(List<AgenticStepSpec> steps) {
         List<String> kinds = new ArrayList<>(steps.size());
         for (AgenticStepSpec step : steps) {
             kinds.add(step.kind());
@@ -135,6 +160,9 @@ public final class AgenticPlanValidator {
         String d = AgenticSchemas.STEP_DEPOSIT_ITEMS;
         String l = AgenticSchemas.STEP_LABEL_CHEST;
         String m = AgenticSchemas.STEP_MINE_BLOCK;
+        String f = AgenticSchemas.STEP_SETUP_FARM;
+        String h = AgenticSchemas.STEP_HARVEST_FARM;
+        String p = AgenticSchemas.STEP_PLANT_FARM;
         List<List<String>> allowed = List.of(
                 List.of(g),
                 List.of(r),
@@ -147,7 +175,10 @@ public final class AgenticPlanValidator {
                 List.of(g, m),
                 List.of(m, g),
                 List.of(m, r, d),
-                List.of(m, r, d, l));
+                List.of(m, r, d, l),
+                List.of(f),
+                List.of(h),
+                List.of(p));
         for (List<String> seq : allowed) {
             if (seq.equals(kinds)) {
                 return null;
@@ -185,6 +216,40 @@ public final class AgenticPlanValidator {
             }
         }
         return Map.copyOf(out);
+    }
+
+    private static String mineBlockId(Map<String, String> args) {
+        if (args == null || args.isEmpty()) {
+            return null;
+        }
+        String blockId = null;
+        for (Map.Entry<String, String> entry : args.entrySet()) {
+            String key = entry.getKey().toLowerCase(Locale.ROOT).replace("_", "");
+            if (key.equals("blockid")) {
+                return entry.getValue();
+            }
+            if (key.equals("block")) {
+                blockId = entry.getValue();
+            }
+        }
+        return blockId;
+    }
+
+    static boolean validSetupFarmCoordinates(Map<String, String> args) {
+        if (args == null || args.isEmpty()) {
+            return true;
+        }
+        if (args.size() != 3 || !args.keySet().containsAll(Set.of("x", "y", "z"))) {
+            return false;
+        }
+        try {
+            Integer.parseInt(args.get("x"));
+            Integer.parseInt(args.get("y"));
+            Integer.parseInt(args.get("z"));
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     private static String sanitizeSingleLine(String raw, int maxLen, String field, List<String> errors) {

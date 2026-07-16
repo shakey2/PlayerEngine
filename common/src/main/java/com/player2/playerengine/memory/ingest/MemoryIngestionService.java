@@ -50,7 +50,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       {@link MemoryGate#preflight}; not {@code allowed} → complete NO-OP (zero calls, zero buffer
  *       growth, zero writes). This is the fail-closed cost + privacy boundary.</li>
  *   <li>Master flag is already covered by the gate ({@code enableGraphRagMemory}).</li>
- *   <li>{@link MemoryExtractionGate#isEligible} per turn (length / known-entity / proper-noun;
+ *   <li>{@link MemoryExplicitFactExtractor} captures explicit first-person durable facts/preferences
+ *       immediately; these graph writes do not wait for the LLM batch threshold.</li>
+ *   <li>{@link MemoryExtractionGate#isEligible} per remaining turn (length / known-entity / proper-noun;
  *       GoG junk dropped).</li>
  *   <li>{@link MemoryTurnBatcher} per {@code (ownerUuid|entityUuid, companionId)} scope; on a
  *       {@code batchMin..batchMax} flush, schedule exactly ONE async extraction.</li>
@@ -71,8 +73,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <h3>Egress / threading invariants</h3>
  * No {@code *.log}/crash/{@code printStackTrace}-to-string/{@code getStackTrace}/raw {@code Throwable}
  * anywhere; background failures log a bounded, distilled reason (WARN) only, never a stack or the
- * raw reply. The LLM call is NEVER on the tick thread. Store mutations happen ONLY inside
- * {@code server.execute(...)}. A non-patron / null snapshot makes the whole method a no-op.
+ * raw reply. The LLM call is NEVER on the tick thread. Store mutations happen only on the server
+ * thread: direct for deterministic explicit facts, and via {@code server.execute(...)} for async
+ * extraction results. A non-patron / null snapshot makes the whole method a no-op.
  */
 public final class MemoryIngestionService {
 
@@ -186,9 +189,24 @@ public final class MemoryIngestionService {
             int lengthThreshold = cfg.getMemoryExtractionLengthThreshold();
             int batchMin = cfg.getMemoryExtractionBatchMin();
             int batchMax = cfg.getMemoryExtractionBatchMax();
+            long nowTick = currentGameTime(server);
+            Character companion = controller.getAIPersistantData() != null
+                    ? controller.getAIPersistantData().getCharacter()
+                    : null;
+            String companionName = companion != null ? companion.name() : null;
+            String companionShortName = companion != null ? companion.shortName() : null;
 
             List<String> batchToExtract = null;
             for (String turn : newTurns) {
+                List<MemoryExplicitFactExtractor.ExplicitMemory> explicit =
+                        MemoryExplicitFactExtractor.extract(turn, ownerUsername, companionName, companionShortName);
+                if (!explicit.isEmpty() && store != null) {
+                    MergePlan explicitPlan = MemoryExplicitFactExtractor.buildPlan(explicit, nowTick);
+                    if (explicitPlan != null && !explicitPlan.isEmpty()) {
+                        applyMerge(controller, server, ownerBilling, scope, store, explicitPlan);
+                        continue; // already captured deterministically; do not spend an extraction batch slot
+                    }
+                }
                 if (!MemoryExtractionGate.isEligible(turn, lengthThreshold, graph)) {
                     continue;
                 }
@@ -436,6 +454,29 @@ public final class MemoryIngestionService {
                         e.getClass().getSimpleName());
             }
         });
+    }
+
+    private static void applyMerge(PlayerEngineController controller,
+                                   MinecraftServer server,
+                                   Player2PayerResolution.ApiBillingContext ownerBilling,
+                                   MemoryScope scope,
+                                   MemoryStore store,
+                                   MergePlan plan) {
+        if (store == null || plan == null || plan.isEmpty()) {
+            return;
+        }
+        store.mergeCandidates(plan);
+        enqueueEmbedBackfill(controller, server, ownerBilling, scope);
+
+        com.player2.playerengine.memory.MemoryStore.Snapshot snap = store.snapshot();
+        int nodes = (snap != null && snap.graph() != null) ? snap.graph().nodeCount() : 0;
+        int edges = (snap != null && snap.graph() != null) ? snap.graph().edgeCount() : 0;
+        PlayerEngine.LOGGER.info(
+                "Memory: merged {} entities / {} relations; nodes={} edges={} cumImportance={} for {}.",
+                plan.upserts().size(), plan.edges().size(), nodes, edges,
+                store.cumulativeImportanceSinceLastReflection(), scope);
+
+        maybeDispatchReflection(controller, server, ownerBilling, scope, store);
     }
 
     // -------------------------------------------------------------------------
@@ -730,6 +771,10 @@ public final class MemoryIngestionService {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    private static long currentGameTime(MinecraftServer server) {
+        return server != null && server.overworld() != null ? server.overworld().getGameTime() : 0L;
+    }
 
     private static MemoryStore lookupStore(MinecraftServer server, MemoryScope scope) {
         MemoryStoreProvider provider = storeProvider;

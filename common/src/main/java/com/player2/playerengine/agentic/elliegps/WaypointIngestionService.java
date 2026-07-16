@@ -11,6 +11,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -32,16 +33,17 @@ import java.util.concurrent.ThreadFactory;
  *   <li>Optionally schedules an async {@link AiTaskClass#SUMMARIZATION} description-polish call
  *       on the dedicated {@code elliegps-ingestion} executor (config-gated;
  *       {@link com.player2.playerengine.PlayerEngineSettings#getEllieGpsUseModelDescription()}).
- *       On success, marshals the updated description back onto the server thread via
- *       {@code server.execute(...)}, replaces the description, reindexes, and persists.
+ *       Callers schedule this only after the deterministic record commits. On success, the
+ *       callback marshals back to the server thread, revalidates its captured fingerprint, and
+ *       commits a defensive copy through the checked store API.
  *       Budget/network/validation failures → keep deterministic description, log WARN.
  *       The LLM call NEVER blocks the server thread (AgenticPlannerService pattern).</li>
  * </ol>
  *
  * <h3>Threading contract</h3>
- * {@link #ingest} is called on the server thread and returns immediately after scheduling the
- * optional async polish (never blocks for LLM). The async completion also marshals its store
- * update back to the server thread. All store and index mutations remain server-thread-only.
+ * {@link #ingest} is called on the server thread and performs construction only. After a checked
+ * commit, callers may invoke {@link #schedulePolishAfterCommit}; the async completion marshals its
+ * store update back to the server thread. All store and index mutations remain server-thread-only.
  */
 public final class WaypointIngestionService {
 
@@ -75,12 +77,12 @@ public final class WaypointIngestionService {
     // -------------------------------------------------------------------------
 
     /**
-     * Builds a {@link WaypointRecord} from the given snapshot and schedules optional async
-     * description polish.
+     * Builds a {@link WaypointRecord} from the given snapshot. Callers must commit the returned
+     * record before invoking {@link #schedulePolishAfterCommit(PlayerEngineController, WaypointRecord)}.
      *
-     * <p>Calling this method on the server thread is safe: it returns promptly. If
-     * {@code mod.getModSettings().getEllieGpsUseModelDescription()} is true, an async polish
-     * is dispatched on {@link #INGESTION_EXECUTOR} and the server thread is not blocked.
+     * <p>Calling this method on the server thread is safe: it performs no model call and returns
+     * promptly. Separating construction from scheduling prevents a failed/conflicting base commit
+     * from leaving an async callback capable of updating an unrelated record at the same ID.
      *
      * @param mod              the controller (provides settings, API service, and server for marshal)
      * @param snapshot         the LIGHT-scan result from {@link com.player2.playerengine.containeraccess.ContainerScanService}
@@ -153,12 +155,24 @@ public final class WaypointIngestionService {
         // unknown envelope fields survive an audit/create refresh on this build (Decision 2).
         record.inheritUnknownFieldsFrom(existingRecord);
 
-        // --- Async description polish (Decision 7) ---
-        if (mod.getModSettings().getEllieGpsUseModelDescription()) {
-            schedulePolish(mod, record, keywords, snapshotOmitted);
-        }
-
         return record;
+    }
+
+    /**
+     * Schedules optional description polish only after {@code committedRecord} is authoritative.
+     * The callback is fingerprint-guarded against deletion or a newer refresh.
+     *
+     * @return true when an async request was scheduled
+     */
+    public static boolean schedulePolishAfterCommit(PlayerEngineController mod,
+                                                     WaypointRecord committedRecord) {
+        if (mod == null || committedRecord == null
+                || !mod.getModSettings().getEllieGpsUseModelDescription()
+                || !WaypointTypes.INVENTORY.equals(committedRecord.type)) {
+            return false;
+        }
+        return schedulePolish(mod, committedRecord,
+                committedRecord.keywords != null ? committedRecord.keywords : List.of());
     }
 
     // -------------------------------------------------------------------------
@@ -239,28 +253,27 @@ public final class WaypointIngestionService {
      * @param record        the record already written to the store with the deterministic description;
      *                      the async path will update only the description field if polish succeeds
      * @param keywords      the deterministic keywords (passed to the prompt for context)
-     * @param snapshotOmitted whether the snapshot was omitted (logged for traceability)
      */
-    private static void schedulePolish(PlayerEngineController mod,
-                                       WaypointRecord record,
-                                       List<String> keywords,
-                                       boolean snapshotOmitted) {
+    private static boolean schedulePolish(PlayerEngineController mod,
+                                          WaypointRecord record,
+                                          List<String> keywords) {
         // Resolve the server for the marshal callback BEFORE leaving the server thread
         MinecraftServer server = resolveServer(mod);
         if (server == null) {
             PlayerEngine.LOGGER.debug("EllieGPS ingestion: skipping description polish (server not available)");
-            return;
+            return false;
         }
 
         Player2APIService api = mod.getPlayer2APIService();
         if (api == null) {
             PlayerEngine.LOGGER.debug("EllieGPS ingestion: skipping description polish (API service not available)");
-            return;
+            return false;
         }
 
         // Capture the values we need for the off-thread call (no world access on the executor thread)
         final String recordId          = record.id;
         final String deterministicDesc = record.description;
+        final long capturedUpdatedTime = record.updatedGameTime;
         final List<String> kwSnapshot  = List.copyOf(keywords);
 
         INGESTION_EXECUTOR.submit(() -> {
@@ -297,7 +310,8 @@ public final class WaypointIngestionService {
                             recordId);
                     return;
                 }
-                // Find the record in the store (it may have been deleted/modified since dispatch)
+                // Find the record in the store (it may have been deleted/modified since dispatch).
+                // Store snapshots are defensive; never mutate the returned object in place.
                 WaypointRecord current = null;
                 for (WaypointRecord r : store.all()) {
                     if (recordId.equals(r.id)) {
@@ -305,19 +319,41 @@ public final class WaypointIngestionService {
                         break;
                     }
                 }
-                if (current == null) {
+                if (current == null
+                        || !WaypointTypes.INVENTORY.equals(current.type)
+                        || current.updatedGameTime != capturedUpdatedTime
+                        || !Objects.equals(current.description, deterministicDesc)) {
                     PlayerEngine.LOGGER.debug(
-                            "EllieGPS ingestion: polish for id={} arrived but record no longer exists, discarding",
+                            "EllieGPS ingestion: polish for id={} arrived after the record changed, discarding",
                             recordId);
                     return;
                 }
-                // Replace description and re-persist (the store reindexes internally)
-                current.description = finalPolished;
-                store.upsert(current);
-                PlayerEngine.LOGGER.debug(
-                        "EllieGPS ingestion: applied polished description to id={}", recordId);
+                WaypointRecord candidate = current.copy();
+                candidate.description = finalPolished;
+                WaypointMutationResult mutation = store.upsert(candidate);
+                switch (mutation.status()) {
+                    case COMMITTED, NO_CHANGE -> PlayerEngine.LOGGER.debug(
+                            "EllieGPS ingestion: applied polished description to id={}", recordId);
+                    case COMMITTED_INDEX_DEGRADED, NO_CHANGE_INDEX_DEGRADED -> {
+                        mod.reportAgenticProgress(
+                                WaypointReportFormatter.descriptionPolishIndexDegradedComponent(), false);
+                        com.player2.playerengine.player2api.AiConversationFeedback.enqueueInfo(mod,
+                                "EllieGPS description was saved, but its search index update failed.");
+                    }
+                    case FAILED_JSON_COMMIT -> {
+                        mod.reportAgenticProgress(
+                                WaypointReportFormatter.descriptionPolishCommitFailedComponent(), false);
+                        com.player2.playerengine.player2api.AiConversationFeedback.enqueueInfo(mod,
+                                "EllieGPS kept the existing deterministic description because the polished description could not be saved.");
+                    }
+                    case NOT_FOUND, NOT_FOUND_INDEX_DEGRADED, REJECTED_TYPE_CONFLICT,
+                            REJECTED_TARGET_CONFLICT, FAILED_STORE_UNAVAILABLE -> PlayerEngine.LOGGER.debug(
+                            "EllieGPS ingestion: discarded polished description for id={} status={}",
+                            recordId, mutation.status());
+                }
             });
         });
+        return true;
     }
 
     /**

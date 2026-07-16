@@ -49,8 +49,9 @@ public final class MemoryBlockSerializer {
      * Default-behavior-first footer appended after the bulleted memories in a
      * {@link BoundaryVerdict#HAS_MEMORY} block. Static, bounded, author-controlled.
      *
-     * <p><b>Scope (Phase D fixation fix):</b> the HAS_MEMORY body lists ONLY episodic
-     * {@link MemoryNodeType#EVENT} recall. This footer leads with an unconditional directive to
+     * <p><b>Scope (Phase D fixation fix):</b> the HAS_MEMORY body lists episodic
+     * {@link MemoryNodeType#EVENT} recall plus explicit durable {@link MemoryNodeType#FACT} and
+     * {@link MemoryNodeType#PREFERENCE} nodes. This footer leads with an unconditional directive to
      * always act on instructions and new information, then scopes the anti-fabrication boundary
      * narrowly to the EXPLICIT-ASK case — when the player explicitly asks whether a specific
      * shared past event is remembered. It must NOT apply to new facts, preferences, tasks, or
@@ -108,8 +109,8 @@ public final class MemoryBlockSerializer {
             case HAS_MEMORY:
             default:
                 String block = buildHasMemory(hits, graph, blockCharCap);
-                // An empty body here means the confident hits were ALL stable profile/entity nodes and
-                // carried NO episodic EVENT recall (Phase D fixation fix filters profile nodes out of the
+                // An empty body here means the confident hits were ALL generic profile/entity nodes and
+                // carried NO event/fact/preference recall (Phase D fixation fix filters profile nodes out of the
                 // recall body). In that case inject NOTHING — do NOT emit the closed-world decline note.
                 //
                 // Why not NO_MEMORY_NOTE: the turn DID link to real graph knowledge (a profile fact such
@@ -127,15 +128,15 @@ public final class MemoryBlockSerializer {
     private static String buildHasMemory(List<RetrievalHit> hits, MemoryGraph graph, int blockCharCap) {
         int cap = blockCharCap > 0 ? blockCharCap : DEFAULT_BLOCK_CHAR_CAP;
 
-        // Render one line per hit, in fused (highest-first) order — but ONLY for episodic EVENT nodes.
+        // Render one line per hit, in fused (highest-first) order, but only for event/fact/preference nodes.
         //
-        // Phase D fixation fix (SEPARATE PROFILE FROM RECALL): stable profile/entity nodes
+        // Phase D fixation fix (SEPARATE PROFILE FROM RECALL): generic profile/entity nodes
         // (CHARACTER/PLACE/FACTION/ITEM/REFLECTION — e.g. "Green = favourite colour", "who the player
         // is") still seed retrieval, feed the ego BFS, count toward specificSeedMatches, and surface
         // naturally via the relationship summary in the SYSTEM block. They are deliberately NOT recited
         // here, because dumping the whole tiny graph neighbourhood every turn made the companion fixate
         // on a handful of profile facts and bring them up unnaturally. The per-turn recall block carries
-        // ONLY relevant episodic shared-history events. A turn whose hits are all profile nodes yields an
+        // ONLY relevant shared-history events and explicit durable facts/preferences. A turn whose hits are all profile nodes yields an
         // empty body; serialize() then injects NOTHING for that turn (the profile fact already shows via
         // the relationship summary) — never a dumped dossier and never a contradicting decline note.
         // Unknown/blank node types are treated as non-episodic and excluded (fail-closed to
@@ -145,7 +146,7 @@ public final class MemoryBlockSerializer {
             for (RetrievalHit hit : hits) {
                 MemoryNode node = graph.node(hit.id());
                 if (node == null) continue;
-                if (!isEpisodic(node)) continue; // profile/entity nodes never recited as per-turn recall
+                if (!isRecallRenderable(node)) continue; // generic profile/entity nodes never recited here
                 String line = renderLine(node);
                 if (!line.isEmpty()) lines.add(line);
             }
@@ -175,14 +176,15 @@ public final class MemoryBlockSerializer {
     }
 
     /**
-     * True iff this node is an episodic {@link MemoryNodeType#EVENT} — the only node type recited as
-     * per-turn recall (Phase D fixation fix). All other recognized types (CHARACTER/PLACE/FACTION/ITEM/
-     * REFLECTION) are stable profile/entity knowledge that surfaces via the relationship summary, not
-     * here. An unknown/blank stored {@code type} maps to no recognized type and is treated as
-     * non-episodic (fail-closed: never recited as "shared event" recall).
+     * True iff this node is safe to render as per-turn recall: event, fact, or preference.
+     * CHARACTER/PLACE/FACTION/ITEM/REFLECTION stay out of this block so generic profile facts do not
+     * become a repeated dossier. Unknown/blank stored {@code type} values fail closed.
      */
-    private static boolean isEpisodic(MemoryNode node) {
-        return MemoryNodeType.EVENT == MemoryNodeType.fromWire(node.type());
+    private static boolean isRecallRenderable(MemoryNode node) {
+        MemoryNodeType type = MemoryNodeType.fromWire(node.type());
+        return type == MemoryNodeType.EVENT
+                || type == MemoryNodeType.FACT
+                || type == MemoryNodeType.PREFERENCE;
     }
 
     /** {@code "- <CanonicalName>: <content>"}, per-line re-clamped. */

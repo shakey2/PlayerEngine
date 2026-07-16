@@ -102,7 +102,6 @@ public final class DefaultCommands {
             new InvertCommand(),
             new TunnelCommand(),
             new RenderCommand(),
-            new FarmCommand(),
             new ChestsCommand(),
             new FollowCommand(),
             new ExploreFilterCommand(),

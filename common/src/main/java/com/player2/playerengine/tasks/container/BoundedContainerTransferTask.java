@@ -87,6 +87,12 @@ public final class BoundedContainerTransferTask extends Task implements Describe
         FAILED
     }
 
+    /** Internal callers may request a bounded partial withdrawal without changing command EXACT/ALL semantics. */
+    public enum WithdrawQuantity {
+        EXACT,
+        UP_TO
+    }
+
     private enum Phase {
         PRECHECK,
         NAVIGATE,
@@ -100,6 +106,7 @@ public final class BoundedContainerTransferTask extends Task implements Describe
     private final ScanReportFormatter.TransferDirection direction;
     private final BlockPos targetPos;
     private final List<StorageItemArgs.ItemQuery> entries;
+    private final WithdrawQuantity withdrawQuantity;
 
     private Phase phase = Phase.PRECHECK;
     private boolean finished;
@@ -125,9 +132,46 @@ public final class BoundedContainerTransferTask extends Task implements Describe
             ScanReportFormatter.TransferDirection direction,
             BlockPos targetPos,
             List<StorageItemArgs.ItemQuery> entries) {
-        this.direction = direction;
-        this.targetPos = targetPos;
-        this.entries = List.copyOf(entries);
+        this(direction, targetPos, entries, WithdrawQuantity.EXACT);
+    }
+
+    private BoundedContainerTransferTask(
+            ScanReportFormatter.TransferDirection direction,
+            BlockPos targetPos,
+            List<StorageItemArgs.ItemQuery> entries,
+            WithdrawQuantity withdrawQuantity) {
+        this.direction = Objects.requireNonNull(direction, "direction");
+        this.targetPos = Objects.requireNonNull(targetPos, "targetPos").immutable();
+        this.entries = List.copyOf(Objects.requireNonNull(entries, "entries"));
+        this.withdrawQuantity = Objects.requireNonNull(withdrawQuantity, "withdrawQuantity");
+        if (withdrawQuantity == WithdrawQuantity.UP_TO
+                && (direction != ScanReportFormatter.TransferDirection.WITHDRAW
+                || this.entries.size() != 1
+                || this.entries.get(0).isAll())) {
+            throw new IllegalArgumentException("UP_TO requires one explicit withdrawal entry");
+        }
+    }
+
+    /**
+     * Creates an acquisition-only withdrawal that moves {@code 0..maxCount} exact item units.
+     * Unlike the command constructor, a live source shortfall is a typed partial receipt rather
+     * than an all-or-nothing validation failure; the upper bound is never exceeded.
+     */
+    public static BoundedContainerTransferTask withdrawUpTo(
+            BlockPos targetPos,
+            Item item,
+            int maxCount) {
+        Objects.requireNonNull(item, "item");
+        if (maxCount < 1 || maxCount > StorageItemArgs.MAX_COUNT) {
+            throw new IllegalArgumentException(
+                    "maxCount must be within 1.." + StorageItemArgs.MAX_COUNT);
+        }
+        return new BoundedContainerTransferTask(
+                ScanReportFormatter.TransferDirection.WITHDRAW,
+                targetPos,
+                List.of(new StorageItemArgs.ItemQuery(
+                        item, StorageItemArgs.displayIdFor(item), maxCount)),
+                WithdrawQuantity.UP_TO);
     }
 
     // ------------------------------------------------------------------ typed result surface
@@ -173,7 +217,8 @@ public final class BoundedContainerTransferTask extends Task implements Describe
                 targetPos.getY(),
                 targetPos.getZ(),
                 entries.size(),
-                phase.name().toLowerCase(Locale.ROOT));
+                phase.name().toLowerCase(Locale.ROOT))
+                + (withdrawQuantity == WithdrawQuantity.UP_TO ? " quantity=up_to" : "");
     }
 
     // ------------------------------------------------------------------ lifecycle
@@ -401,6 +446,13 @@ public final class BoundedContainerTransferTask extends Task implements Describe
             int present = container.countItem(entry.item());
             int headroom = botMainHeadroom(inv, entry.item());
             int maxStack = maxStackFor(entry.item());
+            if (withdrawQuantity == WithdrawQuantity.UP_TO) {
+                int bounded = Math.min(present, entry.countOrAll());
+                int fromEmpty = Math.max(0, bounded - headroom);
+                int slotsNeeded = (fromEmpty + maxStack - 1) / maxStack;
+                emptyBudget -= Math.min(slotsNeeded, emptyBudget);
+                continue;
+            }
             if (entry.isAll()) {
                 // Reservation = min(what the entry would consume, what is left), in
                 // empty-slot units; entry items never repeat (the parser merges duplicates),
@@ -507,7 +559,9 @@ public final class BoundedContainerTransferTask extends Task implements Describe
             Item item = entry.item();
             int present = container.countItem(item);
             boolean all = entry.isAll();
-            int want = all ? present : entry.countOrAll();
+            boolean upTo = withdrawQuantity == WithdrawQuantity.UP_TO;
+            int requested = all ? StorageItemArgs.COUNT_ALL : entry.countOrAll();
+            int want = all ? present : upTo ? Math.min(present, requested) : requested;
             int moved = 0;
             boolean botFull = false;
 
@@ -540,7 +594,24 @@ public final class BoundedContainerTransferTask extends Task implements Describe
             inv.setChanged();
 
             String shortReason = "";
-            if (all) {
+            if (upTo) {
+                if (present == 0) {
+                    shortReason = "none in container";
+                    zeroMoveFailures.add(new ScanReportFormatter.EntryFailure(
+                            StorageAccessCode.INSUFFICIENT_ITEMS, entry.displayId(),
+                            "container has no " + entry.displayId()));
+                } else if (moved < requested) {
+                    shortReason = moved < want
+                            ? "bot inventory full"
+                            : "container held only " + present;
+                    if (moved == 0) {
+                        zeroMoveFailures.add(new ScanReportFormatter.EntryFailure(
+                                StorageAccessCode.INSUFFICIENT_SPACE, entry.displayId(),
+                                "bot inventory cannot hold any " + entry.displayId()
+                                        + " (container has " + present + ")"));
+                    }
+                }
+            } else if (all) {
                 if (present == 0) {
                     shortReason = "none in container";
                     zeroMoveFailures.add(new ScanReportFormatter.EntryFailure(
@@ -565,7 +636,7 @@ public final class BoundedContainerTransferTask extends Task implements Describe
                         : "container contents changed mid-transaction";
             }
             entryOutcomes.add(new ScanReportFormatter.EntryOutcome(
-                    entry.displayId(), moved, all ? StorageItemArgs.COUNT_ALL : want, present, shortReason));
+                    entry.displayId(), moved, requested, present, shortReason));
         }
     }
 
@@ -746,6 +817,14 @@ public final class BoundedContainerTransferTask extends Task implements Describe
         return count;
     }
 
+    /** Pure arithmetic seam for deterministic UP_TO receipt tests. */
+    static int upToWithdrawAmount(int present, int requested, int capacity) {
+        if (present < 0 || requested < 0 || capacity < 0) {
+            throw new IllegalArgumentException("withdraw quantities cannot be negative");
+        }
+        return Math.min(present, Math.min(requested, capacity));
+    }
+
     /** Headroom in occupied bot main slots already holding {@code item} (Item-level match). */
     private static int botMainHeadroom(LivingEntityInventory inv, Item item) {
         int headroom = 0;
@@ -841,12 +920,14 @@ public final class BoundedContainerTransferTask extends Task implements Describe
         }
         return task.direction == this.direction
                 && Objects.equals(task.targetPos, this.targetPos)
-                && Objects.equals(task.entries, this.entries);
+                && Objects.equals(task.entries, this.entries)
+                && task.withdrawQuantity == this.withdrawQuantity;
     }
 
     @Override
     protected String toDebugString() {
         return "BoundedContainerTransfer[" + direction.name().toLowerCase(Locale.ROOT)
-                + " " + targetPos.toShortString() + "]";
+                + " " + targetPos.toShortString()
+                + (withdrawQuantity == WithdrawQuantity.UP_TO ? " up-to" : "") + "]";
     }
 }

@@ -19,7 +19,7 @@ package com.player2.playerengine.memory.ingest;
  * server-side {@code json_schema}). Shape:
  * <pre>
  * {
- *   "entities":  [ { "name": "...", "type": "character|place|event|faction|item",
+ *   "entities":  [ { "name": "...", "type": "character|place|event|faction|item|fact|preference",
  *                    "content": "one short factual line", "aliases": ["..."],
  *                    "tags": ["..."], "importance": 1-10 } ],
  *   "relations": [ { "from": "name", "to": "name", "relation": "verb phrase",
@@ -40,19 +40,27 @@ public final class MemoryExtractionPrompt {
 
     private static final String SYSTEM_PROMPT =
             "You are a memory-extraction module for a Minecraft AI companion. From the recent "
-          + "conversation turns, extract durable, world-significant facts as an atomic knowledge "
+          + "conversation turns, extract durable relationship- or world-significant facts as an atomic knowledge "
           + "graph. Follow these rules strictly:\n"
-          + "1. ENTITIES: people, places, events, factions, and notable items the companion should "
-          + "remember long-term. Give each a short canonical name and a type from exactly: "
-          + "character, place, event, faction, item. Add a one-line factual 'content' summary, "
-          + "optional 'aliases' (other names used), and 'tags'.\n"
+          + "1. ENTITIES: people, places, events, factions, notable items, and durable owner/player "
+          + "facts or preferences the companion should remember long-term. Give each a short canonical "
+          + "name and a type from exactly: character, place, event, faction, item, fact, preference. "
+          + "Add a one-line factual 'content' summary, optional 'aliases' (other names used), and "
+          + "'tags'. For owner/player preferences such as favorite food, color, game, hobbies, or "
+          + "dislikes, create a preference node whose content is the atomic preference. For durable "
+          + "owner/player facts that are not preferences, create a fact node. Do not store those as "
+          + "event-only nodes. FACT/PREFERENCE nodes must be stable long-term knowledge; do not use "
+          + "them for one-off tests, deaths, fights, inventory drops, revives, instructions, or what "
+          + "happened in the current session.\n"
           + "2. RELATIONS: express facts as atomic triples {from, to, relation}, where 'from' and "
           + "'to' are entity names and 'relation' is a short verb phrase (e.g. 'lives in', "
           + "'allied with', 'gave'). One fact per triple; never compound sentences. Add an "
           + "'emotion' token describing the companion's feeling about the relation if any "
           + "(default 'neutral').\n"
-          + "3. SIGNIFICANCE: keep only named, durable, world-significant information. DROP small "
-          + "talk, acknowledgements, and ephemeral commands such as 'ok', 'go left', 'follow me'. "
+          + "3. SIGNIFICANCE: keep named, durable information the companion should remember: owner/player "
+          + "preferences, favorites, dislikes, personal facts, relationship facts, and world facts. DROP "
+          + "small talk, acknowledgements, one-off tests, and ephemeral commands such as 'ok', 'go left', "
+          + "'follow me'. "
           + "If nothing is worth remembering, return empty 'entities' and 'relations'.\n"
           + "4. KEYWORDS: list short retrieval keywords for this batch.\n"
           + "5. IMPORTANCE: rate the overall poignancy/durability of this batch from 1 (mundane) to "

@@ -108,6 +108,13 @@ public final class AgenticDegradationSummary {
             }
         }
 
+        // --- Farming (finite setup_farm / harvest_farm tasks) ---
+        if (s.getFarmDegradation() != DegradationLevel.CLEAN) {
+            clauses.add(farmClause(s.getFarmDegradationReason(), s.getFarmProgress()));
+        } else if (s.getFarmProgress() != null && !s.getFarmProgress().isBlank()) {
+            clauses.add(boundFarm(s.getFarmProgress()));
+        }
+
         return String.join("; ", clauses);
     }
 
@@ -289,7 +296,24 @@ public final class AgenticDegradationSummary {
             reason = "";
         }
         String r = reason.toLowerCase(java.util.Locale.ROOT);
-        // PARTIAL means a scan failure occurred (chest was reachable but the scan didn't succeed)
+        if (r.contains("index_update_failed_after_commit")) {
+            return "waypoint saved after deposit, but its EllieGPS search index update failed";
+        }
+        if (r.contains("index_repair_failed_no_change")) {
+            return "waypoint was already current after deposit, but its EllieGPS search index repair failed";
+        }
+        if (r.contains("json_commit_failed")) {
+            return "waypoint not registered: EllieGPS could not commit authoritative waypoint data";
+        }
+        if (r.contains("captured_waypoint_missing")) {
+            return r.contains("index_degraded")
+                    ? "waypoint not registered: captured record changed before commit and the search index is degraded"
+                    : "waypoint not registered: captured record changed before commit";
+        }
+        if (r.contains("rejected_type_conflict") || r.contains("rejected_target_conflict")) {
+            return "waypoint not registered: a conflicting EllieGPS record was preserved";
+        }
+        // Remaining PARTIAL cases are scan failures after a successful deposit.
         if (level == DegradationLevel.PARTIAL) {
             return reason.isBlank()
                     ? "waypoint not registered: scan failed after deposit"
@@ -527,5 +551,25 @@ public final class AgenticDegradationSummary {
         }
         // Generic fallback for label_disabled, label_timeout, label_skipped:*, interrupted, etc.
         return reason.isBlank() ? "chest labeling skipped" : "chest labeling skipped: " + reason;
+    }
+
+    private static String farmClause(String reason, String progress) {
+        String safeReason = boundFarm(reason);
+        String safeProgress = boundFarm(progress);
+        if (!safeProgress.isBlank() && !safeReason.isBlank()) {
+            return safeProgress + " (degraded: " + safeReason + ")";
+        }
+        if (!safeProgress.isBlank()) {
+            return safeProgress;
+        }
+        return safeReason.isBlank() ? "farming operation degraded" : "farming degraded: " + safeReason;
+    }
+
+    private static String boundFarm(String value) {
+        if (value == null) {
+            return "";
+        }
+        String safe = value.replace('\n', ' ').replace('\r', ' ').strip();
+        return safe.length() <= 512 ? safe : safe.substring(0, 512);
     }
 }

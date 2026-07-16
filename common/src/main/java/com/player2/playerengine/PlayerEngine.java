@@ -132,8 +132,7 @@ public final class PlayerEngine {
       // executor instead of being left with a terminated thread.
       TTSManager.shutdownAndReset();
       ExecutorShutdown.shutdownNowAwait("PlayerEngine.workerPool", threadPool);
-      ExecutorShutdown.shutdownNowAwait("AuthenticationManager.auth", AuthenticationManager.getExecutor());
-      ExecutorShutdown.shutdownNowAwait("AuthenticationManager.polling", AuthenticationManager.getPollingExecutor());
+      AuthenticationManager.shutdownAndReset();
    }
 
    public static void onInitialize() {
@@ -179,7 +178,8 @@ public final class PlayerEngine {
                String message = buf.readUtf();
                LOGGER.info("Server: received user_message packet (voice/STT) from {} len={} preview=\"{}\"",
                      username, message.length(), com.player2.playerengine.player2api.utils.SttLogging.messagePreview(message));
-               ConversationManager.onUserChatMessage(new Event.UserMessage(message, username, true));
+               ConversationManager.onUserChatMessage(new Event.UserMessage(
+                     message, username, true, context.getPlayer().getUUID()));
                AgentSideEffects.broadcastChatToAllPlayers(context.getPlayer().getServer(),
                      Component.translatable("message.playerengine.chat.player_message",
                            context.getPlayer().getName().getString(), message));

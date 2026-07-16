@@ -28,7 +28,6 @@ import com.player2.playerengine.automaton.api.pathing.calc.IPathingControlManage
 import com.player2.playerengine.automaton.api.process.IBuilderProcess;
 import com.player2.playerengine.automaton.api.process.ICustomGoalProcess;
 import com.player2.playerengine.automaton.api.process.IExploreProcess;
-import com.player2.playerengine.automaton.api.process.IFarmProcess;
 import com.player2.playerengine.automaton.api.process.IFollowProcess;
 import com.player2.playerengine.automaton.api.process.IGetToBlockProcess;
 import com.player2.playerengine.automaton.api.process.IMineProcess;
@@ -57,8 +56,6 @@ public interface IBaritone {
    IBuilderProcess getBuilderProcess();
 
    IExploreProcess getExploreProcess();
-
-   IFarmProcess getFarmProcess();
 
    ICustomGoalProcess getCustomGoalProcess();
 

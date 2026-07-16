@@ -1,5 +1,6 @@
 package com.player2.playerengine.player2api;
 
+import java.util.UUID;
 import org.jetbrains.annotations.Nullable;
 
 public sealed interface Event // tagged union basically of the below events
@@ -8,9 +9,21 @@ public sealed interface Event // tagged union basically of the below events
 
     public String getConversationHistoryString();
 
-    public record UserMessage(String message, String userName, boolean fromVoice) implements Event {
+    public record UserMessage(
+            String message,
+            String userName,
+            boolean fromVoice,
+            @Nullable UUID authenticatedUserUuid) implements Event {
         public UserMessage(String message, String userName) {
-            this(message, userName, false);
+            this(message, userName, false, null);
+        }
+
+        public UserMessage(String message, String userName, boolean fromVoice) {
+            this(message, userName, fromVoice, null);
+        }
+
+        public UserMessage withMessage(String replacement) {
+            return new UserMessage(replacement, userName, fromVoice, authenticatedUserUuid);
         }
 
         public String getConversationHistoryString() {

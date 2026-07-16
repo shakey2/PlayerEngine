@@ -5,6 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.player2.playerengine.memory.MemoryCaps;
+import com.player2.playerengine.memory.MemoryDurableFactClassifier;
 import com.player2.playerengine.memory.MemoryNodeType;
 
 import java.util.ArrayList;
@@ -121,14 +122,18 @@ public final class MemoryExtractionValidator {
         if (rawType == null || !MemoryNodeType.isKnown(rawType)) {
             return null;
         }
-        String type = MemoryNodeType.fromWire(rawType).wire();
 
         String content = MemoryCaps.capContent(emptyIfNull(optString(o, "content", "")));
         List<String> aliases = capNameList(optArray(o, "aliases"), MemoryCaps.ALIASES_MAX);
         List<String> tags = capNameList(optArray(o, "tags"), MemoryCaps.TAGS_MAX);
         int importance = clampImportanceOrUnscored(optInt(o, "importance", 0));
+        MemoryNodeType type = MemoryDurableFactClassifier.normalizeExtractedType(
+                MemoryNodeType.fromWire(rawType), name, content, tags);
+        if (type == null) {
+            return null;
+        }
 
-        return new MemoryExtractionResponse.Entity(name, type, content, aliases, tags, importance);
+        return new MemoryExtractionResponse.Entity(name, type.wire(), content, aliases, tags, importance);
     }
 
     private static MemoryExtractionResponse.Relation validateRelation(JsonObject o, Set<String> accepted) {

@@ -1,5 +1,6 @@
 package com.player2.playerengine.player2api;
 
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
@@ -41,11 +42,15 @@ import com.player2.playerengine.retrieval.RagDeepSearchCommands;
 import com.player2.playerengine.retrieval.learning.RagDeepCheckCoordinator;
 import com.player2.playerengine.retrieval.learning.RagDeepCheckPipeline;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.LivingEntity;
 
 public class AgentConversationData {
 
     private static short MAX_EVENT_QUEUE_SIZE = 10;
+    private static final int MAX_DEFERRED_INFO_QUEUE_SIZE = 4;
+    private static final int MAX_DEFERRED_INFO_MESSAGE_LENGTH = 512;
 
     /**
      * Marker prefix for a {@code finishWithNote} note that carries an informational RESULT payload
@@ -60,8 +65,12 @@ public class AgentConversationData {
     private final PlayerEngineController mod;
 
     private final Deque<Event> eventQueue = new ConcurrentLinkedDeque<>();
+    /** Passive context that must never make this conversation dispatchable by itself. */
+    private final Deque<Event.InfoMessage> deferredInfoQueue = new ConcurrentLinkedDeque<>();
     private long lastProcessTime = 0L;
-    private boolean isProcessing = false;
+    private static final long NO_ACTIVE_TURN = Long.MIN_VALUE;
+    private volatile boolean isProcessing = false;
+    private long activeTurnTicket = NO_ACTIVE_TURN;
     private boolean enabled = true;
 
     // seperating these to be safe:
@@ -108,6 +117,8 @@ public class AgentConversationData {
     private Optional<String> turnCurrentMood = Optional.empty();
     /** Suppress repeated warnings when the RAG index is not yet initialised for this bot. */
     private boolean ragFallbackWarnedOnce = false;
+    /** True once live RAG may have replaced the full system prompt during this session. */
+    private boolean liveRagManagedSystemPrompt = false;
 
     // --- Phase B5: per-turn RAG / deep-check state ---
     private List<RetrievalHit> activeRetrievalHits = List.of();
@@ -125,6 +136,13 @@ public class AgentConversationData {
      * queued or awaiting an LLM response. Prevents the same completion from re-triggering API rounds.
      */
     private String commandAwaitingFinishAck = null;
+    /** Invalidates queued/in-flight model turns when an authenticated owner stop bypasses the model. */
+    private final ConversationTurnGate conversationTurnGate = new ConversationTurnGate();
+    /** Matching billing-bucket request, retained so owner stop can retire only this bot's HTTP worker. */
+    private LLMCompleter activeLlmCompleter;
+    private LLMCompleter.Submission activeLlmSubmission;
+    /** Stops unchanged command-error feedback from opening an unbounded chain of billed decision turns. */
+    private final RepeatedCommandFailureGuard repeatedCommandFailureGuard = new RepeatedCommandFailureGuard();
 
     /**
      * Consecutive LLM JSON parse failures since the last successful parse. Bounds the
@@ -265,7 +283,7 @@ public class AgentConversationData {
     //   - peerTalkRestraintCooldownSeconds = 8.0     (clamp 1.0..60.0; Option-A defer window)
     // Until then getPriority() below is unchanged (no peer-talk behavior).
     public long getPriority() {
-        if (!enabled || isProcessing || eventQueue.isEmpty()) {
+        if (!enabled || isProcessing || !hasDispatchableEvents(eventQueue)) {
             return 0;
         }
         // Self-pace: don't start a new LLM round while this bot's last response is still
@@ -324,8 +342,10 @@ public class AgentConversationData {
 
     /** Clear pending events and per-round flags without disturbing persisted history. */
     public void resetForClear() {
-        eventQueue.clear();
-        isProcessing = false;
+        invalidateProcessingTurnAndClearEvents();
+        synchronized (deferredInfoQueue) {
+            deferredInfoQueue.clear();
+        }
         chainInitiatorUsername = null;
         clearTtsCooldown();
         cachedRetrievalHits = List.of();
@@ -333,6 +353,7 @@ public class AgentConversationData {
         cachedValidCommandsBlock = null;
         resetB5TurnState();
         commandAwaitingFinishAck = null;
+        repeatedCommandFailureGuard.reset();
         consecutiveParseFailures = 0;
         consecutivePeerReplies = 0;
     }
@@ -356,58 +377,70 @@ public class AgentConversationData {
             Consumer<String> extOnErrMsg,
             LLMCompleter completer) {
 
-        if (isProcessing) {
-            LOGGER.warn("Called queueData.process even though it was already processing! this should not happen");
-            return;
-        }
-        if (eventQueue.isEmpty()) {
-            LOGGER.warn("queueData.process called on empty event queue! this should not happen");
-            return;
-        }
-
-        Consumer<String> onErrMsg = errMsg -> {
-            this.isProcessing = false;
-            // DESIGN.md §3: a model JSON parse failure must reach BOTH audiences, each tailored.
-            //   - Model: reflect "your last reply was unparseable; re-send valid JSON" into the
-            //     conversation feedback (an InfoMessage) so it retries truthfully next round.
-            //   - Player: a concise human line — NEVER the raw com.google.gson exception string.
-            // The raw payload is already logged in Utils.parseCleanedJson; do not surface it here.
-            if (errMsg != null && errMsg.startsWith(
-                    com.player2.playerengine.player2api.utils.LlmJsonParseException.SENTINEL)) {
-                consecutiveParseFailures++;
-                if (consecutiveParseFailures <= MAX_PARSE_RETRY) {
-                    LOGGER.warn("[AICommandBridge]: LLM reply failed to parse as JSON for bot={} "
-                            + "(attempt {}/{}); asking model to resend valid JSON and notifying player.",
-                            getName(), consecutiveParseFailures, MAX_PARSE_RETRY);
-                    addEventToQueue(new InfoMessage(
-                            "Your previous reply could not be read because it was not valid JSON. "
-                            + "Resend ONLY a single valid JSON object with the \"message\" and \"command\" fields, "
-                            + "no extra text, no markdown code fences."));
-                    extOnErrMsg.accept(getName() + " had trouble understanding that — let me try again.");
-                } else {
-                    // Repeated unparseable output: stop re-prompting (avoid a token-burning loop) and
-                    // tell the player plainly. The model already received the corrective InfoMessage on
-                    // the prior attempts; do not queue another (DESIGN.md §3 — both audiences served).
-                    LOGGER.error("[AICommandBridge]: LLM reply still unparseable after {} retries for bot={}; "
-                            + "giving up this chain.", MAX_PARSE_RETRY, getName());
-                    consecutiveParseFailures = 0;
-                    // Give-up aborts this chain WITHOUT the model ever responding to the round, so
-                    // acknowledgeCommandFinishRoundIfComplete (in handleLlmResponse's finally) never runs.
-                    // If the aborted round was a command-finish prompt, a stale commandAwaitingFinishAck
-                    // would survive and suppress the NEXT command's finish as a false "duplicate" — the
-                    // dead-callback-idle condition for subsequent commands. Clear it here so give-up does
-                    // not strand the ack. (Safe: a true same-execution double-fire is still guarded while
-                    // isProcessing is true / the finish InfoMessage is queued.)
-                    commandAwaitingFinishAck = null;
-                    extOnErrMsg.accept(getName() + " couldn't respond clearly just now. Please try again.");
-                }
+        final long turnTicket;
+        synchronized (this) {
+            if (isProcessing) {
+                LOGGER.warn("Called queueData.process even though it was already processing! this should not happen");
                 return;
             }
-            extOnErrMsg.accept(errMsg);
+            if (eventQueue.isEmpty()) {
+                LOGGER.warn("queueData.process called on empty event queue! this should not happen");
+                return;
+            }
+            turnTicket = conversationTurnGate.issueTicket();
+            activeTurnTicket = turnTicket;
+            isProcessing = true;
+        }
+
+        // A passive note can add context to a real turn, but can never create a turn. Prepending keeps
+        // the independently dispatchable event last so reminder, RAG, payer and provenance selection
+        // continue to describe the event that actually caused this request.
+        mergeDeferredInfoForProcessing(eventQueue, deferredInfoQueue);
+
+        Consumer<String> onErrMsg = errMsg -> {
+            synchronized (this) {
+                if (!conversationTurnGate.accepts(turnTicket)) {
+                    LOGGER.info("Discarding stale model error after authenticated owner stop for bot={}", getName());
+                    releaseProcessing(turnTicket);
+                    return;
+                }
+                try {
+                    // DESIGN.md §3: a model JSON parse failure must reach BOTH audiences, each tailored.
+                    //   - Model: reflect "your last reply was unparseable; re-send valid JSON" into the
+                    //     conversation feedback (an InfoMessage) so it retries truthfully next round.
+                    //   - Player: a concise human line — NEVER the raw com.google.gson exception string.
+                    // The raw payload is already logged in Utils.parseCleanedJson; do not surface it here.
+                    if (errMsg != null && errMsg.startsWith(
+                            com.player2.playerengine.player2api.utils.LlmJsonParseException.SENTINEL)) {
+                        consecutiveParseFailures++;
+                        if (consecutiveParseFailures <= MAX_PARSE_RETRY) {
+                            LOGGER.warn("[AICommandBridge]: LLM reply failed to parse as JSON for bot={} "
+                                    + "(attempt {}/{}); asking model to resend valid JSON and notifying player.",
+                                    getName(), consecutiveParseFailures, MAX_PARSE_RETRY);
+                            addEventToQueue(new InfoMessage(
+                                    "Your previous reply could not be read because it was not valid JSON. "
+                                    + "Resend ONLY a single valid JSON object with the \"message\" and \"command\" fields, "
+                                    + "no extra text, no markdown code fences."));
+                            extOnErrMsg.accept(getName() + " had trouble understanding that — let me try again.");
+                        } else {
+                            // Repeated unparseable output: stop re-prompting and tell the player plainly.
+                            LOGGER.error("[AICommandBridge]: LLM reply still unparseable after {} retries for bot={}; "
+                                    + "giving up this chain.", MAX_PARSE_RETRY, getName());
+                            consecutiveParseFailures = 0;
+                            // Give-up aborts before a model response can acknowledge this finish round.
+                            commandAwaitingFinishAck = null;
+                            extOnErrMsg.accept(getName() + " couldn't respond clearly just now. Please try again.");
+                        }
+                        return;
+                    }
+                    extOnErrMsg.accept(errMsg);
+                } finally {
+                    releaseProcessing(turnTicket);
+                }
+            }
         };
 
         this.lastProcessTime = System.nanoTime();
-        this.isProcessing = true;
         resetB5TurnState();
 
         String lastUserInBatch = null;
@@ -426,13 +459,13 @@ public class AgentConversationData {
             if (srv != null && BotBlacklistPolicy.isBlocked(srv, relayInitiator, this)) {
                 LOGGER.info("Skipping LLM/API: bot blacklist blocks initiator={} for bot={}", relayInitiator, getName());
                 eventQueue.clear();
-                this.isProcessing = false;
+                releaseProcessing(turnTicket);
                 return;
             }
             if (srv != null && UserBlacklistPolicy.isBlocked(srv, relayInitiator, this)) {
                 LOGGER.info("Skipping LLM/API: user blacklist blocks initiator={} for bot={}", relayInitiator, getName());
                 eventQueue.clear();
-                this.isProcessing = false;
+                releaseProcessing(turnTicket);
                 return;
             }
         }
@@ -441,7 +474,7 @@ public class AgentConversationData {
                 mod.getPlayer2APIService().getClientId());
         mod.getPlayer2APIService().setActiveBillingContext(billing);
         if (billing.onlinePayer() == null && !billing.useStoredToken()) {
-            this.isProcessing = false;
+            releaseProcessing(turnTicket);
             onErrMsg.accept("Player2: no billing player/token available for this API request.");
             return;
         }
@@ -492,14 +525,23 @@ public class AgentConversationData {
                         mod.getPlayer2APIService(), reminderString, Optional.ofNullable(pendingValidCommandsBlock),
                         memoryBlock, this.turnCurrentMood);
 
+        // A stop can arrive while status/RAG assembly is in progress. Avoid dispatching an already-stale
+        // request; the callback ticket remains the final race backstop if invalidation happens after here.
+        if (!conversationTurnGate.accepts(turnTicket)) {
+            LOGGER.info("Skipping stale model request after authenticated owner stop for bot={}", getName());
+            releaseProcessing(turnTicket);
+            return;
+        }
+
         LOGGER.info("[AICommandBridge/processChatWithAPI]: Calling LLM: history={}",
                 new Object[] { historyWithWrappedStatus.toString() });
 
         final Event.UserMessage ragUserMsg = lastUserMsgForRag;
         Consumer<JsonObject> onLLMResponse = jsonResp -> handleLlmResponse(
                 jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
-                historyWithWrappedStatus, ragUserMsg, false, false);
-        completer.processToJson(mod.getPlayer2APIService(), historyWithWrappedStatus, onLLMResponse, onErrMsg, true, AiTaskClass.DECISION);
+                historyWithWrappedStatus, ragUserMsg, false, false, turnTicket);
+        submitDecisionIfCurrent(turnTicket, completer, historyWithWrappedStatus,
+                onLLMResponse, onErrMsg, "initial", false);
     }
 
     /**
@@ -720,6 +762,136 @@ public class AgentConversationData {
         eventQueue.add(event);
     }
 
+    /**
+     * Queue bounded, curated model context without waking the conversation dispatcher. Oversized or
+     * blank input is rejected instead of truncated so arbitrary external output can never be smuggled
+     * into a later prompt through this path.
+     */
+    public boolean deferInfo(Event.InfoMessage message) {
+        return addDeferredInfo(deferredInfoQueue, message);
+    }
+
+    /**
+     * Terminal operator-stop barrier. It does not wake the model: pending dispatchable events are
+     * removed, any pre-stop response ticket becomes stale, and a bounded truthfulness note waits for
+     * the next genuine conversation turn.
+     */
+    public boolean cancelPendingModelActionsForOperatorStop() {
+        LLMCompleter.CancellationOutcome cancellation = invalidateProcessingTurnAndClearEvents();
+        boolean requestStillDraining = cancellation == LLMCompleter.CancellationOutcome.RETIREMENT_LIMIT_REACHED;
+        commandAwaitingFinishAck = null;
+        repeatedCommandFailureGuard.reset();
+        clearTtsCooldown();
+        pendingSegmentActions = List.of();
+        pendingChunks = List.of();
+        pendingInvalidMarkers = List.of();
+        String modelNote = requestStillDraining
+                ? "The owner issued an immediate stop. Automation and queued actions were cancelled, but a stuck "
+                        + "prior model request is still draining because the bounded worker safety limit was reached. "
+                        + "New replies may be delayed; do not resume the prior action."
+                : "The owner issued an immediate stop. Automation and any queued or in-flight action were cancelled. "
+                        + "Do not claim the prior action completed or resume it unless the owner explicitly asks.";
+        deferInfo(new InfoMessage(modelNote));
+        return requestStillDraining;
+    }
+
+    /** Clears pre-stop events before atomically releasing the dispatcher slot for a new owner request. */
+    private synchronized LLMCompleter.CancellationOutcome invalidateProcessingTurnAndClearEvents() {
+        conversationTurnGate.invalidate();
+        eventQueue.clear();
+        LLMCompleter completer = activeLlmCompleter;
+        LLMCompleter.Submission submission = activeLlmSubmission;
+        activeLlmCompleter = null;
+        activeLlmSubmission = null;
+        activeTurnTicket = NO_ACTIVE_TURN;
+        isProcessing = false;
+        if (completer != null && submission != null) {
+            return completer.cancel(submission);
+        }
+        return LLMCompleter.CancellationOutcome.NOT_ACTIVE;
+    }
+
+    /** A stale callback cannot release a newer request because every dispatched turn has a unique ticket. */
+    private synchronized void releaseProcessing(long turnTicket) {
+        if (activeTurnTicket == turnTicket) {
+            activeLlmCompleter = null;
+            activeLlmSubmission = null;
+            activeTurnTicket = NO_ACTIVE_TURN;
+            isProcessing = false;
+        }
+    }
+
+    /** Serializes the final ticket check, billing-bucket submission, and cancellable handle capture. */
+    private synchronized boolean submitDecisionIfCurrent(
+            long turnTicket,
+            LLMCompleter completer,
+            ConversationHistory history,
+            Consumer<JsonObject> onResponse,
+            Consumer<String> onError,
+            String phase,
+            boolean handoffFromActiveRequest) {
+        if (activeTurnTicket != turnTicket || !conversationTurnGate.accepts(turnTicket)) {
+            LOGGER.info("Skipping stale {} model request after authenticated owner stop for bot={}",
+                    phase, getName());
+            releaseProcessing(turnTicket);
+            return false;
+        }
+        LLMCompleter.Submission submission = handoffFromActiveRequest
+                ? completer.processToJsonAfter(activeLlmSubmission,
+                        mod.getPlayer2APIService(), history, onResponse, onError, true, AiTaskClass.DECISION)
+                : completer.processToJson(
+                        mod.getPlayer2APIService(), history, onResponse, onError, true, AiTaskClass.DECISION);
+        if (!submission.accepted()) {
+            LOGGER.warn("Model request submission was rejected for bot={} phase={}", getName(), phase);
+            releaseProcessing(turnTicket);
+            return false;
+        }
+        activeLlmCompleter = completer;
+        activeLlmSubmission = submission;
+        return true;
+    }
+
+    static boolean hasDispatchableEvents(Deque<Event> events) {
+        return events != null && !events.isEmpty();
+    }
+
+    static boolean addDeferredInfo(Deque<Event.InfoMessage> target, Event.InfoMessage message) {
+        if (target == null || message == null || message.message() == null
+                || message.message().isBlank()
+                || message.message().length() > MAX_DEFERRED_INFO_MESSAGE_LENGTH) {
+            return false;
+        }
+        synchronized (target) {
+            if (target.contains(message)) {
+                return true;
+            }
+            while (target.size() >= MAX_DEFERRED_INFO_QUEUE_SIZE) {
+                target.pollFirst();
+            }
+            target.addLast(message);
+            return true;
+        }
+    }
+
+    static int mergeDeferredInfoForProcessing(
+            Deque<Event> dispatchableEvents,
+            Deque<Event.InfoMessage> deferredInfo) {
+        if (!hasDispatchableEvents(dispatchableEvents) || deferredInfo == null || deferredInfo.isEmpty()) {
+            return 0;
+        }
+        List<Event.InfoMessage> pending = new ArrayList<>(MAX_DEFERRED_INFO_QUEUE_SIZE);
+        synchronized (deferredInfo) {
+            Event.InfoMessage next;
+            while ((next = deferredInfo.pollFirst()) != null) {
+                pending.add(next);
+            }
+        }
+        for (int i = pending.size() - 1; i >= 0; i--) {
+            dispatchableEvents.addFirst(pending.get(i));
+        }
+        return pending.size();
+    }
+
     private Optional<String> getReminderStringFromLastEvent(Event lastEvent) {
         if (lastEvent instanceof Event.UserMessage) {
             return Optional.of((((Event.UserMessage) lastEvent).userName().equals(getMod().getOwnerUsername())
@@ -751,8 +923,24 @@ public class AgentConversationData {
     private void maybeUpdateRagSystemPrompt(Event.UserMessage lastUserMsgForRag) {
         Player2ServerRuntimeConfig config = Player2ServerConfigHolder.get();
         if (!config.isRagLiveEnabled()) {
+            // A live disable must not retain the previous turn's reduced RAG block. Restore the
+            // full/base prompt on this turn and discard session-scoped retrieval material so a later
+            // re-enable starts from a clean retrieval state. This emits no log or feedback text.
+            cachedRetrievalHits = List.of();
+            cachedPromptIdHash = 0;
+            cachedValidCommandsBlock = null;
+            activeRetrievalHits = List.of();
+            activePromptToolIds = Set.of();
+            pendingValidCommandsBlock = null;
+            lastRagGoalText = "";
+            ragFallbackWarnedOnce = false;
+            if (liveRagManagedSystemPrompt) {
+                mod.getAIPersistantData().updateSystemPrompt();
+                liveRagManagedSystemPrompt = false;
+            }
             return;
         }
+        liveRagManagedSystemPrompt = true;
 
         // Greeting turn: inject the always-include set only (no content-based retrieval yet).
         if (isGreetingResponse) {
@@ -887,13 +1075,26 @@ public class AgentConversationData {
             ConversationHistory historyWithWrappedStatus,
             Event.UserMessage lastUserMsgForRag,
             boolean isFollowUpDecision,
-            boolean isModelDeepSearchFollowUp) {
-        // A response reached us = the LLM reply parsed successfully; clear the parse-retry guard.
-        this.consecutiveParseFailures = 0;
+            boolean isModelDeepSearchFollowUp,
+            long turnTicket) {
+        final boolean greetingResponse;
+        synchronized (this) {
+            if (!conversationTurnGate.accepts(turnTicket)) {
+                LOGGER.info("Discarding stale model response after authenticated owner stop for bot={}", getName());
+                releaseProcessing(turnTicket);
+                return;
+            }
+            // A response reached us = the LLM reply parsed successfully; clear the parse-retry guard.
+            this.consecutiveParseFailures = 0;
+            greetingResponse = this.isGreetingResponse;
+            this.isGreetingResponse = false;
+            if (!isFollowUpDecision && !isModelDeepSearchFollowUp) {
+                handleMoodDeclaration(jsonResp);
+            }
+        }
         String llmMessage = Utils.getStringJsonSafely(jsonResp, "message");
-        String command = this.isGreetingResponse ? "bodylang greeting"
+        String command = greetingResponse ? "bodylang greeting"
                 : Utils.getStringJsonSafely(jsonResp, "command");
-        this.isGreetingResponse = false;
 
         // --- Companion mood: declare-parse + deterministic update (WS2) + mood→memory trigger (WS4) ---
         // Gated on enableCompanionMood (WS5): flag-off → no parse, no mood write, no extra request bytes.
@@ -903,10 +1104,6 @@ public class AgentConversationData {
         // retry responses (isModelDeepSearchFollowUp / isFollowUpDecision) carry the pre-first-pass
         // turnCurrentMood in their tail, so a mood field on a follow-up would be reacting to stale
         // context and could double-mint; ignore mood on those passes.
-        if (!isFollowUpDecision && !isModelDeepSearchFollowUp) {
-            handleMoodDeclaration(jsonResp);
-        }
-
         String cmdId = resolveCommandId(command);
         if (isModelDeepSearchFollowUp && RagDeepSearchCommands.isMetaCommandId(cmdId)) {
             LOGGER.warn("[B5] model_deepsearch_loop_blocked bot={}", getName());
@@ -916,13 +1113,13 @@ public class AgentConversationData {
 
         if (!isFollowUpDecision && maybeModelRequestedDeepSearch(
                 command, cmdId, lastUserMsgForRag, relayInitiator, onCharacterEvent, onErrMsg, completer,
-                historyWithWrappedStatus, lastEvent)) {
+                historyWithWrappedStatus, lastEvent, turnTicket)) {
             return;
         }
 
         if (!isFollowUpDecision && maybePostDecisionRetry(
                 command, lastUserMsgForRag, relayInitiator, onCharacterEvent, onErrMsg, completer,
-                historyWithWrappedStatus, lastEvent)) {
+                historyWithWrappedStatus, lastEvent, turnTicket)) {
             return;
         }
 
@@ -964,22 +1161,6 @@ public class AgentConversationData {
                 invalidTokens.add(b.rawToken());
             }
         }
-        this.pendingSegmentActions = List.copyOf(validBoundaries);
-        this.pendingChunks = List.copyOf(parsed.chunks());
-        this.pendingInvalidMarkers = List.copyOf(invalidTokens);
-        // DESIGN.md §3 (truthfulness): an unknown marker is NOT silently dropped. Report it to the
-        // MODEL here via an InfoMessage so the AI knows that gesture did not fire and cannot claim it
-        // did. (The player-facing chat line is emitted in AgentSideEffects — Workstream 6.) Do NOT
-        // call markSpeakingFor here (decision 4 — it stays at AgentSideEffects:63).
-        if (!invalidTokens.isEmpty()) {
-            LOGGER.warn("[Bodylang] bot={} emitted unknown gesture marker(s): {}", getName(), invalidTokens);
-            addEventToQueue(new InfoMessage(String.format(
-                    "Note: the gesture marker(s) %s are not valid and were NOT performed. "
-                    + "Valid gestures are: greeting, nod_head, shake_head, victory. "
-                    + "Do not claim you performed an invalid gesture.",
-                    String.join(", ", invalidTokens))));
-        }
-
         LOGGER.info("[AICommandBridge/processCharWithAPI]: Processed LLM response: message={} command={}",
                 strippedMessage, command);
         // --- Peer-talk restraint (masterplan/peer-talk-restraint-plan.md), Workstreams 1 & 4 ---
@@ -993,45 +1174,59 @@ public class AgentConversationData {
         boolean substantiveReply = !strippedMessage.isEmpty()
                 || (cmdId != null && !"idle".equals(cmdId))   // a real, non-idle command counts
                 || !validBoundaries.isEmpty();                 // a valid gesture counts
-        try {
-            // Fire the CharacterMessage when there is stripped text, a command, OR at least one valid
-            // gesture boundary — a marker-only message ("[bl:greeting]") strips to empty text but must
-            // still dispatch so its gesture fires via the TTS/segment path.
-            if (!strippedMessage.isEmpty() || command != null || !validBoundaries.isEmpty()) {
-                registerPendingLearnCandidate();
-                mod.getAIPersistantData().addAssistantMessage(strippedMessage, mod.getPlayer2APIService());
-                onCharacterEvent.accept(new Event.CharacterMessage(strippedMessage, command, this, relayInitiator));
-                // Substantive reply to a peer turn: grow the peer-reply streak. (The dispatch condition
-                // above is intentionally BROADER than substantiveReply — it lets marker-only/blank-command
-                // turns through — so the counter is gated on substantiveReply, not on dispatch.)
-                if (isPeerTurn && substantiveReply) {
-                    this.consecutivePeerReplies++;
+        synchronized (this) {
+            if (!conversationTurnGate.accepts(turnTicket)) {
+                LOGGER.info("Discarding stale model side effects after authenticated owner stop for bot={}", getName());
+                releaseProcessing(turnTicket);
+                return;
+            }
+            this.pendingSegmentActions = List.copyOf(validBoundaries);
+            this.pendingChunks = List.copyOf(parsed.chunks());
+            this.pendingInvalidMarkers = List.copyOf(invalidTokens);
+            // DESIGN.md §3 (truthfulness): an unknown marker is NOT silently dropped. Report it to the
+            // MODEL here via an InfoMessage so the AI knows that gesture did not fire and cannot claim it
+            // did. (The player-facing chat line is emitted in AgentSideEffects — Workstream 6.) Do NOT
+            // call markSpeakingFor here (decision 4 — it stays at AgentSideEffects:63).
+            if (!invalidTokens.isEmpty()) {
+                LOGGER.warn("[Bodylang] bot={} emitted unknown gesture marker(s): {}", getName(), invalidTokens);
+                addEventToQueue(new InfoMessage(String.format(
+                        "Note: the gesture marker(s) %s are not valid and were NOT performed. "
+                        + "Valid gestures are: greeting, nod_head, shake_head, victory. "
+                        + "Do not claim you performed an invalid gesture.",
+                        String.join(", ", invalidTokens))));
+            }
+            try {
+                // Fire the CharacterMessage when there is stripped text, a command, OR at least one valid
+                // gesture boundary — a marker-only message ("[bl:greeting]") strips to empty text but must
+                // still dispatch so its gesture fires via the TTS/segment path.
+                if (!strippedMessage.isEmpty() || command != null || !validBoundaries.isEmpty()) {
+                    registerPendingLearnCandidate();
+                    mod.getAIPersistantData().addAssistantMessage(strippedMessage, mod.getPlayer2APIService());
+                    onCharacterEvent.accept(new Event.CharacterMessage(strippedMessage, command, this, relayInitiator));
+                    // Substantive reply to a peer turn: grow the peer-reply streak. (The dispatch condition
+                    // above is intentionally BROADER than substantiveReply — it lets marker-only/blank-command
+                    // turns through — so the counter is gated on substantiveReply, not on dispatch.)
+                    if (isPeerTurn && substantiveReply) {
+                        this.consecutivePeerReplies++;
+                    }
+                } else {
+                    LOGGER.warn(
+                            "[AICommandBridge/processChatWithAPI/onLLMResponse]: Generated null llm message and command");
                 }
-            } else {
-                LOGGER.warn(
-                        "[AICommandBridge/processChatWithAPI/onLLMResponse]: Generated null llm message and command");
+            } catch (Exception e) {
+                LOGGER.error("[AICommandBridge/processChatWithAPI/onLLMResponse]: ERROR RUNNING SIDE EFFECTS, errMsg={}",
+                        e.getMessage());
+            } finally {
+                // Peer-talk counter reset/credit — evaluated after both dispatch branches.
+                if (!isPeerTurn) {
+                    this.consecutivePeerReplies = 0;
+                } else if (!substantiveReply) {
+                    LOGGER.debug("peer_talk_silence bot={} streak_before={}", getName(), this.consecutivePeerReplies);
+                    this.consecutivePeerReplies = 0;
+                }
+                acknowledgeCommandFinishRoundIfComplete(lastEvent, command);
+                releaseProcessing(turnTicket);
             }
-        } catch (Exception e) {
-            LOGGER.error("[AICommandBridge/processChatWithAPI/onLLMResponse]: ERROR RUNNING SIDE EFFECTS, errMsg={}",
-                    e.getMessage());
-        } finally {
-            // Peer-talk counter reset/credit — evaluated AFTER the if/else so it covers BOTH branches
-            // (genuine silence {message:"",command:""} takes the DISPATCH branch because `command` is a
-            // raw "" not null at :648-649; the else fires only for rare all-null). Never key silence on
-            // the else.
-            if (!isPeerTurn) {
-                // Any non-CharacterMessage head (a UserMessage or a command-finish InfoMessage) is
-                // human-driven activity and breaks the peer-reply streak.
-                this.consecutivePeerReplies = 0;
-            } else if (!substantiveReply) {
-                // The bot chose silence (empty text AND idle/blank cmdId AND no gesture) — the desired
-                // outcome (no chat/TTS/relay downstream at AgentSideEffects:69). Credit it and stop
-                // nagging. DESIGN.md §3: silence is not a failure — debug log only, no player/model report.
-                LOGGER.debug("peer_talk_silence bot={} streak_before={}", getName(), this.consecutivePeerReplies);
-                this.consecutivePeerReplies = 0;
-            }
-            acknowledgeCommandFinishRoundIfComplete(lastEvent, command);
-            this.isProcessing = false;
         }
     }
 
@@ -1054,7 +1249,8 @@ public class AgentConversationData {
             Consumer<String> onErrMsg,
             LLMCompleter completer,
             ConversationHistory historyWithWrappedStatus,
-            Event lastEvent) {
+            Event lastEvent,
+            long turnTicket) {
         Player2ServerRuntimeConfig config = Player2ServerConfigHolder.get();
         if (!config.isEnableDeepCheckRephrase() || !RagDeepSearchCommands.isMetaCommandId(cmdId)) {
             return false;
@@ -1085,10 +1281,15 @@ public class AgentConversationData {
             return false;
         }
 
-        deepCheckAttemptsThisTurn++;
-
-        if (config.isEnableDeepCheckMessage()) {
-            addEventToQueue(new InfoMessage("Let me check the command list for a better match."));
+        synchronized (this) {
+            if (!conversationTurnGate.accepts(turnTicket)) {
+                releaseProcessing(turnTicket);
+                return true;
+            }
+            deepCheckAttemptsThisTurn++;
+            if (config.isEnableDeepCheckMessage()) {
+                addEventToQueue(new InfoMessage("Let me check the command list for a better match."));
+            }
         }
 
         RetrievalConfidenceThresholds thresholds = RetrievalConfidenceThresholds.fromConfig(config);
@@ -1111,20 +1312,26 @@ public class AgentConversationData {
             return false;
         }
 
-        applyRetrievalToPrompt(retriever, applied);
-        lastRagPromptSource = "model_deepsearch";
-        lastDeepCheckTriggerReason = "model_requested";
-        LOGGER.info("[B5] model_deepsearch_ok source={} bot={}", applied.promptSource(), getName());
+        synchronized (this) {
+            if (!conversationTurnGate.accepts(turnTicket)) {
+                releaseProcessing(turnTicket);
+                return true;
+            }
+            applyRetrievalToPrompt(retriever, applied);
+            lastRagPromptSource = "model_deepsearch";
+            lastDeepCheckTriggerReason = "model_requested";
+            LOGGER.info("[B5] model_deepsearch_ok source={} bot={}", applied.promptSource(), getName());
 
-        // Rebuild the wrapped copy so the newly-retrieved command set reaches the user tail (the prior
-        // copy still carries the first-pass block). System message is not mutated mid-turn.
-        ConversationHistory followUpHistory = rebuildWrappedStatusForFollowUp();
-        Consumer<JsonObject> followUp = jsonResp -> handleLlmResponse(
-                jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
-                followUpHistory, lastUserMsgForRag, true, true);
-        completer.processToJson(
-                mod.getPlayer2APIService(), followUpHistory, followUp, onErrMsg, true, AiTaskClass.DECISION);
-        return true;
+            // Rebuild the wrapped copy so the newly-retrieved command set reaches the user tail (the prior
+            // copy still carries the first-pass block). System message is not mutated mid-turn.
+            ConversationHistory followUpHistory = rebuildWrappedStatusForFollowUp();
+            Consumer<JsonObject> followUp = jsonResp -> handleLlmResponse(
+                    jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
+                    followUpHistory, lastUserMsgForRag, true, true, turnTicket);
+            submitDecisionIfCurrent(turnTicket, completer, followUpHistory,
+                    followUp, onErrMsg, "deep-search-follow-up", true);
+            return true;
+        }
     }
 
     private void applyRetrievalToPrompt(ToolRetriever retriever, RagDeepCheckPipeline.ApplyResult applied) {
@@ -1189,7 +1396,8 @@ public class AgentConversationData {
             Consumer<String> onErrMsg,
             LLMCompleter completer,
             ConversationHistory historyWithWrappedStatus,
-            Event lastEvent) {
+            Event lastEvent,
+            long turnTicket) {
         Player2ServerRuntimeConfig config = Player2ServerConfigHolder.get();
         if (!config.isEnableDeepCheckRephrase() || postDecisionRetryAttempted) {
             return false;
@@ -1211,7 +1419,13 @@ public class AgentConversationData {
             return false;
         }
 
-        postDecisionRetryAttempted = true;
+        synchronized (this) {
+            if (!conversationTurnGate.accepts(turnTicket)) {
+                releaseProcessing(turnTicket);
+                return true;
+            }
+            postDecisionRetryAttempted = true;
+        }
         MinecraftServer server = mod.getPlayer().getServer();
         UUID ownerUuid = mod.getOwner() != null ? mod.getOwner().getUUID() : null;
         ToolRetriever retriever = RagIndex.getForOwner(server, ownerUuid);
@@ -1222,7 +1436,13 @@ public class AgentConversationData {
         RetrievalConfidenceThresholds thresholds = RetrievalConfidenceThresholds.fromConfig(config);
         RetrievalResult firstPass = retriever.retrieveWithConfidence(
                 lastRagGoalText, config.getRagTopKClamped(), null, thresholds);
-        deepCheckAttemptsThisTurn++;
+        synchronized (this) {
+            if (!conversationTurnGate.accepts(turnTicket)) {
+                releaseProcessing(turnTicket);
+                return true;
+            }
+            deepCheckAttemptsThisTurn++;
+        }
 
         String enrichedGoal = lastRagGoalText + " (model chose command: " + cmdId + ")";
         RagDeepCheckPipeline.ApplyResult applied = RagDeepCheckPipeline.apply(
@@ -1241,19 +1461,25 @@ public class AgentConversationData {
             return false;
         }
 
-        applyRetrievalToPrompt(retriever, applied);
-        lastRagPromptSource = applied.promptSource();
-        lastDeepCheckTriggerReason = "post_decision_out_of_top_k";
+        synchronized (this) {
+            if (!conversationTurnGate.accepts(turnTicket)) {
+                releaseProcessing(turnTicket);
+                return true;
+            }
+            applyRetrievalToPrompt(retriever, applied);
+            lastRagPromptSource = applied.promptSource();
+            lastDeepCheckTriggerReason = "post_decision_out_of_top_k";
 
-        // Rebuild the wrapped copy so the re-retrieved command set reaches the user tail. System message
-        // is not mutated mid-turn.
-        ConversationHistory retryHistory = rebuildWrappedStatusForFollowUp();
-        Consumer<JsonObject> retryHandler = jsonResp -> handleLlmResponse(
-                jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
-                retryHistory, lastUserMsgForRag, true, false);
-        completer.processToJson(
-                mod.getPlayer2APIService(), retryHistory, retryHandler, onErrMsg, true, AiTaskClass.DECISION);
-        return true;
+            // Rebuild the wrapped copy so the re-retrieved command set reaches the user tail. System message
+            // is not mutated mid-turn.
+            ConversationHistory retryHistory = rebuildWrappedStatusForFollowUp();
+            Consumer<JsonObject> retryHandler = jsonResp -> handleLlmResponse(
+                    jsonResp, lastEvent, relayInitiator, onCharacterEvent, onErrMsg, completer,
+                    retryHistory, lastUserMsgForRag, true, false, turnTicket);
+            submitDecisionIfCurrent(turnTicket, completer, retryHistory,
+                    retryHandler, onErrMsg, "post-decision-retry", true);
+            return true;
+        }
     }
 
     private void applyRagPromptFromCache(Player2ServerRuntimeConfig config) {
@@ -1313,6 +1539,7 @@ public class AgentConversationData {
     public void onEvent(Event event) {
         if (event instanceof Event.UserMessage) {
             commandAwaitingFinishAck = null;
+            repeatedCommandFailureGuard.reset();
         }
         addEventToQueue(event);
     }
@@ -1437,6 +1664,7 @@ public class AgentConversationData {
     public void onCommandFinish(AgentSideEffects.CommandExecutionStopReason stopReason) {
         LOGGER.info("on command finish for cmd={}", stopReason.commandName());
         if (stopReason instanceof CommandExecutionStopReason.Finished) {
+            repeatedCommandFailureGuard.reset();
             LOGGER.info("on command={} finish case", stopReason.commandName());
             if (shouldIgnoreGreetingDance && stopReason.commandName().contains("bodylang greeting")) {
                 LOGGER.info("Skipping on command finish because should ignore greeting dance");
@@ -1454,16 +1682,41 @@ public class AgentConversationData {
                 String note = ((CommandExecutionStopReason.Finished) stopReason).note();
                 enqueueCommandFinishPrompt(stopReason.commandName(), note);
             }
-        } else if (stopReason instanceof CommandExecutionStopReason.Error) {
+        } else if (stopReason instanceof CommandExecutionStopReason.Error error) {
+            String boundedReason = RepeatedCommandFailureGuard.boundedFailureReason(error.errMsg());
+            RepeatedCommandFailureGuard.Decision decision = repeatedCommandFailureGuard.record(
+                    stopReason.commandName(), boundedReason);
+            if (decision == RepeatedCommandFailureGuard.Decision.HALT_AUTOMATIC_RETRY) {
+                String commandId = RepeatedCommandFailureGuard.commandId(stopReason.commandName());
+                LOGGER.warn("Stopping repeated command-error feedback loop for bot={} commandId={}",
+                        getName(), commandId);
+                deferInfo(new InfoMessage(
+                        "Automatic retrying stopped after the command '" + commandId
+                                + "' failed twice with the same error. Do not claim it succeeded or retry it "
+                                + "unless the player explicitly asks."));
+                reportRepeatedCommandFailureStopped(commandId);
+                commandAwaitingFinishAck = null;
+                return;
+            }
             LOGGER.info("adding cmd={} to queue because it errored", stopReason.commandName());
             addEventToQueue(new InfoMessage(String.format(
                     "Command feedback: %s FAILED. The error was %s.",
-                    stopReason.commandName(),
-                    ((CommandExecutionStopReason.Error) stopReason).errMsg())));
+                    RepeatedCommandFailureGuard.boundedCommandForModel(stopReason.commandName()),
+                    boundedReason)));
         } else {
+            repeatedCommandFailureGuard.reset();
             LOGGER.info("Skipping command stop for cmd={} because it was cancelled", stopReason.commandName());
         }
         // (if canceled dont modify queue)
+    }
+
+    private void reportRepeatedCommandFailureStopped(String commandId) {
+        if (!(mod.getOwner() instanceof ServerPlayer owner) || owner.getServer() == null) {
+            return;
+        }
+        AgentSideEffects.broadcastChatToPlayer(owner.getServer(),
+                Component.translatable("message.playerengine.agent.repeated_command_stopped", getName(), commandId),
+                owner);
     }
 
     // Utils:

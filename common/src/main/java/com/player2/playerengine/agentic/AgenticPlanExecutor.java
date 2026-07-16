@@ -8,6 +8,14 @@ import com.player2.playerengine.executor.RollbackPolicy;
 import com.player2.playerengine.executor.StepState;
 import com.player2.playerengine.executor.TaskStepExecutorAdapter;
 import com.player2.playerengine.tasks.base.Task;
+import com.player2.playerengine.tasks.farming.FarmFeedback;
+import com.player2.playerengine.tasks.farming.FarmTaskOutcome;
+import com.player2.playerengine.tasks.farming.SetupFarmTask;
+import com.player2.playerengine.tasks.farming.HarvestFarmOutcome;
+import com.player2.playerengine.tasks.farming.HarvestFarmTask;
+import com.player2.playerengine.tasks.farming.PlantFarmFeedback;
+import com.player2.playerengine.tasks.farming.PlantFarmOutcome;
+import com.player2.playerengine.tasks.farming.PlantFarmTask;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.BiConsumer;
@@ -128,7 +136,8 @@ public final class AgenticPlanExecutor {
             finishOnServer(mod, onTerminal, false, message);
             return;
         }
-        mod.runUserTaskTracked(step.id(), step.kind(), taskOpt.get(), RollbackPolicy.NONE, () -> {
+        Task task = taskOpt.get();
+        mod.runUserTaskTracked(step.id(), step.kind(), task, RollbackPolicy.NONE, () -> {
             boolean succeeded = false;
             if (mod.getStepExecutorAdapter() instanceof TaskStepExecutorAdapter adapter) {
                 succeeded = adapter.getLastCompletedExecution()
@@ -140,15 +149,30 @@ public final class AgenticPlanExecutor {
                 // state (e.g. resolve_storage_chest -> "could_not_obtain_chest_materials"), so the
                 // NPC model sees an actionable cause rather than a bare "step failed".
                 String reason = context.runState().progressForKind(step.kind());
-                String message = (reason != null && !reason.isBlank())
-                        ? step.kind() + ": " + reason
-                        : "Step failed: " + step.kind();
+                String message;
+                if (task instanceof SetupFarmTask farmTask) {
+                    FarmTaskOutcome outcome = farmTask.outcome();
+                    message = FarmFeedback.setupModel(outcome);
+                    mod.reportAgenticProgress(FarmFeedback.setupPlayer(outcome), true);
+                } else if (task instanceof HarvestFarmTask harvestTask) {
+                    HarvestFarmOutcome outcome = harvestTask.outcome();
+                    message = FarmFeedback.harvestModel(outcome);
+                    mod.reportAgenticProgress(FarmFeedback.harvestPlayer(outcome), true);
+                } else if (task instanceof PlantFarmTask plantTask) {
+                    PlantFarmOutcome outcome = plantTask.outcome();
+                    message = PlantFarmFeedback.model(outcome);
+                    mod.reportAgenticProgress(PlantFarmFeedback.player(outcome), true);
+                } else {
+                    message = (reason != null && !reason.isBlank())
+                            ? step.kind() + ": " + reason
+                            : "Step failed: " + step.kind();
+                    mod.reportAgenticProgress(message, true);
+                }
                 // Player-facing terminal failure broadcast (C4 WS2): emit the SAME reason string the
                 // model receives (via the onTerminal -> finishWithError InfoMessage path), as a
                 // milestone (bypasses the throttle), BEFORE terminal("failed", ...) sets the run-state
                 // terminal flag — otherwise the post-terminal guard in reportAgenticProgress's callers
                 // would suppress this line. Reporting only; termination/loop semantics are unchanged.
-                mod.reportAgenticProgress(message, true);
                 context.runState().terminal("failed", message);
                 LOGGER.warn("[Agentic] step {} failed: {}", step.kind(), message);
                 // WS5 teardown: drop all chain reservations on the step-failure terminal so none
@@ -156,6 +180,22 @@ public final class AgenticPlanExecutor {
                 context.memory().clearMaterialReservations();
                 finishOnServer(mod, onTerminal, false, message);
                 return;
+            }
+            if (task instanceof SetupFarmTask farmTask) {
+                FarmTaskOutcome outcome = farmTask.outcome();
+                String modelFeedback = FarmFeedback.setupModel(outcome);
+                context.runState().setFarmProgress(modelFeedback);
+                mod.reportAgenticProgress(FarmFeedback.setupPlayer(outcome), true);
+            } else if (task instanceof HarvestFarmTask harvestTask) {
+                HarvestFarmOutcome outcome = harvestTask.outcome();
+                String modelFeedback = FarmFeedback.harvestModel(outcome);
+                context.runState().setFarmProgress(modelFeedback);
+                mod.reportAgenticProgress(FarmFeedback.harvestPlayer(outcome), true);
+            } else if (task instanceof PlantFarmTask plantTask) {
+                PlantFarmOutcome outcome = plantTask.outcome();
+                String modelFeedback = PlantFarmFeedback.model(outcome);
+                context.runState().setFarmProgress(modelFeedback);
+                mod.reportAgenticProgress(PlantFarmFeedback.player(outcome), true);
             }
             // Post-deposit auto-registration hook (C5 / Decision 9): best-effort, synchronous-cheap,
             // never fails or delays the run. Wrapped in WaypointAutoRegistrar's own catch-all.

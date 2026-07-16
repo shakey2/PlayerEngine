@@ -91,15 +91,13 @@ public class Player2APIService {
     */
    public JsonObject completeConversation(ConversationHistory conversationHistory, AiTaskClass taskClass) throws Exception {
       JsonObject requestBody = new JsonObject();
-      JsonArray messagesArray = new JsonArray();
-
-      for (JsonObject msg : conversationHistory.getListJSON()) {
-         messagesArray.add(LogEgressGuard.cappedMessage(msg));
-      }
+      JsonArray messagesArray = LogEgressGuard.cappedMessages(
+            conversationHistory.getListJSON(), "Player2APIService.completeConversation");
       String lastMessageForDebug = LogEgressGuard.capForModel(
             conversationHistory.getListJSON().get(conversationHistory.getListJSON().size() - 1).toString(), "debug");
 
       requestBody.add("messages", messagesArray);
+      LogEgressGuard.applyChatCompletionRequestCaps(requestBody, "Player2APIService.completeConversation");
       // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 2a: log outgoing request message count and body char length (NOT tokens)
       if (LLMCompleter.DEBUG_LLM_PROBE) {
          int dbgMsgCount = messagesArray.size();
@@ -142,13 +140,11 @@ public class Player2APIService {
     */
    public String completeConversationToString(ConversationHistory conversationHistory, AiTaskClass taskClass) throws Exception {
       JsonObject requestBody = new JsonObject();
-      JsonArray messagesArray = new JsonArray();
-
-      for (JsonObject msg : conversationHistory.getListJSON()) {
-         messagesArray.add(LogEgressGuard.cappedMessage(msg));
-      }
+      JsonArray messagesArray = LogEgressGuard.cappedMessages(
+            conversationHistory.getListJSON(), "Player2APIService.completeConversationToString");
 
       requestBody.add("messages", messagesArray);
+      LogEgressGuard.applyChatCompletionRequestCaps(requestBody, "Player2APIService.completeConversationToString");
       // [DEBUG-INSTR:llm-latency-2026-06-13] PROBE 2a (toString variant): log outgoing request message count and body char length (NOT tokens)
       if (LLMCompleter.DEBUG_LLM_PROBE) {
          int dbgMsgCount = messagesArray.size();
@@ -197,6 +193,10 @@ public class Player2APIService {
       return completeConversationToString(conversationHistory, AiTaskClass.SUMMARIZATION);
    }
 
+   static boolean canUseNamedFallback(JoulesCache.JoulesSnapshot snapshot, BudgetThresholds thresholds) {
+      return JoulesCache.isFreshPatronSnapshot(snapshot, thresholds);
+   }
+
    private Map<String, JsonElement> sendChatCompletionRequest(JsonObject requestBody, AiTaskClass taskClass) throws Exception {
       Player2PayerResolution.ApiBillingContext billing = billingOrFallback();
       String billingKey = billing != null ? billing.billingKey() : null;
@@ -238,38 +238,52 @@ public class Player2APIService {
       if (result == BudgetTracker.BudgetCheckResult.SOFT_LIMIT) {
          // Profile routing is always a server-level decision regardless of payer mode
          String fallbackProfile = config.getFallbackProfile();
+         boolean implicitDefaultFallback = fallbackProfile == null || fallbackProfile.isBlank();
          boolean isDedicatedProxy = config.isDedicatedClientProxy();
 
-         if (config.getBudgetFallbackBehavior() == BudgetFallbackBehavior.HARD_STOP || fallbackProfile == null || isDedicatedProxy) {
-            boolean shouldMsg = BudgetTracker.shouldSendSoftMessage(billingKey)
-                    || JoulesCache.shouldSendSoftMessage(billingKey);
-            if (shouldMsg && payerToNotify != null) {
-               payerToNotify.sendSystemMessage(Component.translatable(
-                       "message.playerengine.budget.soft_limit_paused"
-               ).withStyle(ChatFormatting.YELLOW));
-            }
-            throw new Exception(StopReason.BUDGET_HARD_LIMIT.name() + ":soft_limit_hard_stop");
+         if (config.getBudgetFallbackBehavior() == BudgetFallbackBehavior.HARD_STOP) {
+            throw softLimitHardStop(billingKey, payerToNotify);
          }
 
-         // SWITCH_PROFILE path
-         java.util.Optional<String> profileUrl = ProfileUrlResolver.resolve(this, fallbackProfile);
-         if (profileUrl.isPresent()) {
+         // SWITCH_PROFILE + no named target means an explicit step-down to the implicit Default
+         // profile. Return before B3 so task-class routing cannot promote this call back to named.
+         if (implicitDefaultFallback) {
             boolean shouldMsg = BudgetTracker.shouldSendSoftMessage(billingKey)
                     || JoulesCache.shouldSendSoftMessage(billingKey);
             if (shouldMsg && payerToNotify != null) {
                payerToNotify.sendSystemMessage(Component.translatable(
-                       "message.playerengine.budget.soft_limit_switch", fallbackProfile
+                       "message.playerengine.budget.soft_limit_switch",
+                       Component.translatable("message.playerengine.profile.default")
                ).withStyle(ChatFormatting.YELLOW));
             }
-            Player2HTTPUtils.setProfileBaseUrlOverride(profileUrl.get());
-            try {
-               return api("POST", "/v1/chat/completions", requestBody);
-            } finally {
-               Player2HTTPUtils.clearProfileBaseUrlOverride();
-            }
+            return api("POST", "/v1/chat/completions", requestBody);
          }
-         // Profile not found — fall through to normal call with a warning
-         LOGGER.warn("sendChatCompletionRequest: fallback profile '{}' could not be resolved; using default", fallbackProfile);
+
+         // A named fallback is allowed only for a fresh patron snapshot, using the same gate as B3.
+         // Named URL rewriting is unavailable in dedicated client-proxy mode.
+         if (isDedicatedProxy || !canUseNamedFallback(joulesSnap, thresholds)) {
+            throw softLimitHardStop(billingKey, payerToNotify);
+         }
+
+         java.util.Optional<String> profileUrl = ProfileUrlResolver.resolve(this, fallbackProfile);
+         if (profileUrl.isEmpty()) {
+            LOGGER.warn("sendChatCompletionRequest: configured named fallback could not be resolved; stopping at soft limit");
+            throw softLimitHardStop(billingKey, payerToNotify);
+         }
+         boolean shouldMsg = BudgetTracker.shouldSendSoftMessage(billingKey)
+                 || JoulesCache.shouldSendSoftMessage(billingKey);
+         if (shouldMsg && payerToNotify != null) {
+            payerToNotify.sendSystemMessage(Component.translatable(
+                    "message.playerengine.budget.soft_limit_switch",
+                    fallbackProfile
+            ).withStyle(ChatFormatting.YELLOW));
+         }
+         Player2HTTPUtils.setProfileBaseUrlOverride(profileUrl.get());
+         try {
+            return api("POST", "/v1/chat/completions", requestBody);
+         } finally {
+            Player2HTTPUtils.clearProfileBaseUrlOverride();
+         }
       }
       // --- end budget guard ---
 
@@ -290,6 +304,17 @@ public class Player2APIService {
       // --- end B3 routing ---
 
       return api("POST", "/v1/chat/completions", requestBody);
+   }
+
+   private static Exception softLimitHardStop(String billingKey, ServerPlayer payerToNotify) {
+      boolean shouldMsg = BudgetTracker.shouldSendSoftMessage(billingKey)
+              || JoulesCache.shouldSendSoftMessage(billingKey);
+      if (shouldMsg && payerToNotify != null) {
+         payerToNotify.sendSystemMessage(Component.translatable(
+                 "message.playerengine.budget.soft_limit_paused"
+         ).withStyle(ChatFormatting.YELLOW));
+      }
+      return new Exception(StopReason.BUDGET_HARD_LIMIT.name() + ":soft_limit_hard_stop");
    }
 
    /**
